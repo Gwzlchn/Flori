@@ -798,7 +798,7 @@ class TestPromptLockedAPI:
 
     async def test_activate_locked_403(self, client):
         r = await client.post(
-            "/api/prompts/document/06_semantic_attestation/activate",
+            "/api/prompts/audio/04_semantic_attestation/activate",
             json={"scope": "global", "version": None},
         )
         assert r.status_code == 403

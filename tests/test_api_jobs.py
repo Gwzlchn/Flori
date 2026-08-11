@@ -1237,7 +1237,7 @@ class TestProviderVersions:
         assert provs["codex-cli"]["default_model"] in provs["codex-cli"]["models"]
         assert provs["codex-cli"]["default_model"] == "gpt-5.6-sol"
         assert provs["codex-cli"]["default_reasoning_effort"] == "xhigh"
-        assert provs["claude-cli"]["default_model"] == "opus5"
+        assert provs["claude-cli"]["default_model"] == "claude-opus-5"
         assert provs["claude-cli"]["default_reasoning_effort"] == "xhigh"
         assert provs["qoder-cli"]["default_model"] == "ultimate"
         assert provs["qoder-cli"]["default_reasoning_effort"] == "max"
@@ -1247,13 +1247,13 @@ class TestProviderVersions:
 
     @pytest.mark.asyncio
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("pipeline", "smart", "review"), [
-        ("video", "11_smart", "12_review"),
-        ("document", "05_smart", "08_review"),
-        ("audio", "04_smart_podcast", "05_review"),
+    @pytest.mark.parametrize(("pipeline", "roles"), [
+        ("video", ("11_smart", "11_semantic_attestation", "12_concepts", "12_review")),
+        ("document", ("05_smart", "07_concepts", "08_review")),
+        ("audio", ("04_smart_podcast", "04_semantic_attestation", "05_concepts", "05_review")),
     ])
     async def test_rerun_smart_uses_pipeline_roles(
-        self, pipeline, smart, review, client, app, db, mock_redis,
+        self, pipeline, roles, client, app, db, mock_redis,
     ):
         jid = f"j_role_{pipeline}"
         db.create_job(Job(
@@ -1264,9 +1264,10 @@ class TestProviderVersions:
         await storage.write_file(jid, "job.json", b'{"id":"x"}')
         resp = await client.post(f"/api/jobs/{jid}/rerun-smart", json={"provider": "claude-cli"})
         assert resp.status_code == 200
-        assert resp.json()["from_step"] == smart and resp.json()["review_step"] == review
+        assert resp.json()["from_step"] == roles[0]
+        assert resp.json()["review_step"] == roles[-1]
         doc = json.loads((await storage.read_file(jid, "job.json")).decode())
-        assert doc["ai_overrides"] == {smart: "claude-cli", review: "claude-cli"}
+        assert doc["ai_overrides"] == {step: "claude-cli" for step in roles}
 
 
 class TestRebuildP2c:

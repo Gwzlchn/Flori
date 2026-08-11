@@ -34,7 +34,8 @@ SEMANTIC_DEFINITION_FORMAT_VERSION = 1
 # prompt 绑定与锁定、显式声明的工具链语义版本。
 SEMANTIC_STEP_KEYS = frozenset({
     "name", "module", "version", "scope", "outputs", "output_policy",
-    "fan_in", "depends_on", "rules", "condition", "capability_rules", "ai",
+    "fan_in", "depends_on", "rules", "condition", "allow_failure",
+    "capability_rules", "ai",
     "prompt_template", "prompt_locked", "toolchain",
 })
 
@@ -44,6 +45,8 @@ RUNTIME_STEP_KEYS = frozenset({
     "label", "pool", "timeout_sec", "timeout_per_min", "timeout_max_sec",
     "retries", "tags", "image", "on_complete", "weight", "concurrency",
     "worker_id", "variables", "extends",
+    "effects_require_current_manifest",
+    "effects_required_outputs",
 })
 
 # expand_pipeline_steps 注入的展开键:属运行节点身份,不属语义定义。
@@ -287,6 +290,10 @@ def build_step_semantic_definition(
     definition: dict[str, object] = {}
     for key, default in _SEMANTIC_DEFAULTS.items():
         definition[key] = normalized.get(key, default)
+    if "allow_failure" in normalized:
+        if type(normalized["allow_failure"]) is not bool:
+            raise SemanticDefinitionError("step_config.allow_failure: must be bool")
+        definition["allow_failure"] = normalized["allow_failure"]
     # version 语义与既有 def_digest 对齐:缺省 "1",数字与字符串等价归一为 str。
     version = definition["version"]
     definition["version"] = str(version) if version is not None else "1"

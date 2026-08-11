@@ -72,9 +72,22 @@ class JobFinalizer:
         for job in jobs:
             indexed = False
             for step, cfg in self.owner._get_pipeline_steps(job.pipeline).items():
-                effects = [
+                all_effects = [
                     effect for effect in (cfg.get("on_complete") or [])
-                    if isinstance(effect, dict) and effect.get("action") == "index_note"
+                    if isinstance(effect, dict)
+                ]
+                if not await self.owner._completion_effect_authorized(
+                    job.id, step, cfg, job=job,
+                ):
+                    logger.warning(
+                        "historical_completion_effect_not_authorized",
+                        job_id=job.id,
+                        step=step,
+                    )
+                    continue
+                effects = [
+                    effect for effect in all_effects
+                    if effect.get("action") == "index_note"
                 ]
                 for effect in effects:
                     indexed = (

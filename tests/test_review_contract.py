@@ -8,13 +8,18 @@ from pathlib import Path
 
 import pytest
 
+from shared.document_contract import canonical_quality_text
 from shared.models import LLMResponse
 from shared.review_contract import (
+    MAX_DOCUMENT_REVIEW_PACK_BYTES,
     MAX_REVIEW_SOURCE_AGGREGATE_BYTES,
     MAX_REVIEW_SOURCE_BYTES,
     MAX_REVIEW_SOURCES,
+    build_document_review_pack,
     completion_from_response,
+    downgrade_unbound_review_issue_quotes,
     parse_review,
+    persist_review_source,
     project_review,
     sha256_bytes,
     source_record,
@@ -54,6 +59,49 @@ def _payload(**changes):
 def _input():
     return {"artifact": "output/review_input.md", "sha256": "sha256:x",
             "bytes": 1, "chars": 1, "truncated": False, "sources": []}
+
+
+def test_only_exact_unbound_supported_quote_is_downgraded():
+    supported = {
+        "type": "traceability", "severity": "error", "dimension": "accuracy",
+        "claim": "结论", "message": "引用被模型改写",
+        "evidence_status": "supported",
+        "locator": {"source": "document", "quote": "近似引用"},
+    }
+    raw = _payload(issues=[supported])
+
+    downgraded, count = downgrade_unbound_review_issue_quotes(
+        raw, {"document": "这是严格原文。"},
+    )
+    issue = json.loads(downgraded)["issues"][0]
+
+    assert count == 1
+    assert issue == {
+        "type": "traceability", "severity": "error", "dimension": "accuracy",
+        "claim": "结论", "message": "引用被模型改写",
+        "evidence_status": "insufficient",
+        "reason": "model-provided quote did not match bound source exactly",
+    }
+
+
+@pytest.mark.parametrize("locator", [
+    {"source": "missing", "quote": "严格原文"},
+    {"source": "document", "quote": ""},
+    {"source": "document", "quote": "严格原文"},
+])
+def test_quote_downgrade_does_not_repair_invalid_or_exact_locators(locator):
+    raw = _payload(issues=[{
+        "type": "traceability", "severity": "warning", "dimension": "accuracy",
+        "claim": "结论", "message": "检查引用", "evidence_status": "supported",
+        "locator": locator,
+    }])
+
+    transformed, count = downgrade_unbound_review_issue_quotes(
+        raw, {"document": "严格原文"},
+    )
+
+    assert count == 0
+    assert transformed == raw
 
 
 @pytest.mark.parametrize(("provider", "reason", "status"), [
@@ -105,6 +153,28 @@ def test_completion_v2_persists_recomputable_terminal_proof(
     }
     assert completion["status"] == status
     assert completion["raw_error"] is raw_error
+
+
+def test_completion_projects_routing_audit_to_minimal_terminal_proof():
+    response = _response("qoder-cli", "success", raw={"is_error": False})
+    response.attempts = [{
+        "tier": "primary",
+        "provider": "qoder-cli",
+        "model": "ultimate",
+        "ok": True,
+        "requested_provider": "qoder-cli",
+        "requested_model": "ultimate",
+        "requested_reasoning_effort": None,
+        "reasoning_effort": "max",
+        "reasoning_effort_source": "provider_default",
+    }]
+
+    assert completion_from_response(response)["attempts"] == [{
+        "tier": "primary",
+        "provider": "qoder-cli",
+        "model": "ultimate",
+        "ok": True,
+    }]
 
 
 @pytest.mark.parametrize("reason", [False, 0, 1, [], {}, object()])
@@ -403,23 +473,65 @@ def _persisted_review(job):
     (job / "intermediate").mkdir()
     document_rel = "intermediate/document.json"
     quality_rel = "intermediate/quality.json"
-    (job / document_rel).write_text(
-        '{"schema_version":2,"job_id":"job","content_type":"document"}',
-        encoding="utf-8",
+    concepts_rel = "output/concepts.json"
+    document_value = {
+        "schema_version": 2,
+        "job_id": "job",
+        "content_type": "document",
+        "document_kind": "research_paper",
+        "source_profile": "scholarly_html",
+        "capabilities": ["html"],
+        "primary_source_id": "html",
+        "metadata": {"titles": {"original": "Test"}, "authors": []},
+        "sources": [],
+        "figures": [],
+        "tables": [],
+        "blocks": [{
+            "block_id": "blk_1", "parent_id": None, "order": 0,
+            "kind": "paragraph", "text": "source text",
+        }],
+    }
+    document_data = json.dumps(
+        document_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    (job / document_rel).write_bytes(document_data)
+    quality_value = {
+        "schema_version": 1, "job_id": "job", "status": "complete",
+        "reasons": [], "metrics": {},
+    }
+    (job / quality_rel).write_text(json.dumps(quality_value), encoding="utf-8")
+    (job / concepts_rel).write_text(
+        '{"summary":"摘要","key_terms":[]}', encoding="utf-8",
     )
-    (job / quality_rel).write_text(
-        '{"schema_version":1,"job_id":"job","status":"complete","reasons":[]}',
-        encoding="utf-8",
+    provenance_rel = "output/provenance/smart.json"
+    (job / provenance_rel).parent.mkdir(parents=True, exist_ok=True)
+    (job / provenance_rel).write_text(
+        '{"schema_version":1,"segments":[]}', encoding="utf-8",
     )
-    document, document_record = source_record(job, document_rel, label="document")
-    quality, quality_record = source_record(job, quality_rel, label="quality")
+    concepts_value = json.loads((job / concepts_rel).read_text(encoding="utf-8"))
+    document_pack = build_document_review_pack(
+        document_value,
+        document_data,
+        concepts_value,
+        {"schema_version": 1, "segments": []},
+    )
+    document, document_record = persist_review_source(
+        job, document_pack, label="document",
+    )
+    quality, quality_record = persist_review_source(
+        job, canonical_quality_text(quality_value, expected_job_id="job"),
+        label="quality",
+    )
+    concepts, concepts_record = source_record(job, concepts_rel, label="concepts")
     prompt_rel = "output/versions/review_input_openai_m_20260101-000000.md"
     (job / prompt_rel).write_text(
-        "prompt\n" + smart + document + quality, encoding="utf-8",
+        "prompt\n" + smart + document + quality + concepts, encoding="utf-8",
     )
     _, prompt_record = source_record(job, prompt_rel, label="prompt")
     prompt_record.pop("label")
-    prompt_record["sources"] = [smart_record, document_record, quality_record]
+    prompt_record["sources"] = [
+        smart_record, document_record, quality_record, concepts_record,
+    ]
     issue = {
         "type": "traceability", "severity": "warning", "dimension": "accuracy",
         "claim": "原文可定位", "message": "已定位", "evidence_status": "supported",
@@ -439,6 +551,7 @@ def _persisted_review(job):
         raw, score_keys, _response(), review_input=prompt_record,
         review_source_texts={
             "smart": smart, "document": document, "quality": quality,
+            "concepts": concepts,
         },
     )
     review.update({
@@ -449,6 +562,53 @@ def _persisted_review(job):
         },
     })
     return review
+
+
+def test_document_review_pack_is_bounded_and_prioritizes_bound_evidence():
+    blocks = [{
+        "block_id": f"blk_{index}",
+        "parent_id": None,
+        "order": index,
+        "kind": "heading" if index % 200 == 0 else "paragraph",
+        "text": ("重要内容" if index == 4999 else "填充段落") * 80,
+        "locator": {"html": {"dom_path": f"/html/body/p[{index + 1}]"}},
+    } for index in range(5000)]
+    document = {
+        "schema_version": 2,
+        "job_id": "job",
+        "content_type": "document",
+        "document_kind": "research_paper",
+        "source_profile": "scholarly_html",
+        "capabilities": ["html"],
+        "primary_source_id": "html",
+        "metadata": {"titles": {"original": "Large"}, "authors": []},
+        "sources": [],
+        "figures": [],
+        "tables": [],
+        "blocks": blocks,
+    }
+    source = json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    concepts = {"key_terms": [{
+        "term": "important",
+        "definition": "important",
+        "evidence_source_segment_ids": ["blk_4999"],
+    }]}
+    packed = build_document_review_pack(
+        document, source, concepts, {"schema_version": 1, "segments": []},
+    )
+    value = json.loads(packed)
+
+    assert len(packed.encode("utf-8")) <= MAX_DOCUMENT_REVIEW_PACK_BYTES
+    assert value["source"] == {
+        "artifact": "intermediate/document.json",
+        "bytes": len(source),
+        "sha256": sha256_bytes(source),
+    }
+    assert value["coverage"]["truncated"] is True
+    assert value["coverage"]["selected_bound_segment_ids"] == 1
+    assert "blk_4999" in {item["block_id"] for item in value["blocks"]}
 
 
 @pytest.mark.asyncio
@@ -464,6 +624,62 @@ async def test_persisted_review_verifier_accepts_complete_bound_artifact(tmp_pat
         review, job_id="job", pipeline="document", read_file=reader,
     )
     assert verified["review_reliable"] is True
+
+
+@pytest.mark.asyncio
+async def test_persisted_document_review_rejects_pack_after_full_source_changes(tmp_path):
+    job = tmp_path / "job"; job.mkdir()
+    review = _persisted_review(job)
+    document_path = job / "intermediate/document.json"
+    document = json.loads(document_path.read_text(encoding="utf-8"))
+    document["blocks"][0]["text"] = "tampered source text"
+    document_path.write_text(
+        json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    async def reader(rel):
+        path = job / rel
+        return path.read_bytes() if path.exists() else None
+
+    verified = await verify_persisted_review(
+        review, job_id="job", pipeline="document", read_file=reader,
+    )
+    assert verified["review_reliable"] is False
+    assert "document_review_pack_mismatch" in verified["reliability_reasons"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ["missing_concepts", "add_translation"])
+async def test_document_review_source_profile_excludes_translation_and_requires_concepts(
+    tmp_path, mutation,
+):
+    job = tmp_path / "job"; job.mkdir()
+    review = _persisted_review(job)
+    if mutation == "missing_concepts":
+        review["review_input"]["sources"] = [
+            item for item in review["review_input"]["sources"]
+            if item["label"] != "concepts"
+        ]
+    else:
+        translation = b'{"segments":[]}'
+        (job / "output/translation.json").write_bytes(translation)
+        review["review_input"]["sources"].append(
+            _source_record_for_test(
+                "translation", "output/translation.json", translation,
+            )
+        )
+
+    async def reader(rel):
+        path = job / rel
+        return path.read_bytes() if path.exists() else None
+
+    verified = await verify_persisted_review(
+        review, job_id="job", pipeline="document", read_file=reader,
+    )
+
+    assert verified["review_reliable"] is False
+    assert "document_source_profile_mismatch" in verified["reliability_reasons"]
 
 
 @pytest.mark.asyncio
@@ -753,7 +969,9 @@ async def test_persisted_review_reapplies_source_size_gate_before_decode_or_hash
     document = (job / document_record["artifact"]).read_bytes()
     quality_record = review["review_input"]["sources"][2]
     quality = (job / quality_record["artifact"]).read_bytes()
-    prompt = b"prompt\n" + oversized + document + quality
+    concepts_record = review["review_input"]["sources"][3]
+    concepts = (job / concepts_record["artifact"]).read_bytes()
+    prompt = b"prompt\n" + oversized + document + quality + concepts
     (job / review["review_input"]["artifact"]).write_bytes(prompt)
     review["review_input"].update({
         "sha256": sha256_bytes(prompt), "bytes": len(prompt), "chars": len(prompt),
@@ -772,6 +990,26 @@ async def test_persisted_review_reapplies_source_size_gate_before_decode_or_hash
     )
     assert verified["review_reliable"] is False
     assert any("too_large" in reason for reason in verified["reliability_reasons"])
+
+
+@pytest.mark.asyncio
+async def test_document_review_recomputes_canonical_quality_source(tmp_path):
+    job = tmp_path / "job"; job.mkdir()
+    review = _persisted_review(job)
+    quality_path = job / "intermediate/quality.json"
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["metrics"]["layout_detector_model"] = "legacy_layout.onnx"
+    quality_path.write_text(json.dumps(quality), encoding="utf-8")
+
+    async def reader(rel):
+        path = job / rel
+        return path.read_bytes() if path.exists() else None
+
+    verified = await verify_persisted_review(
+        review, job_id="job", pipeline="document", read_file=reader,
+    )
+    assert verified["review_reliable"] is False
+    assert "document_quality_source_mismatch" in verified["reliability_reasons"]
 
 
 @pytest.mark.asyncio

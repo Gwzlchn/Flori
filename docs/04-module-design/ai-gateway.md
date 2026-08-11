@@ -101,9 +101,11 @@ CLI 订阅方式有各自额度限制。任务以 `allowed_providers` 允许三�
 
 | Provider | CLI 命令 | 订阅计划 | 说明 |
 |----------|---------|---------|------|
-| Claude | `claude -p` | Pro/Max | `type=claude_cli`,默认 `opus5 + xhigh` |
+| Claude | `claude -p` | Pro/Max | `type=claude_cli`,默认 `claude-opus-5 + xhigh` |
 | Codex | `codex exec` | ChatGPT 订阅 | `type=codex_cli`,默认 `gpt-5.6-sol + xhigh` |
 | Qoder | `qodercli -p` | Qoder 订阅 | `type=qoder_cli`,默认 `ultimate + max` |
+
+Claude 与 Qoder 的单次 CLI 调用预算为 30 分钟。步骤总预算按最大调用次数再加 300 秒收尾余量:两轮步骤 3900 秒,三轮步骤 5700 秒。并发通过独立 Worker 扩展,不缩短单次生成预算。
 
 CLI Provider 的实现是 subprocess 调用 + stdout 解析，与 API Provider 对调用方透明。prompt 走 stdin（无 ARG_MAX 限制）；Claude、Codex、Qoder 分别强制自己的机器可读输出格式。以下是 Claude 适配示意：
 
@@ -177,8 +179,8 @@ providers:
     # 输出格式由 provider 强制 `--output-format json`(取真实 usage/cache/total_cost_usd/num_turns);
     # 这里不写 --output-format(写了也会被 provider 剔除改 json)。
     command: ["claude", "-p"]
-    model: opus5
-    models: [opus5, "claude-opus-4-8[1m]", claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5]
+    model: claude-opus-5
+    models: [claude-opus-5, "claude-opus-4-8[1m]", claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5]
     reasoning_effort: xhigh
     reasoning_efforts: [low, medium, high, xhigh, max]
     features: [vision, read, websearch]

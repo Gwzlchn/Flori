@@ -81,8 +81,73 @@ class EffectDispatcher:
         steps = await self.owner._get_job_pipeline_steps(job_id)
         if not steps:
             return True
-        effects = steps.get(step, {}).get("on_complete") or []
+        cfg = steps.get(step, {})
+        effects = cfg.get("on_complete") or []
+        if effects and not await self._completion_effect_authorized(job_id, step, cfg):
+            logger.warning(
+                "completion_effect_not_authorized", job_id=job_id, step=step,
+            )
+            return False
         return await self.owner._run_completion_effects(job_id, step, effects)
+
+    async def _completion_effect_authorized(
+        self, job_id: str, step: str, cfg: dict, *, job: Job | None = None,
+    ) -> bool:
+        """受门控副作用只接受当前 definition 的 done manifest 与声明产物。"""
+        if cfg.get("effects_require_current_manifest") is not True:
+            return True
+        if self.owner.storage is None:
+            return False
+        from shared.step_completion import (
+            read_valid_manifest,
+            step_definition_digest_for,
+            verify_manifest_outputs_metadata,
+        )
+
+        if job is None:
+            job = await asyncio.to_thread(self.owner.db.get_job, job_id)
+        if job is None:
+            return False
+        scope_key = cfg.get("scope_key", "job")
+        template_step = cfg.get("template_step", step)
+        manifest = await read_valid_manifest(
+            self.owner.storage, job_id, scope_key, template_step,
+        )
+        if (
+            manifest is None
+            or manifest.get("job_id") != job_id
+            or (manifest.get("scope") or {}).get("scope_key") != scope_key
+            or manifest.get("step") != template_step
+            or manifest.get("outcome") != "done"
+        ):
+            return False
+        try:
+            definition_digest = step_definition_digest_for(
+                job.pipeline,
+                cfg,
+                config=self.owner.config,
+                domain=job.domain,
+                style_tags=job.style_tags,
+            )
+        except Exception:
+            return False
+        if (
+            (manifest.get("compatibility") or {}).get("definition_digest")
+            != definition_digest
+            or not await verify_manifest_outputs_metadata(
+                self.owner.storage, job_id, manifest,
+            )
+        ):
+            return False
+        outputs = {item.get("path") for item in manifest.get("outputs") or []}
+        required = cfg.get("effects_required_outputs")
+        if (
+            not isinstance(required, list)
+            or not required
+            or any(type(item) is not str or not item for item in required)
+        ):
+            return False
+        return set(required) <= outputs
 
     async def _run_completion_effects(
         self, job_id: str, step: str, effects: list,
@@ -432,8 +497,7 @@ class EffectDispatcher:
         for step, cfg in steps.items():
             if statuses.get(step) != "done":
                 continue
-            effects = cfg.get("on_complete") or []
-            if effects and not await self.owner._run_completion_effects(job_id, step, effects):
+            if not await self.owner._run_step_completion_effects(job_id, step):
                 return False
         return True
 

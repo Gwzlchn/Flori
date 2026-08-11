@@ -152,6 +152,7 @@ class RedisTransport:
         self._data_dir = data_dir
         # 粗粒度上报需要 worker_id,注册/认领时记下,report_*/release 据此回写。
         self._worker_id = ""
+        self._active_step_claims: dict[tuple[str, str], dict] = {}
         # 直连模式不经网关代理产物,无 per-worker token(满足 Protocol、避免误用时 AttributeError)。
         self.worker_token = ""
 
@@ -251,13 +252,17 @@ class RedisTransport:
     async def request_step(self, worker_id, pools, pool_limits, tags, reject_tags):
         self._worker_id = worker_id
         if self._data_dir is None:
-            return await runner_ops.claim_step(
+            claim = await runner_ops.claim_step(
                 self._redis, self._db, worker_id, pools, pool_limits, tags, reject_tags,
             )
-        return await runner_ops.claim_step(
-            self._redis, self._db, worker_id, pools, pool_limits, tags, reject_tags,
-            data_dir=self._data_dir,
-        )
+        else:
+            claim = await runner_ops.claim_step(
+                self._redis, self._db, worker_id, pools, pool_limits, tags, reject_tags,
+                data_dir=self._data_dir,
+            )
+        if claim and claim.get("job_id") and claim.get("step"):
+            self._active_step_claims[(claim["job_id"], claim["step"])] = claim
+        return claim
 
     async def report_done(self, claim, duration, started_at, commit_token=None):
         if commit_token is not None:
@@ -311,9 +316,14 @@ class RedisTransport:
         )
 
     async def release(self, claim):
-        await runner_ops.release_step(
-            self._redis, self._db, self._worker_id, claim,
-        )
+        try:
+            await runner_ops.release_step(
+                self._redis, self._db, self._worker_id, claim,
+            )
+        finally:
+            self._active_step_claims.pop(
+                (claim.get("job_id", ""), claim.get("step", "")), None,
+            )
 
     # 资源池 / 队列(纯转调)
     async def is_pool_frozen(self, pool):
@@ -420,6 +430,19 @@ class RedisTransport:
         await self._redis.publish(channel, data)
 
     async def report_step_alive(self, job_id, step):
+        claim = self._active_step_claims.get((job_id, step))
+        if claim is None or not await self._redis.validate_task_lease(
+            self._worker_id,
+            job_id,
+            step,
+            str(claim.get("exec_id") or ""),
+            renew=True,
+            expected_pool=str(claim.get("pool") or ""),
+        ):
+            raise WorkerContractError(
+                "task lease is stale or missing during direct heartbeat",
+                endpoint="redis://runner/task-lease",
+            )
         await self._redis.set_step_progress_at(job_id, step)
 
     async def close(self):

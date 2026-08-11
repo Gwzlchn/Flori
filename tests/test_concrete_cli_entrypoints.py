@@ -37,14 +37,14 @@ def test_release_config_has_only_three_concrete_cli_defaults():
         name: (providers[name]["type"], providers[name]["model"], providers[name]["reasoning_effort"])
         for name in CONCRETE_CLI_PROVIDERS
     } == {
-        "claude-cli": ("claude_cli", "opus5", "xhigh"),
+        "claude-cli": ("claude_cli", "claude-opus-5", "xhigh"),
         "codex-cli": ("codex_cli", "gpt-5.6-sol", "xhigh"),
         "qoder-cli": ("qoder_cli", "ultimate", "max"),
     }
 
 
 @pytest.mark.parametrize(("provider", "model"), [
-    ("claude-cli", "opus5"),
+    ("claude-cli", "claude-opus-5"),
     ("codex-cli", "gpt-5.6-sol"),
     ("qoder-cli", "ultimate"),
 ])

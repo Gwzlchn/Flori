@@ -1,11 +1,16 @@
-"""从 Document/Translation 真相源生成确定性命名的中文智能笔记。"""
+"""只从原始 Document 真相源生成确定性命名的中文智能笔记。"""
 
 from __future__ import annotations
 
 import json
 import re
 
-from shared.document_contract import validate_document, validate_translation
+from shared.document_contract import (
+    MAX_QUALITY_JSON_BYTES,
+    validate_document,
+    validate_quality,
+)
+from shared.errors import InputInvalidError
 from shared.step_base import StepBase, file_hash
 from steps.document.provenance import (
     extract_attestable_document_markers,
@@ -15,11 +20,25 @@ from steps.document.provenance import (
 from steps.utils.provenance_attestation import persist_semantic_candidates
 
 
+MAX_DOCUMENT_SMART_PROMPT_BYTES = 4 * 1024 * 1024
+_QUALITY_NOTE_METRIC_KEYS = (
+    "pdf_source_quality",
+    "pdf_crosswalk_blocks",
+    "pdf_crosswalk_visuals",
+    "pdf_crosswalk_ambiguous",
+    "pdf_crosswalk_visual_ambiguous",
+    "pdf_layout_detector_failures",
+    "html_visual_asset_failures",
+    "visual_asset_failures",
+)
+
+
 class DocumentSmartStep(StepBase):
     def validate_inputs(self) -> list[str]:
         return [
             path for path in (
                 "intermediate/document.json",
+                "intermediate/quality.json",
                 "intermediate/source_segments.json",
             )
             if not (self.job_dir / path).is_file()
@@ -28,13 +47,11 @@ class DocumentSmartStep(StepBase):
     def step_input_hashes(self) -> dict[str, str]:
         hashes = {
             "document": file_hash(self.job_dir / "intermediate/document.json"),
+            "quality": file_hash(self.job_dir / "intermediate/quality.json"),
             "source_segments": file_hash(
                 self.job_dir / "intermediate/source_segments.json"
             ),
         }
-        translation = self.job_dir / "output" / "translation.json"
-        if translation.is_file():
-            hashes["translation"] = file_hash(translation)
         hashes.update(self.ai.prompt_profile_style_hashes())
         return hashes
 
@@ -43,15 +60,28 @@ class DocumentSmartStep(StepBase):
             self.artifacts.load_json("intermediate/document.json"),
             expected_job_id=self.job_dir.name,
         )
+        with (self.job_dir / "intermediate/quality.json").open("rb") as handle:
+            quality_data = handle.read(MAX_QUALITY_JSON_BYTES + 1)
+        if len(quality_data) > MAX_QUALITY_JSON_BYTES:
+            raise InputInvalidError("document quality exceeds byte limit")
+        quality = validate_quality(
+            json.loads(quality_data),
+            expected_job_id=self.job_dir.name,
+        )
+        if quality["status"] == "rejected":
+            raise InputInvalidError("document smart note rejects rejected source quality")
         source_manifest = load_document_source_manifest(self.job_dir)
         if source_manifest is None:
             raise ValueError("document smart note requires source manifest")
         body, body_source, zh_title = self._body(document)
-        prompt = self._build_prompt(document, body, source_manifest)
+        prompt = self._build_prompt(document, quality, body, source_manifest)
         result, exact, semantic = self._generate_attestable_note(
             prompt, source_manifest,
         )
         result = self._strip_model_title(result)
+        quality_notice = self._quality_notice(quality)
+        if quality_notice:
+            result = f"{quality_notice}\n\n{result}"
         note_title = f"{zh_title} - 笔记"
         rel = self.review.write_smart_note(result, title=note_title)
         provenance = persist_document_note_provenance(
@@ -59,6 +89,7 @@ class DocumentSmartStep(StepBase):
             note_type="smart",
             note_artifact=rel,
             candidates=exact,
+            provenance_dir="output/provenance_exact",
         )
         candidate_state = persist_semantic_candidates(
             self.job_dir,
@@ -72,6 +103,8 @@ class DocumentSmartStep(StepBase):
             "note_file": rel,
             "title": note_title,
             "source": body_source,
+            "quality_status": quality["status"],
+            "quality_disclosed": bool(quality_notice),
             "provider": self.ai.last_provider,
             "model": self.ai.last_model,
             "provenance_segments": provenance["segments"],
@@ -86,7 +119,7 @@ class DocumentSmartStep(StepBase):
         attempt_prompt = prompt
         last_error: ValueError | None = None
         for _attempt in range(2):
-            result = self.ai.call(attempt_prompt, max_tokens=8192)
+            result = self._call_with_prompt_limit(attempt_prompt)
             try:
                 return extract_attestable_document_markers(
                     result, source_manifest, ai=self.ai,
@@ -107,30 +140,14 @@ class DocumentSmartStep(StepBase):
         assert last_error is not None
         raise last_error
 
+    def _call_with_prompt_limit(self, prompt: str) -> str:
+        if len(prompt.encode("utf-8")) > MAX_DOCUMENT_SMART_PROMPT_BYTES:
+            raise InputInvalidError("document smart prompt exceeds byte limit")
+        return self.ai.call(prompt, max_tokens=8192)
+
     def _body(self, document: dict) -> tuple[str, str, str]:
         metadata = document.get("metadata") or {}
         titles = metadata.get("titles") or {}
-        translation_path = self.job_dir / "output" / "translation.json"
-        if translation_path.is_file():
-            translation = validate_translation(
-                self.artifacts.load_json("output/translation.json"),
-                expected_job_id=self.job_dir.name,
-            )
-            lines = [
-                f"[{item['source_segment_ids'][0]}] {item['text']}"
-                for item in translation["segments"]
-            ]
-            title_segment = next(
-                (item for item in translation["segments"] if item["kind"] == "title"),
-                None,
-            )
-            zh_title = str(
-                titles.get("zh")
-                or (title_segment or {}).get("text")
-                or titles.get("original")
-                or "未命名文档"
-            )
-            return "\n\n".join(lines), "translation", zh_title
         lines = [
             f"[{item['block_id']}] {item.get('text', '')}"
             for item in sorted(document["blocks"], key=lambda value: value["order"])
@@ -140,7 +157,7 @@ class DocumentSmartStep(StepBase):
         return "\n\n".join(lines), "document", title
 
     def _build_prompt(
-        self, document: dict, body: str, source_manifest: dict,
+        self, document: dict, quality: dict, body: str, source_manifest: dict,
     ) -> str:
         metadata = document.get("metadata") or {}
         titles = metadata.get("titles") or {}
@@ -157,10 +174,44 @@ class DocumentSmartStep(StepBase):
             template
             .replace("<<DOCUMENT_KIND>>", str(document["document_kind"]))
             .replace("<<TITLE>>", str(titles.get("original") or "未命名文档"))
+            .replace("<<QUALITY>>", self._quality_prompt_block(quality))
             .replace("<<BODY>>", body)
             .replace("<<VISUALS>>", "\n".join(visual_lines) or "无")
             + self.ai.terminology_block(self.ai.load_domain_prompt_profile())
             + references
+        )
+
+    @staticmethod
+    def _quality_prompt_block(quality: dict) -> str:
+        return json.dumps(
+            {
+                "status": quality["status"],
+                "reasons": quality["reasons"],
+                "metrics": {
+                    key: quality["metrics"][key]
+                    for key in _QUALITY_NOTE_METRIC_KEYS if key in quality["metrics"]
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _quality_notice(quality: dict) -> str:
+        if quality["status"] == "complete":
+            return ""
+        reasons = "、".join(quality["reasons"])
+        metrics = "、".join(
+            f"{key}={quality['metrics'][key]}"
+            for key in _QUALITY_NOTE_METRIC_KEYS
+            if key in quality["metrics"]
+        )
+        detail = f"；相关指标：{metrics}" if metrics else ""
+        return (
+            f"> 来源质量提示：结构化解析状态为 {quality['status']}；"
+            f"已知限制代码：{reasons}{detail}。"
+            "涉及公式、图表、页码与定位的结论需回到原始 HTML/PDF 核验。"
         )
 
     @staticmethod

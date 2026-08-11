@@ -1,9 +1,8 @@
-"""只从 Document 智能笔记、译文或结构块提取概念。"""
+"""从智能笔记提取概念,再用原始 Document 来源段确定性绑定证据。"""
 
 from __future__ import annotations
 
-from shared.concept_evidence import ConceptEvidenceSnapshot
-from shared.document_contract import validate_document, validate_translation
+from shared.concept_evidence import validate_source_concept_evidence_snapshot
 from shared.errors import InputInvalidError
 from steps.common.step_concepts import (
     ConceptsStep,
@@ -20,79 +19,41 @@ class DocumentConceptsStep(ConceptsStep):
         if hasattr(self, "_concept_source_snapshot"):
             return self._concept_source_snapshot
         smart = self.artifacts.latest_smart_note()
-        if smart is not None:
-            source = self._read_text(
-                smart,
-                str(smart.relative_to(self.job_dir)),
-                kind="smart_note",
-                note_type="smart",
-            )
-            self._concept_source_snapshot = source
-            return source
-        translation_path = self.job_dir / "output" / "translation.json"
-        if translation_path.is_file():
-            translation = validate_translation(
-                self.artifacts.load_json("output/translation.json"),
-                expected_job_id=self.job_dir.name,
-            )
-            text = "\n\n".join(item["text"] for item in translation["segments"])
-            raw = text.encode("utf-8")
-            source = _ConceptSource(
-                text=text,
-                raw=raw,
-                kind="translation",
-                sha256=_sha256(raw),
-                path="output/translated.html",
-                note_type="translated",
-                source_manifest_data=self._read_optional_bytes(
-                    self.job_dir / "intermediate" / "source_segments.json",
-                ),
-                provenance_data=self._read_optional_bytes(
-                    self.job_dir / "output" / "provenance" / "translated.json",
-                ),
-                evidence_snapshot=ConceptEvidenceSnapshot(
-                    anchors=(), provenance_nonempty=False, truncated=False,
-                ),
-            )
-            self._concept_source_snapshot = source
-            return source
-        document_path = self.job_dir / "intermediate" / "document.json"
-        if not document_path.is_file():
+        manifest_path = self.job_dir / "intermediate" / "source_segments.json"
+        if smart is None or not manifest_path.is_file():
             self._concept_source_snapshot = None
             return None
-        document = validate_document(
-            self.artifacts.load_json("intermediate/document.json"),
-            expected_job_id=self.job_dir.name,
-        )
-        text = "\n\n".join(
-            str(item.get("text") or "")
-            for item in sorted(document["blocks"], key=lambda value: value["order"])
-            if str(item.get("text") or "").strip()
-        )
-        if not text:
-            raise InputInvalidError("document concept source is empty")
-        raw = text.encode("utf-8")
+        try:
+            raw = smart.read_bytes()
+            text = raw.decode("utf-8")
+            manifest_data = manifest_path.read_bytes()
+            snapshot = validate_source_concept_evidence_snapshot(
+                job_id=self.job_dir.name,
+                pipeline="document",
+                source_manifest_data=manifest_data,
+            )
+        except (OSError, UnicodeDecodeError, TypeError, ValueError) as exc:
+            raise InputInvalidError("document concept evidence source is invalid") from exc
+        if not text.strip():
+            raise InputInvalidError("document smart note is empty")
         source = _ConceptSource(
             text=text,
             raw=raw,
-            kind="document",
+            kind="smart_note",
             sha256=_sha256(raw),
-            path="intermediate/document.json",
-            note_type=None,
-            source_manifest_data=self._read_optional_bytes(
-                self.job_dir / "intermediate" / "source_segments.json",
-            ),
+            path=str(smart.relative_to(self.job_dir)),
+            note_type="original",
+            source_manifest_data=manifest_data,
             provenance_data=None,
-            evidence_snapshot=ConceptEvidenceSnapshot(
-                anchors=(), provenance_nonempty=False, truncated=False,
-            ),
+            evidence_snapshot=snapshot,
         )
         self._concept_source_snapshot = source
         return source
 
     def validate_inputs(self) -> list[str]:
         return [] if self._resolve_concept_source() is not None else [
-            "intermediate/document.json"
+            "output/versions/notes_smart_*.md",
+            "intermediate/source_segments.json",
         ]
 
 

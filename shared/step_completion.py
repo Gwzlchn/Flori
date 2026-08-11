@@ -32,7 +32,12 @@ MODE_DUAL = "dual"
 MODE_MANIFEST_ONLY = "manifest-only"
 
 # 确定性 skip 的 reason code(§2.8);no_worker 属环境性,schema 层拒绝持久化。
-DETERMINISTIC_SKIP_REASONS = frozenset({"mechanical_only", "rule_false", "capability_downgrade"})
+DETERMINISTIC_SKIP_REASONS = frozenset({
+    "allowed_failure",
+    "capability_downgrade",
+    "mechanical_only",
+    "rule_false",
+})
 
 
 _warned_invalid_mode: set[str] = set()

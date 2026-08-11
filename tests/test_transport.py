@@ -106,6 +106,7 @@ class TestRunnerOpsDelegation:
 
         assert result is claim
         assert transport._worker_id == WORKER_ID
+        assert transport._active_step_claims[("j1", "A")] is claim
         delegate.assert_awaited_once_with(
             redis, db, WORKER_ID, ["cpu"], POOL_LIMITS, {"vision"}, {"private"},
         )
@@ -147,10 +148,12 @@ class TestRunnerOpsDelegation:
         transport = RedisTransport(redis, db)
         transport._worker_id = WORKER_ID
         claim = {"job_id": "j1", "step": "A", "pool": "cpu", "exec_id": "e1"}
+        transport._active_step_claims[("j1", "A")] = claim
 
         await transport.release(claim)
 
         delegate.assert_awaited_once_with(redis, db, WORKER_ID, claim)
+        assert ("j1", "A") not in transport._active_step_claims
 
 
 # GatewayTransport
@@ -704,6 +707,42 @@ class TestGatewayShadowWriteWithInner:
 
 
 class TestRedisTransportLifecycle:
+    @pytest.mark.asyncio
+    async def test_step_alive_renews_the_exact_direct_claim(
+        self, redis, db, monkeypatch,
+    ):
+        t = RedisTransport(redis, db)
+        t._worker_id = WORKER_ID
+        claim = {"job_id": "j1", "step": "A", "pool": "ai", "exec_id": "e1"}
+        t._active_step_claims[("j1", "A")] = claim
+        renew = AsyncMock(return_value=True)
+        progress = AsyncMock()
+        monkeypatch.setattr(redis, "validate_task_lease", renew)
+        monkeypatch.setattr(redis, "set_step_progress_at", progress)
+
+        await t.report_step_alive("j1", "A")
+
+        renew.assert_awaited_once_with(
+            WORKER_ID, "j1", "A", "e1", renew=True, expected_pool="ai",
+        )
+        progress.assert_awaited_once_with("j1", "A")
+
+    @pytest.mark.asyncio
+    async def test_step_alive_rejects_a_lost_direct_claim(
+        self, redis, db, monkeypatch,
+    ):
+        t = RedisTransport(redis, db)
+        t._worker_id = WORKER_ID
+        t._active_step_claims[("j1", "A")] = {
+            "job_id": "j1", "step": "A", "pool": "ai", "exec_id": "e1",
+        }
+        monkeypatch.setattr(
+            redis, "validate_task_lease", AsyncMock(return_value=False),
+        )
+
+        with pytest.raises(WorkerContractError, match="task lease is stale"):
+            await t.report_step_alive("j1", "A")
+
     @pytest.mark.asyncio
     async def test_heartbeat_refreshes_redis_and_db(self, redis, db):
         t = await _registered(redis, db)

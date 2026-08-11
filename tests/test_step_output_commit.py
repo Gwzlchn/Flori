@@ -161,8 +161,14 @@ _REAL_STEP_FINGERPRINTS = {
     },
     # steps/document/step_08_review.py:20
     "document_08_review": {
-        "smart": "", "document": _SHA, "quality": _SHA, "provider": "",
-        "template": _SHA,
+        "smart": "", "document": _SHA, "quality": _SHA, "concepts": _SHA,
+        "provider": "", "template": _SHA,
+    },
+    # steps/document/step_09_publish.py:33
+    "document_09_publish": {
+        "review": _SHA, "concepts": _SHA, "source_segments": _SHA,
+        "smart_provenance": _SHA, "smart": "",
+        "publication_policy": "review-v1:overall-3:critical-3:dimension-2:no-error",
     },
     # steps/audio/step_05_review.py:20
     "audio_05_review": {

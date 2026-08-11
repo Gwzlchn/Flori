@@ -28,6 +28,28 @@ class LifecycleCoordinator:
     def __init__(self, owner: Scheduler):
         self.owner = owner
 
+    async def _update_step_projection_for_generation(
+        self,
+        job_id: str,
+        step: str,
+        generation: int,
+        **fields,
+    ) -> bool:
+        """写 DB 前后核对 generation;换代时把迟到投影修回 Redis 当前状态。"""
+        if await self.owner.redis.get_job_generation(job_id) != generation:
+            return False
+        await asyncio.to_thread(
+            self.owner.db.update_step, job_id, step, **fields,
+        )
+        if await self.owner.redis.get_job_generation(job_id) == generation:
+            return True
+        current = await self.owner.redis.get_step_status(job_id, step)
+        if current is not None:
+            await asyncio.to_thread(
+                self.owner.db.update_step, job_id, step, status=current,
+            )
+        return False
+
     async def submit_job(self, job: Job) -> None:
         """API 调用:提交新任务,初始化步骤状态,入队无依赖步骤。"""
         if job.status == JobStatus.PENDING_ACTIVATION:
@@ -60,13 +82,13 @@ class LifecycleCoordinator:
         }
         for name, cfg in pipeline_steps.items():
             status = redis_status.get(name)
-            if status is None and name in db_steps:
-                stored = db_steps[name].status
-                status = stored.value if isinstance(stored, StepStatus) else str(stored)
             if status is None:
                 status = "waiting"
-            if name not in redis_status:
-                await self.owner.redis.set_step_status(job.id, name, status)
+                initialized = await self.owner.redis.init_missing_step_waiting(
+                    job.id, name,
+                )
+                if not initialized:
+                    status = await self.owner.redis.get_step_status(job.id, name) or "waiting"
             if name not in db_steps:
                 await asyncio.to_thread(
                     self.owner.db.upsert_step,
@@ -78,10 +100,15 @@ class LifecycleCoordinator:
                         pool=cfg["pool"],
                     ),
                 )
+            elif db_steps[name].status != StepStatus(status):
+                await asyncio.to_thread(
+                    self.owner.db.update_step, job.id, name, status=status,
+                )
 
         await self.owner._export_term_map(job)
 
         await self.owner.redis.add_active_job(job.id)
+        await self.owner.reconcile_step_manifests(job.id)
         await self.owner._check_downstream(job.id)
 
         logger.info("job_submitted", job_id=job.id, pipeline=job.pipeline)
@@ -132,13 +159,21 @@ class LifecycleCoordinator:
         if not await self.owner._exec_is_current(job_id, step, exec_id, generation):
             logger.warning("stale_exec_done_ignored", job_id=job_id, step=step, exec_id=exec_id)
             return
-        ok = await self.owner.redis.cas_step_status(job_id, step, "running", "done")
+        event_generation = (
+            generation
+            if generation is not None
+            else await self.owner.redis.get_job_generation(job_id)
+        )
+        ok = await self.owner.redis.cas_step_status_generation(
+            job_id, step, "running", "done", event_generation,
+        )
         if not ok:
             return
 
         await asyncio.to_thread(
             self.owner.db.update_step, job_id, step,
             status="done",
+            error=None,
             worker_id=worker,
             started_at=(
                 datetime.fromtimestamp(started_at, timezone.utc)
@@ -181,7 +216,14 @@ class LifecycleCoordinator:
         if not await self.owner._exec_is_current(job_id, step, exec_id, generation):
             logger.warning("stale_exec_failed_ignored", job_id=job_id, step=step, exec_id=exec_id)
             return
-        ok = await self.owner.redis.cas_step_status(job_id, step, "running", "failed")
+        event_generation = (
+            generation
+            if generation is not None
+            else await self.owner.redis.get_job_generation(job_id)
+        )
+        ok = await self.owner.redis.cas_step_status_generation(
+            job_id, step, "running", "failed", event_generation,
+        )
         if not ok:
             return
 
@@ -210,7 +252,20 @@ class LifecycleCoordinator:
         pipeline_steps = await self.owner._get_job_pipeline_steps(job_id)
         if not pipeline_steps:
             return
-        cfg = pipeline_steps.get(step, {})
+        cfg = pipeline_steps.get(step)
+        if cfg is None:
+            # 滚动升级保留的旧 running 步只负责挡住 Job 终态。它失败后已无当前 DAG
+            # 重试根,不得把新 DAG 永久锁成 failed;删除旧投影后继续推进新增发布门。
+            await self.owner.redis.delete_step_status(job_id, step)
+            await asyncio.to_thread(self.owner.db.delete_step, job_id, step)
+            logger.warning(
+                "removed_pipeline_step_failed_ignored",
+                job_id=job_id,
+                step=step,
+                error_type=error_type,
+            )
+            await self.owner._check_downstream(job_id)
+            return
         pipeline_retries = cfg.get("retries", 0)
 
         # 缺表项(如 unknown)按 max 0 处理:未归类失败默认 BUILD,不重试。
@@ -260,6 +315,58 @@ class LifecycleCoordinator:
                 "event": "step_failed", "step": step,
                 "error": error[:200], "retries": current_retries,
             })
+            if cfg.get("allow_failure") is True:
+                published = await self.owner._publish_skipped_manifest(
+                    job_id,
+                    cfg,
+                    "allowed_failure",
+                    condition_evidence={
+                        "error": error[:500],
+                        "error_type": error_type,
+                        "retries": current_retries,
+                    },
+                    expected_generation=event_generation,
+                )
+                if not published:
+                    if (
+                        await self.owner.redis.get_job_generation(job_id)
+                        != event_generation
+                    ):
+                        return
+                    await self.owner.mark_job_failed(
+                        job_id,
+                        f"{step}: failed to persist allowed failure",
+                    )
+                    return
+                if not await self.owner.redis.cas_step_status_generation(
+                    job_id, step, "failed", "skipped", event_generation,
+                ):
+                    return
+                if not await self._update_step_projection_for_generation(
+                    job_id,
+                    step,
+                    event_generation,
+                    status="skipped",
+                    error=error[:500],
+                    finished_at=datetime.now(timezone.utc),
+                    retries=current_retries,
+                ):
+                    return
+                progress = await self.owner._update_progress(job_id)
+                await self.owner.redis.publish(f"events:{job_id}", {
+                    "event": "step_skipped",
+                    "step": step,
+                    "reason": "allowed_failure",
+                    "progress_pct": progress,
+                })
+                logger.warning(
+                    "step_allowed_failure",
+                    job_id=job_id,
+                    step=step,
+                    error_type=error_type,
+                )
+                await self.owner._check_downstream(job_id)
+                return
             await self.owner.mark_job_failed(job_id, f"{step}: {error[:200]}")
 
     async def _delayed_enqueue(self, delay: int, job_id: str, step: str) -> None:

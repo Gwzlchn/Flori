@@ -422,9 +422,12 @@ def persist_document_note_provenance(
     note_type: str,
     note_artifact: str,
     candidates: Sequence[Mapping[str, Any]],
+    provenance_dir: str = "output/provenance",
 ) -> dict[str, Any]:
     """绑定最终字节、Document source manifest 与稳定锚点，歧义时发布空映射。"""
-    target = job_dir / "output" / "provenance" / f"{note_type}.json"
+    if provenance_dir not in {"output/provenance", "output/provenance_exact"}:
+        raise ValueError("document provenance directory is invalid")
+    target = job_dir / provenance_dir / f"{note_type}.json"
     source_manifest = load_document_source_manifest(job_dir)
     if source_manifest is None:
         target.unlink(missing_ok=True)

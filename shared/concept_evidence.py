@@ -117,6 +117,66 @@ def validate_concept_evidence_snapshot(
     )
 
 
+def validate_source_concept_evidence_snapshot(
+    *,
+    job_id: str,
+    pipeline: str,
+    source_manifest_data: bytes,
+) -> ConceptEvidenceSnapshot:
+    """从完整来源清单冻结概念证据锚点,不信任模型自报的来源 refs。"""
+    source_manifest = validate_source_manifest(
+        _load_canonical_json(source_manifest_data, field="source manifest"),
+    )
+    if (
+        source_manifest["job_id"] != job_id
+        or source_manifest["pipeline"] != pipeline
+    ):
+        raise ValueError("source manifest identity mismatch")
+
+    selected: dict[str, list[str]] = {}
+    supported = 0
+    truncated = False
+    for segment in source_manifest["segments"]:
+        support = segment.get("support_text")
+        if not isinstance(support, str) or not support.strip():
+            continue
+        supported += 1
+        anchor = support.strip()
+        segment_id = segment["segment_id"]
+        if anchor in selected:
+            if segment_id not in selected[anchor]:
+                selected[anchor].append(segment_id)
+            continue
+        if len(selected) >= MAX_CONCEPT_EVIDENCE_ANCHORS:
+            truncated = True
+            continue
+        candidate_anchors = [*selected, anchor]
+        if len(canonical_json_bytes({"anchors": candidate_anchors})) > (
+            MAX_CONCEPT_EVIDENCE_ANCHORS_BYTES
+        ):
+            truncated = True
+            continue
+        selected[anchor] = [segment_id]
+
+    if supported and not selected:
+        raise ValueError("source concept evidence anchors exceed prompt budget")
+    if not supported:
+        raise ValueError("source manifest has no concept evidence anchors")
+    unique_source_ids = {
+        segment_id for refs in selected.values() for segment_id in refs
+    }
+    if len(unique_source_ids) > MAX_CONCEPT_EVIDENCE_SOURCE_IDS:
+        raise ValueError("concept evidence source refs exceed binding budget")
+    return ConceptEvidenceSnapshot(
+        anchors=tuple(
+            ConceptEvidenceAnchor(anchor=anchor, source_segment_ids=tuple(refs))
+            for anchor, refs in selected.items()
+        ),
+        provenance_nonempty=True,
+        truncated=truncated or len(selected) < supported,
+    )
+
+
 def attach_concept_source_segments(
     key_terms: Any,
     *,

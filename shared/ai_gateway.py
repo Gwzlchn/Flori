@@ -7,6 +7,7 @@ import dataclasses
 import json
 import math
 import os
+import re
 from functools import lru_cache
 import time
 from datetime import datetime
@@ -334,12 +335,76 @@ class DryRunProvider:
                     }, ensure_ascii=False, separators=(",", ":"))
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 pass
+        if request.response_format == "json" and marker in prompt:
+            try:
+                payload = json.loads(prompt.rsplit(marker, 1)[1])
+                items = payload.get("items")
+                if (
+                    isinstance(items, list)
+                    and "独立证据核验器" in prompt
+                ):
+                    return json.dumps({
+                        "schema_version": 3,
+                        "decisions": [{
+                            "decision_id": item["decision_id"],
+                            "decision": "supported",
+                            "confidence_ppm": 990000,
+                            "reason_codes": [
+                                "semantic_equivalent", "critical_facts_match",
+                            ],
+                        } for item in items if isinstance(item, dict)],
+                    }, ensure_ascii=False, separators=(",", ":"))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                pass
+        if request.response_format == "json" and "已验证概念证据锚点(JSON)" in prompt:
+            match = re.search(
+                r"已验证概念证据锚点\(JSON\) ---\n(\{[^\n]+\})", prompt,
+            )
+            try:
+                anchors = json.loads(match.group(1))["anchors"] if match else []
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                anchors = []
+            anchor = next(
+                (value for value in anchors if isinstance(value, str) and value.strip()),
+                "",
+            )
+            token = re.search(r"[\u3400-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_-]{2,}", anchor)
+            term = token.group(0) if token else anchor[:32].strip()
+            return json.dumps({
+                "summary": "DRY_RUN 概念摘要",
+                "key_terms": [{
+                    "term": term,
+                    "definition": "DRY_RUN 概念定义",
+                    "zh_name": None,
+                    "related": [],
+                }] if term else [],
+            }, ensure_ascii=False, separators=(",", ":"))
+        if request.response_format == "json" and "评分维度（每项打 1-5" in prompt:
+            score_keys = re.findall(r"(?m)^\d+\. ([a-z_]+):", prompt)
+            return json.dumps({
+                **{key: 4 for key in score_keys},
+                "key_terms": [],
+                "missing_concepts": [],
+                "top3_improvements": ["DRY_RUN 1", "DRY_RUN 2", "DRY_RUN 3"],
+                "issues": [],
+            }, ensure_ascii=False, separators=(",", ":"))
+        if "可引用来源坐标" in prompt:
+            match = re.search(
+                r"(?m)^\[\[source:([^\]]+)\]\][ \t]+([^\n]+)$", prompt,
+            )
+            if match:
+                return (
+                    "## 核心结论\n\n"
+                    + match.group(2).strip()
+                    + f"[[source:{match.group(1)}]]"
+                )
         return f"[DRY_RUN] {len(request.messages)} messages, model={request.model}"
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
+        model = request.model or "dry-run"
         return LLMResponse(
             content=self._content(request),
-            model=request.model or "dry-run",
+            model=model,
             provider="dry-run",
             input_tokens=0,
             output_tokens=0,
@@ -347,6 +412,13 @@ class DryRunProvider:
             duration_sec=0.0,
             finish_reason="stop",
             raw={"dry_run": True},
+            tier_used="primary",
+            attempts=[{
+                "tier": "primary",
+                "provider": "dry-run",
+                "model": model,
+                "ok": True,
+            }],
         )
 
 
@@ -615,8 +687,9 @@ class ClaudeCLIProvider:
             cmd += ["--tools", "", "--max-turns", "1"]
 
         env = build_cli_env("claude-cli", self._env)
-        # 取证等放开工具的 agentic 调用(多轮搜索/抓取)给足 30min;否则按图数给。
-        timeout = 1800 if request.allowed_tools else min(600 + 25 * len(request.images or []), 1800)
+        # 完整论文纯文本生成在 Opus 上也会超过 600 秒。统一给到步骤级上限 30 分钟,
+        # 仍由 Worker 心跳、租约和外层 step timeout 约束。
+        timeout = 1800
         start = time.time()
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -1106,7 +1179,9 @@ class QoderCLIProvider:
             cmd += ["--tools", ""]
 
         env = build_cli_env("qoder-cli", self._env)
-        timeout = 1800 if request.allowed_tools else min(600 + 25 * len(request.images or []), 1800)
+        # Qoder 的大论文纯文本生成实测会超过 600 秒。统一给到步骤级上限 30 分钟,
+        # 仍由 Worker 心跳、租约和外层 step timeout 约束,避免 provider 先于步骤预算误杀。
+        timeout = 1800
         start = time.time()
         proc = await asyncio.create_subprocess_exec(
             *cmd,

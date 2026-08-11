@@ -101,6 +101,7 @@ def _publish_done_manifest(
     jobs_dir: Path, job_id: str, scope_key: str, step: str, *,
     outputs: list[tuple[str, bytes]], exec_id: str = "w:1",
     fingerprints: dict | None = None,
+    definition_digest: str = "sha256:" + "c" * 64,
 ) -> dict:
     """在 LocalStorage 布局下发布一份有效 done manifest + 对应输出文件。"""
     import hashlib
@@ -123,7 +124,7 @@ def _publish_done_manifest(
             fingerprints if fingerprints is not None
             else {"input": "sha256:" + "b" * 64}
         ),
-        definition_digest="sha256:" + "c" * 64,
+        definition_digest=definition_digest,
         outputs=entries,
         producer={
             "flori_version": "2.1.1", "build_sha": None, "worker_id": "w",
@@ -159,8 +160,13 @@ class TestReconcileRepairsProjection:
             job_id="j1", name="A", status=StepStatus.WAITING, pool="cpu",
         ))
         await scheduler.redis.set_step_status("j1", "A", "waiting")
+        cfg = (await scheduler._get_job_pipeline_steps("j1"))["A"]
         _publish_done_manifest(
             tmp_jobs_dir, "j1", "job", "A", outputs=[("out/a.json", b"payload")],
+            definition_digest=step_definition_digest_for(
+                "test", cfg, config=scheduler.config,
+                domain="general", style_tags=[],
+            ),
         )
 
         await scheduler.reconcile_step_manifests("j1")
@@ -170,6 +176,31 @@ class TestReconcileRepairsProjection:
         # 第二次对账幂等:投影不再变化,不重复副作用(effects 重放本身幂等)。
         await scheduler.reconcile_step_manifests("j1")
         assert await scheduler.redis.get_step_status("j1", "A") == "done"
+
+    @pytest.mark.asyncio
+    async def test_done_manifest_clears_stale_db_error(
+        self, scheduler, tmp_jobs_dir,
+    ):
+        await _seed_job(scheduler)
+        scheduler.db.upsert_step(Step(
+            job_id="j1", name="A", status=StepStatus.DONE, pool="cpu",
+            error="orphan reclaimed before the valid completion arrived",
+        ))
+        await scheduler.redis.set_step_status("j1", "A", "done")
+        cfg = (await scheduler._get_job_pipeline_steps("j1"))["A"]
+        _publish_done_manifest(
+            tmp_jobs_dir, "j1", "job", "A", outputs=[("out/a.json", b"payload")],
+            definition_digest=step_definition_digest_for(
+                "test", cfg, config=scheduler.config,
+                domain="general", style_tags=[],
+            ),
+        )
+
+        await scheduler.reconcile_step_manifests("j1")
+
+        stored = {item.name: item for item in scheduler.db.get_steps("j1")}
+        assert stored["A"].status == StepStatus.DONE
+        assert stored["A"].error is None
 
     @pytest.mark.asyncio
     async def test_repair_replays_effects_once_not_doubled(
@@ -184,8 +215,13 @@ class TestReconcileRepairsProjection:
         scheduler.db.upsert_step(Step(
             job_id="j1", name="A", status=StepStatus.WAITING, pool="cpu",
         ))
+        cfg = (await scheduler._get_job_pipeline_steps("j1"))["A"]
         _publish_done_manifest(
             tmp_jobs_dir, "j1", "job", "A", outputs=[("out/a.json", b"payload")],
+            definition_digest=step_definition_digest_for(
+                "test", cfg, config=scheduler.config,
+                domain="general", style_tags=[],
+            ),
         )
         effect_calls = []
 
@@ -310,6 +346,7 @@ class TestPartRerunInvalidationBoundary:
             JobPart(f"pt_{index}", "j_parts", index) for index in (1, 2, 3)
         ]
         await _seed_job(scheduler, job_id="j_parts", pipeline="multi", parts=parts)
+        expanded = await scheduler._get_job_pipeline_steps("j_parts")
         for part in parts:
             scope = part_scope(part.id)
             scheduler.db.upsert_step(Step(
@@ -321,6 +358,10 @@ class TestPartRerunInvalidationBoundary:
             _publish_done_manifest(
                 tmp_jobs_dir, "j_parts", scope, "01_dl",
                 outputs=[("out/a.json", part.id.encode())],
+                definition_digest=step_definition_digest_for(
+                    "multi", expanded[name], config=scheduler.config,
+                    domain="general", style_tags=[],
+                ),
             )
         scheduler.db.upsert_step(Step(
             job_id="j_parts", name="09_merge", status=StepStatus.DONE, pool="io",
@@ -329,6 +370,10 @@ class TestPartRerunInvalidationBoundary:
         _publish_done_manifest(
             tmp_jobs_dir, "j_parts", "job", "09_merge",
             outputs=[("merged/all.json", b"merged")],
+            definition_digest=step_definition_digest_for(
+                "multi", expanded["09_merge"], config=scheduler.config,
+                domain="general", style_tags=[],
+            ),
         )
 
         reset = await scheduler.rerun(
@@ -485,6 +530,19 @@ class TestSkipRecovery:
                 job_generation=1, reason_code="no_worker",
                 definition_digest="sha256:" + "c" * 64,
             )
+
+    def test_allowed_failure_is_a_durable_skip_reason(self):
+        manifest, _encoded = build_skipped_manifest(
+            job_id="j1", scope_key="job", step="A", part_index=None,
+            job_generation=1, reason_code="allowed_failure",
+            definition_digest="sha256:" + "c" * 64,
+            condition_digest="sha256:" + "d" * 64,
+        )
+        assert manifest["skip"] == {
+            "reason_code": "allowed_failure",
+            "rule_digest": None,
+            "condition_digest": "sha256:" + "d" * 64,
+        }
 
     @pytest.mark.asyncio
     async def test_dag_planner_publishes_deterministic_skip_manifest(

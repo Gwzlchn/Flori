@@ -236,14 +236,14 @@ class TestAITask:
         ).to_task_payload()
         assert payload["kind"] == TaskKind.AI.value == "ai"
         assert payload["task_id"] == "at_1" and payload["step"] == "synthesis"
-        assert payload["provider"] == "claude-cli" and payload["model"] == "opus5"
+        assert payload["provider"] == "claude-cli" and payload["model"] == "claude-opus-5"
         assert payload["require_tags"] == ["claude-cli"] and payload["pool"] == "ai"
         assert payload["audit_context"] == audit_context
         assert "job_id" not in payload  # AI task 不挂 job
         json.dumps(payload)  # 可入队
         back = AITask.from_task_payload(payload)
         assert back.task_id == "at_1" and back.step_name == "synthesis" and back.domain == "dl"
-        assert back.provider == "claude-cli" and back.model == "opus5"
+        assert back.provider == "claude-cli" and back.model == "claude-opus-5"
         assert back.request.messages == req.messages and back.request.system == "S"
         assert back.audit_context == audit_context
 

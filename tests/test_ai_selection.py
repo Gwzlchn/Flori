@@ -21,9 +21,9 @@ from shared.step_base import StepBase
 PROVIDERS = {
     "providers": {
         "claude-cli": {
-            "type": "claude_cli", "model": "opus5", "reasoning_effort": "xhigh",
+            "type": "claude_cli", "model": "claude-opus-5", "reasoning_effort": "xhigh",
             # models 是覆盖的合法域,未声明则任何 model 覆盖都被执行端 fail-closed 拒绝。
-            "models": ["opus5", "claude-sonnet-4-6"],
+            "models": ["claude-opus-5", "claude-sonnet-4-6"],
             "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
             "features": ["read", "vision", "websearch"],
         },
@@ -270,6 +270,7 @@ def _document_job(root):
     (job / "intermediate" / "document.json").write_text("{}", encoding="utf-8")
     (job / "intermediate" / "quality.json").write_text("{}", encoding="utf-8")
     (job / "intermediate" / "source_segments.json").write_text("{}", encoding="utf-8")
+    (job / "output" / "concepts.json").write_text("{}", encoding="utf-8")
     return job
 
 

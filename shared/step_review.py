@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime
@@ -208,15 +209,29 @@ class ReviewExecution:
         review_source_texts: dict[str, str] | None = None,
         citation_validation: dict | None = None,
         evidence_manifest_record: dict | None = None,
+        prompt_byte_limit: int | None = None,
+        downgrade_unbound_quotes_after_retry: bool = False,
     ):
         del fallback
         from .review_contract import (
             MAX_REVIEW_SOURCE_AGGREGATE_BYTES,
             MAX_REVIEW_SOURCE_BYTES,
             MAX_REVIEW_SOURCES,
+            downgrade_unbound_review_issue_quotes,
             parse_review,
             sha256_bytes,
         )
+
+        effective_prompt_limit = (
+            MAX_REVIEW_SOURCE_BYTES if prompt_byte_limit is None else prompt_byte_limit
+        )
+        if (
+            type(effective_prompt_limit) is not int
+            or not 0 < effective_prompt_limit <= MAX_REVIEW_SOURCE_BYTES
+        ):
+            raise ValueError("review prompt byte limit is invalid")
+        if type(downgrade_unbound_quotes_after_retry) is not bool:
+            raise ValueError("review quote downgrade flag is invalid")
 
         if type(prompt) is not str:
             raise ValueError("review input must be a string")
@@ -224,8 +239,8 @@ class ReviewExecution:
             prompt_data = prompt.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ValueError("review input must be UTF-8") from exc
-        if len(prompt_data) > MAX_REVIEW_SOURCE_BYTES:
-            raise ValueError(f"review input exceeds {MAX_REVIEW_SOURCE_BYTES} bytes")
+        if len(prompt_data) > effective_prompt_limit:
+            raise ValueError(f"review input exceeds {effective_prompt_limit} bytes")
         validate_sources = review_sources is not None or review_source_texts is not None
         sources = review_sources or []
         if validate_sources and (not sources or len(sources) > MAX_REVIEW_SOURCES):
@@ -288,6 +303,36 @@ class ReviewExecution:
             review_source_texts=source_texts,
             citation_validation=citation_validation,
         )
+        if parse_failed:
+            errors = (review.get("parse") or {}).get("errors") or []
+            retry_prompt = (
+                prompt.rstrip()
+                + "\n\n--- JSON 格式修复 ---\n"
+                + "上次响应未通过确定性 schema 校验。错误: "
+                + json.dumps(errors[:16], ensure_ascii=False, separators=(",", ":"))
+                + "\n只返回一个完整 JSON 对象。不得使用 Markdown 围栏、前后说明或省略闭合括号;"
+                + "字段和值域必须严格遵守上方契约。"
+            )
+            if len(retry_prompt.encode("utf-8")) <= effective_prompt_limit:
+                raw = self.ai.call(
+                    retry_prompt, response_format="json", temperature=0,
+                )
+                response = self.ai.last_response or LLMResponse(
+                    content=raw,
+                    model=self.ai.last_model or "unknown",
+                    provider=self.ai.last_provider or "unknown",
+                    finish_reason=None,
+                )
+                if downgrade_unbound_quotes_after_retry:
+                    raw, _ = downgrade_unbound_review_issue_quotes(raw, source_texts)
+                review, parse_failed = parse_review(
+                    raw,
+                    score_keys,
+                    response,
+                    review_input=review_input,
+                    review_source_texts=source_texts,
+                    citation_validation=citation_validation,
+                )
         review["review_coverage"] = coverage
         self.write_review(review, note_file)
         return review, parse_failed

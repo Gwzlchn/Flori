@@ -313,6 +313,13 @@ class Scheduler:
     async def _run_step_completion_effects(self, job_id: str, step: str) -> bool:
         return await self._effects._run_step_completion_effects(job_id, step)
 
+    async def _completion_effect_authorized(
+        self, job_id: str, step: str, cfg: dict, *, job: Job | None = None,
+    ) -> bool:
+        return await self._effects._completion_effect_authorized(
+            job_id, step, cfg, job=job,
+        )
+
     async def _run_completion_effects(self, job_id: str, step: str, effects: list) -> bool:
         return await self._effects._run_completion_effects(job_id, step, effects)
 
@@ -449,6 +456,23 @@ class Scheduler:
 
     async def _check_downstream(self, job_id: str) -> None:
         return await self._dag_planner._check_downstream(job_id)
+
+    async def _publish_skipped_manifest(
+        self,
+        job_id: str,
+        cfg: dict,
+        reason: str,
+        *,
+        condition_evidence: dict | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
+        return await self._dag_planner._publish_skipped_manifest(
+            job_id,
+            cfg,
+            reason,
+            condition_evidence=condition_evidence,
+            expected_generation=expected_generation,
+        )
 
     async def enqueue_step(self, job_id: str, step_name: str) -> bool:
         return await self._task_router.enqueue_step(job_id, step_name)

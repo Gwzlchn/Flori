@@ -129,9 +129,10 @@ assets 和安全 embed。正文边界、付费墙、动态壳、分页和截断�
 
 ### 翻译和知识加工
 
-翻译按稳定 block/segment 批次执行，支持 1:1、1:N、N:1；公式、数字、单位、引用等 protected token
-丢失即重试后 fail-closed。Search、Ask、MCP、概念、智能笔记和 Review 只消费 Document/Translation
-locator 与 Figure/Table id，不读取 `original.md`、`translated.md` 或 `figures.json`。
+翻译按稳定 block/segment 批次默认运行，支持 1:1、1:N、N:1；公式、数字、单位、引用等 protected token
+丢失即重试后 fail-closed。它只生成对齐真相源与中文阅读视图,不进入智能笔记、概念、统一评审或知识发布的
+依赖与输入。知识链只消费原始 Document locator、source segment support 与 Figure/Table id,不读取
+`translation.json`、`translated.html`、`original.md`、`translated.md` 或 `figures.json`。
 
 ## 5. 音频 / 播客适配器（M6 已实现）
 

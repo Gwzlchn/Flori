@@ -17,6 +17,7 @@ from shared.evidence_contract import (
 )
 from shared.models import LLMResponse
 from shared.provenance import (
+    MAX_SEMANTIC_AI_LOG_HISTORY_BYTES,
     SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
     build_semantic_attestation_prompt,
     build_provenance_manifest,
@@ -31,6 +32,7 @@ from shared.provenance import (
 from steps.utils.provenance_attestation import (
     finalize_pending_semantic_provenance,
     persist_semantic_candidates,
+    semantic_attestation_input_hashes,
 )
 
 
@@ -239,6 +241,7 @@ class _Attestor:
         self.response_schema = response_schema
         self.last_response = None
         self.call_index = 0
+        self.ai_log_records = []
         self.log = _Log()
 
     def load_prompt_template(self, name: str) -> str:
@@ -281,6 +284,7 @@ class _Attestor:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.ai_log_records.append(record)
         self.call_index += 1
         return content
 
@@ -302,6 +306,13 @@ class _FlakyAttestor(_Attestor):
         if self.calls == 1:
             raise RuntimeError("attestor unavailable")
         return super().call(prompt, **kwargs)
+
+
+class _MemoryProofAttestor(_Attestor):
+    def call(self, prompt: str, **kwargs) -> str:
+        content = super().call(prompt, **kwargs)
+        (self.job_dir / "output/ai_logs" / f"{self.step_name}.jsonl").unlink()
+        return content
 
 
 async def _records(
@@ -718,6 +729,59 @@ def test_batch_candidate_limit_allows_dual_fifty_with_one_call(tmp_path: Path) -
     assert result["accepted"] + result["rejected"] == 100
 
 
+def test_document_review_can_attest_smart_without_reading_translation(
+    tmp_path: Path,
+) -> None:
+    job_dir, source, _note_data, segment_id = _job(tmp_path)
+    _add_smart_candidate(job_dir, source, segment_id)
+    persist_semantic_candidates(
+        job_dir, pipeline="document", note_type="translated",
+        note_artifact="output/translated.md", candidates=[{
+            "anchor": "该模型不超过 5 kg。", "prefix": "", "suffix": "",
+            "section": "translated", "source_segment_id": segment_id,
+            "transform_kind": "translated", "producer_component": "04_translate",
+            "producer_invocation_id": "translate-session",
+        }],
+    )
+    translated_before = (
+        job_dir / "output/provenance/translated.json"
+    ).read_bytes()
+    exact_dir = job_dir / "output/provenance_exact"
+    exact_dir.mkdir()
+    (job_dir / "output/provenance/smart.json").replace(exact_dir / "smart.json")
+    hashes = semantic_attestation_input_hashes(
+        job_dir,
+        note_types=("smart",),
+        exact_provenance_dir="output/provenance_exact",
+    )
+
+    result = finalize_pending_semantic_provenance(
+        job_dir, pipeline="document", ai=_Attestor(job_dir),
+        note_types=("smart",),
+        exact_provenance_dir="output/provenance_exact",
+    )
+    commit = json.loads((job_dir / "output/provenance/semantic_batch.json").read_text())
+
+    assert set(hashes) == {"semantic_smart_candidate", "semantic_smart_final"}
+    assert result["note_types"] == 1 and result["accepted"] == 1
+    assert (job_dir / "output/provenance/smart.json").is_file()
+    assert (exact_dir / "smart.json").is_file()
+    assert [item["note_type"] for item in commit["candidate_manifests"]] == ["smart"]
+    assert (job_dir / "output/provenance/translated.json").read_bytes() == translated_before
+
+
+@pytest.mark.parametrize("note_types", [(), ("smart", "smart"), ("unknown",)])
+def test_semantic_attestation_note_type_scope_fails_closed(
+    tmp_path: Path, note_types,
+) -> None:
+    job_dir, _source, _note_data, _segment_id = _job(tmp_path)
+    with pytest.raises(ValueError, match="note type"):
+        finalize_pending_semantic_provenance(
+            job_dir, pipeline="document", ai=_Attestor(job_dir),
+            note_types=note_types,
+        )
+
+
 def test_batch_selects_smart_then_translated_with_one_bounded_call(
     tmp_path: Path,
 ) -> None:
@@ -835,7 +899,10 @@ async def test_ai_log_record_replacement_and_unbounded_history_fail_closed(
     finalize_pending_semantic_provenance(
         job_dir, pipeline="document", ai=_Attestor(job_dir),
     )
-    log_path = job_dir / "output/ai_logs/06_semantic_attestation.jsonl"
+    commit = json.loads((
+        job_dir / "output/provenance/semantic_batch.json"
+    ).read_text())
+    log_path = job_dir / commit["ai_log"]["path"]
     original = log_path.read_bytes()
     record = json.loads(original)
     record["output"]["content"] = json.dumps({"schema_version": 1, "decisions": []})
@@ -845,6 +912,66 @@ async def test_ai_log_record_replacement_and_unbounded_history_fail_closed(
     log_path.write_bytes(original + b"{}\n" * 128)
     with pytest.raises(CanonicalEvidenceError, match="too many records"):
         await _records(job_dir, note_data)
+
+
+@pytest.mark.asyncio
+async def test_growing_ai_log_history_is_reduced_to_an_immutable_record_proof(
+    tmp_path: Path,
+) -> None:
+    job_dir, _source, note_data, segment_id = _job(tmp_path)
+    persist_semantic_candidates(
+        job_dir, pipeline="document", note_type="translated",
+        note_artifact="output/translated.md", candidates=[{
+            "anchor": "该模型不超过 5 kg。", "prefix": "", "suffix": "",
+            "section": "translated", "source_segment_id": segment_id,
+            "transform_kind": "translated",
+            "producer_component": "04_translate",
+            "producer_invocation_id": "producer-session",
+        }],
+    )
+    history = job_dir / "output/ai_logs/06_semantic_attestation.jsonl"
+    history.parent.mkdir(parents=True, exist_ok=True)
+    history.write_bytes(
+        b'{"history":"' + b"x" * MAX_SEMANTIC_AI_LOG_HISTORY_BYTES + b'"}\n'
+    )
+    assert history.stat().st_size > MAX_SEMANTIC_AI_LOG_HISTORY_BYTES
+
+    finalize_pending_semantic_provenance(
+        job_dir, pipeline="document", ai=_Attestor(job_dir),
+    )
+
+    commit = json.loads((
+        job_dir / "output/provenance/semantic_batch.json"
+    ).read_text())
+    proof = job_dir / commit["ai_log"]["path"]
+    assert proof != history
+    assert proof.stat().st_size < 2 * 1024 * 1024
+    assert len(proof.read_text().splitlines()) == 1
+    assert await _records(job_dir, note_data)
+
+
+@pytest.mark.asyncio
+async def test_immutable_proof_survives_missing_cumulative_log_flush(
+    tmp_path: Path,
+) -> None:
+    job_dir, source_manifest, note_data, segment_id = _job(tmp_path)
+    _replace_note_candidates(
+        job_dir, source_manifest, segment_id, note_type="translated", count=1,
+    )
+    note_data = (job_dir / "output/translated.md").read_bytes()
+
+    finalize_pending_semantic_provenance(
+        job_dir, pipeline="document", ai=_MemoryProofAttestor(job_dir),
+    )
+
+    commit = json.loads((
+        job_dir / "output/provenance/semantic_batch.json"
+    ).read_text())
+    assert not (
+        job_dir / "output/ai_logs/06_semantic_attestation.jsonl"
+    ).exists()
+    assert (job_dir / commit["ai_log"]["path"]).is_file()
+    assert await _records(job_dir, note_data)
 
 
 @pytest.mark.asyncio
@@ -865,7 +992,9 @@ async def test_reader_rejects_resigned_v3_decision_ref_tamper(
     finalize_pending_semantic_provenance(
         job_dir, pipeline="document", ai=_Attestor(job_dir),
     )
-    log_path = job_dir / "output/ai_logs/06_semantic_attestation.jsonl"
+    commit_path = job_dir / "output/provenance/semantic_batch.json"
+    commit = json.loads(commit_path.read_text())
+    log_path = job_dir / commit["ai_log"]["path"]
     record = json.loads(log_path.read_text())
     response = json.loads(record["output"]["content"])
     response["decisions"][0]["decision_id"] = "D000"
@@ -873,8 +1002,6 @@ async def test_reader_rejects_resigned_v3_decision_ref_tamper(
     record["output"]["content"] = response_content
     log_path.write_bytes(canonical_json_bytes(record) + b"\n")
 
-    commit_path = job_dir / "output/provenance/semantic_batch.json"
-    commit = json.loads(commit_path.read_text())
     ai_log = commit["ai_log"]
     ai_log["response_content_sha256"] = _sha(response_content.encode())
     ai_log["response_decision_sha256"] = _sha(

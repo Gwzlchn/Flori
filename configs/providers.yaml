@@ -33,13 +33,13 @@ providers:
     # 输出格式由 provider 强制 `--output-format json`(取真实 usage/cache/total_cost_usd/num_turns);
     # 这里不写 --output-format(写了也会被 provider 剔除改 json)。
     command: ["claude", "-p"]
-    # 默认模型与档位显式钉死。OR 路由在 worker claim 后才按命中的 concrete provider
-    # 物化这组值,队列里不使用跨 CLI 的 auto 模型占位。
-    model: opus5
+    # 使用 CLI 返回的 canonical 模型名,避免独立 AI task 的请求锚点与结果审计不一致。
+    # OR 路由在 worker claim 后才物化这组值。
+    model: claude-opus-5
     # 按调用覆盖 model 的取值域,也是前端选择器的选项。必须声明:未声明时任何环境都
     # 拒绝 model 覆盖,因为跨环境恢复无从判断源环境的模型名在这里是否可用。
     models:
-      - opus5
+      - claude-opus-5
       - "claude-opus-4-8[1m]"
       - claude-opus-4-8
       - claude-sonnet-4-6
@@ -49,7 +49,7 @@ providers:
     reasoning_effort: xhigh
     reasoning_efforts: [low, medium, high, xhigh, max]
     reasoning_efforts_by_model:
-      opus5: [low, medium, high, xhigh, max]
+      claude-opus-5: [low, medium, high, xhigh, max]
       "claude-opus-4-8[1m]": [low, medium, high, xhigh, max]
       claude-opus-4-8: [low, medium, high, xhigh, max]
       claude-sonnet-4-6: [low, medium, high, xhigh, max]

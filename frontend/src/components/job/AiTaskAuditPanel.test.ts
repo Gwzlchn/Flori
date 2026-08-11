@@ -37,7 +37,7 @@ describe('AiTaskAuditPanel', () => {
     get.mockResolvedValue({
       task_id: 'task-2', count: 1,
       calls: [{
-        provider: 'claude-cli', model: 'opus5', ok: true,
+        provider: 'claude-cli', model: 'claude-opus-5', ok: true,
         cost_usd: 0.25, credits: null,
         record: { usage: { cost_usd: 0.25, credits: null } },
       }],

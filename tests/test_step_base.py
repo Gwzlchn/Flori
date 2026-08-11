@@ -10,7 +10,10 @@ import pytest
 
 from shared.errors import InputInvalidError, ProcessingError
 from shared.models import LLMResponse
-from shared.review_contract import MAX_REVIEW_SOURCE_BYTES
+from shared.review_contract import (
+    MAX_DOCUMENT_REVIEW_PROMPT_BYTES,
+    MAX_REVIEW_SOURCE_BYTES,
+)
 from shared.step_ai import AIInvocation
 from shared.step_base import StepBase, file_hash
 from shared.step_review import ReviewExecution
@@ -216,8 +219,8 @@ def test_step_param_override_without_provider_fails_closed(tmp_path):
 
 _STEP_PROVIDERS = {"providers": {
     "claude-cli": {
-        "type": "claude_cli", "model": "opus5",
-        "models": ["opus5", "claude-sonnet-4-6"],
+        "type": "claude_cli", "model": "claude-opus-5",
+        "models": ["claude-opus-5", "claude-sonnet-4-6"],
         "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
     },
     "codex-cli": {
@@ -230,7 +233,7 @@ _STEP_PROVIDERS = {"providers": {
 def _override_step(tmp_path, document):
     (tmp_path / "job.json").write_text(json.dumps(document), encoding="utf-8")
     return DummyStep(tmp_path, config={
-        "ai": {"primary": {"provider": "claude-cli", "model": "opus5"}},
+        "ai": {"primary": {"provider": "claude-cli", "model": "claude-opus-5"}},
         "providers": _STEP_PROVIDERS,
     })
 
@@ -264,7 +267,7 @@ def test_step_accepts_legacy_job_json_without_param_overrides(tmp_path):
     step.ai.validate_overrides()
     step.ai.apply_provider_override()
     assert step.config["ai"] == {
-        "primary": {"provider": "claude-cli", "model": "opus5"},
+        "primary": {"provider": "claude-cli", "model": "claude-opus-5"},
     }
 
 
@@ -275,7 +278,7 @@ def test_step_rejects_retired_provider_value(tmp_path):
         "ai_param_overrides": {"test_step": {"reasoning_effort": "max"}},
     }), encoding="utf-8")
     step = DummyStep(tmp_path, config={
-        "ai": {"primary": {"provider": "claude-cli", "model": "opus5"}},
+        "ai": {"primary": {"provider": "claude-cli", "model": "claude-opus-5"}},
         "providers": _STEP_PROVIDERS,
     })
 
@@ -739,6 +742,72 @@ class TestReviewInputGate:
 
         assert calls == [MAX_REVIEW_SOURCE_BYTES]
         assert (tmp_path / "output/review_input.md").stat().st_size == MAX_REVIEW_SOURCE_BYTES
+
+    def test_invalid_json_is_retried_once_with_the_same_strict_gate(self, tmp_path):
+        step = DummyStep(tmp_path)
+        valid = json.dumps({
+            "accuracy": 5,
+            "key_terms": [],
+            "missing_concepts": [],
+            "top3_improvements": ["a", "b", "c"],
+            "issues": [],
+        })
+        responses = iter([valid[:-1], valid])
+        prompts = []
+        step.ai.last_response = self._response()
+
+        def call(prompt, **_kwargs):
+            prompts.append(prompt)
+            return next(responses)
+
+        step.ai.call = call
+        review, parse_failed = step.review.run_dimension(
+            "review source", {}, ["accuracy"], "", {"truncated": False},
+        )
+
+        assert parse_failed is False
+        assert review["review_reliable"] is True
+        assert review["accuracy"] == 5
+        assert len(prompts) == 2
+        assert prompts[0] == "review source"
+        assert "JSON 格式修复" in prompts[1]
+
+    def test_document_prompt_equal_to_limit_is_allowed(self, tmp_path):
+        step = DummyStep(tmp_path)
+        calls = []
+        step.ai.last_response = self._response()
+        valid = json.dumps({
+            "accuracy": 5, "key_terms": [], "missing_concepts": [],
+            "top3_improvements": ["a", "b", "c"], "issues": [],
+        })
+        step.ai.call = lambda prompt, **_kwargs: calls.append(len(prompt.encode())) or valid
+
+        review, parse_failed = step.review.run_dimension(
+            "x" * MAX_DOCUMENT_REVIEW_PROMPT_BYTES, {}, ["accuracy"], "",
+            {"truncated": False},
+            prompt_byte_limit=MAX_DOCUMENT_REVIEW_PROMPT_BYTES,
+        )
+
+        assert parse_failed is False
+        assert review["review_reliable"] is True
+        assert calls == [MAX_DOCUMENT_REVIEW_PROMPT_BYTES]
+
+    def test_document_prompt_repair_cannot_cross_limit(self, tmp_path):
+        step = DummyStep(tmp_path)
+        calls = []
+        step.ai.last_response = self._response()
+        step.ai.call = lambda prompt, **_kwargs: calls.append(len(prompt.encode())) or "{"
+
+        review, parse_failed = step.review.run_dimension(
+            "x" * MAX_DOCUMENT_REVIEW_PROMPT_BYTES, {}, ["accuracy"], "",
+            {"truncated": False},
+            prompt_byte_limit=MAX_DOCUMENT_REVIEW_PROMPT_BYTES,
+            downgrade_unbound_quotes_after_retry=True,
+        )
+
+        assert parse_failed is True
+        assert review["review_reliable"] is False
+        assert calls == [MAX_DOCUMENT_REVIEW_PROMPT_BYTES]
 
     def test_aggregate_prompt_over_limit_has_zero_write_and_zero_ai(self, tmp_path):
         step = DummyStep(tmp_path)

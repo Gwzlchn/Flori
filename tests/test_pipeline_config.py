@@ -183,8 +183,8 @@ class TestVariables:
     def test_provenance_writers_invalidate_existing_done_markers(self, configs_dir):
         pipelines = load_pipelines(configs_dir / "pipelines.yaml")
         expected = {
-            "video": {"08_punctuate": "4", "11_smart": "5"},
-            "document": {"02_parse": "4", "04_translate": "1", "05_smart": "1"},
+            "video": {"08_punctuate": "4", "11_smart": "6"},
+            "document": {"02_parse": "4", "04_translate": "1", "05_smart": "4"},
             "audio": {"03_transcript_parse": "3", "04_smart_podcast": "4"},
         }
         for pipeline, versions in expected.items():
@@ -193,21 +193,19 @@ class TestVariables:
 
 
 class TestSemanticAttestationPipeline:
-    def test_candidates_are_outputs_only_and_concepts_indexes_final(self, configs_dir):
+    def test_standalone_attestors_remain_between_producer_and_concepts(self, configs_dir):
         raw = load_yaml(configs_dir / "pipelines.yaml")
         producers = {
             "video": {"11_smart": "smart"},
-            "document": {"04_translate": "translated", "05_smart": "smart"},
             "audio": {"04_smart_podcast": "smart"},
         }
         attestors = {
             "video": "11_semantic_attestation",
-            "document": "06_semantic_attestation",
             "audio": "04_semantic_attestation",
         }
-        attestor_versions = {"video": "3", "document": "2", "audio": "3"}
-        concepts = {"video": "12_concepts", "document": "07_concepts", "audio": "05_concepts"}
-        concept_versions = {"video": "6", "document": "2", "audio": "6"}
+        attestor_versions = {"video": "4", "audio": "4"}
+        concepts = {"video": "12_concepts", "audio": "05_concepts"}
+        concept_versions = {"video": "6", "audio": "6"}
         for pipeline, steps in producers.items():
             jobs = raw[pipeline]["jobs"]
 
@@ -237,7 +235,7 @@ class TestSemanticAttestationPipeline:
             assert depends_on(concepts[pipeline], attestors[pipeline])
             concept = jobs[concepts[pipeline]]
             assert concept["version"] == concept_versions[pipeline]
-            assert concept["timeout"] == 1800
+            assert concept["timeout"] == 3900
             index_actions = [
                 action for action in jobs[concepts[pipeline]].get("on_complete", [])
                 if action.get("action") == "index_note"
@@ -248,9 +246,97 @@ class TestSemanticAttestationPipeline:
                     for candidate in action["candidates"]
                 )
 
+    def test_document_translation_is_parallel_and_review_owns_smart_attestation(
+        self, configs_dir,
+    ):
+        jobs = load_yaml(configs_dir / "pipelines.yaml")["document"]["jobs"]
+        assert "06_semantic_attestation" not in jobs
+        assert jobs["04_translate"]["needs"] == ["03_structure"]
+        assert jobs["04_translate"]["allow_failure"] is True
+        assert jobs["05_smart"]["needs"] == ["03_structure"]
+        assert jobs["05_smart"]["timeout"] == 3900
+        assert jobs["07_concepts"]["needs"] == ["05_smart"]
+        assert jobs["07_concepts"]["timeout"] == 3900
+        assert jobs["08_review"]["needs"] == ["07_concepts"]
+        assert jobs["08_review"]["timeout"] == 5700
+        assert jobs["08_review"]["version"] == "6"
+        assert jobs["09_publish"]["needs"] == ["08_review"]
+        assert "output/provenance_exact/smart.json" in jobs["05_smart"]["outputs"]
+        assert "output/provenance/smart.json" not in jobs["05_smart"]["outputs"]
+        assert "output/provenance/smart.json" in jobs["08_review"]["outputs"]
+        assert "output/provenance/translated.json" not in jobs["08_review"]["outputs"]
+        assert "output_policy" not in jobs["08_review"]
+        assert not jobs["07_concepts"].get("on_complete")
+        assert [
+            action["action"] for action in jobs["09_publish"]["on_complete"]
+        ] == ["index_note", "collect_glossary"]
+        assert jobs["09_publish"]["effects_require_current_manifest"] is True
+        assert jobs["09_publish"]["effects_required_outputs"] == [
+            "output/publication.json",
+        ]
+        assert not any(
+            "04_translate" in step.get("needs", [])
+            for step in jobs.values()
+        )
+
+    @pytest.mark.parametrize("value", ["true", 1, None, []])
+    def test_allow_failure_requires_boolean(self, value):
+        raw = {"p": {"jobs": {
+            "optional": {
+                "run": "m.optional", "pool": "cpu", "allow_failure": value,
+            },
+        }}}
+        with pytest.raises(ValueError, match="allow_failure must be boolean"):
+            normalize_pipelines(raw)
+
+    def test_allow_failure_step_cannot_be_dependency(self):
+        raw = {"p": {"jobs": {
+            "optional": {
+                "run": "m.optional", "pool": "cpu", "allow_failure": True,
+            },
+            "consumer": {
+                "run": "m.consumer", "pool": "cpu", "needs": ["optional"],
+            },
+        }}}
+        with pytest.raises(ValueError, match="cannot be a dependency"):
+            normalize_pipelines(raw)
+
+    @pytest.mark.parametrize("value", ["true", 1, None, []])
+    def test_completion_effect_manifest_gate_requires_boolean(self, value):
+        raw = {"p": {"jobs": {"publish": {
+            "run": "m.publish", "pool": "cpu",
+            "outputs": ["output/publication.json"],
+            "on_complete": [{"action": "collect_glossary"}],
+            "effects_require_current_manifest": value,
+            "effects_required_outputs": ["output/publication.json"],
+        }}}}
+        with pytest.raises(ValueError, match="must be boolean"):
+            normalize_pipelines(raw)
+
+    @pytest.mark.parametrize(
+        ("required", "message"),
+        [
+            (None, "non-empty list"),
+            (["output/*.json"], "exact paths"),
+            (["output/undeclared.json"], "not declared"),
+        ],
+    )
+    def test_completion_effect_manifest_gate_requires_declared_exact_output(
+        self, required, message,
+    ):
+        raw = {"p": {"jobs": {"publish": {
+            "run": "m.publish", "pool": "cpu",
+            "outputs": ["output/publication.json"],
+            "on_complete": [{"action": "collect_glossary"}],
+            "effects_require_current_manifest": True,
+            "effects_required_outputs": required,
+        }}}}
+        with pytest.raises(ValueError, match=message):
+            normalize_pipelines(raw)
+
 
 class TestAIRoleContract:
-    def test_real_config_has_no_virtual_role_variables_and_15_routes(self, configs_dir):
+    def test_real_config_has_no_virtual_role_variables_and_14_routes(self, configs_dir):
         raw = load_yaml(configs_dir / "pipelines.yaml")
         assert not any(
             key.startswith("AI_") for key in (raw.get("variables") or {})
@@ -274,7 +360,6 @@ class TestAIRoleContract:
             ("video", "11_semantic_attestation"),
             ("video", "12_review"),
             ("document", "04_translate"), ("document", "05_smart"),
-            ("document", "06_semantic_attestation"),
             ("document", "07_concepts"), ("document", "08_review"),
             ("audio", "04_smart_podcast"), ("audio", "05_concepts"),
             ("audio", "05_review"),
@@ -284,6 +369,22 @@ class TestAIRoleContract:
         for key, route in routes.items():
             assert route == allowed_route, key
         assert sum(len(route) for route in routes.values()) == len(routes)
+        semantic_steps = {
+            (pipeline, step["name"]): step
+            for pipeline, body in pipelines.items()
+            for step in body["steps"]
+            if step["name"] in {"11_semantic_attestation", "04_semantic_attestation"}
+        }
+        assert {
+            key: value["version"] for key, value in semantic_steps.items()
+        } == {
+            ("video", "11_semantic_attestation"): "4",
+            ("audio", "04_semantic_attestation"): "4",
+        }
+        for (_pipeline, step_name), step in semantic_steps.items():
+            assert (
+                f"output/ai_logs/{step_name}.semantic.*.jsonl" in step["outputs"]
+            )
         validate_ai_pipeline_contract(
             pipelines, load_yaml(configs_dir / "providers.yaml"),
         )
@@ -294,10 +395,15 @@ class TestAIRoleContract:
             if step["name"] in {"05_review", "08_review", "12_review"}
         }
         assert review_steps == {
-            ("video", "12_review"): (1800, "2"),
-            ("document", "08_review"): (1800, "1"),
-            ("audio", "05_review"): (1800, "2"),
+            ("video", "12_review"): (3900, "2"),
+            ("document", "08_review"): (5700, "6"),
+            ("audio", "05_review"): (3900, "2"),
         }
+        video_smart = next(
+            step for step in pipelines["video"]["steps"]
+            if step["name"] == "11_smart"
+        )
+        assert video_smart["timeout_sec"] == 3900
         evidence_step = next(
             step for step in pipelines["video"]["steps"]
             if step["name"] == "10_evidence"
@@ -335,12 +441,12 @@ class TestAIRoleContract:
             normalize_pipelines(empty)
 
     @pytest.mark.parametrize("ai", [
-        {"primary": {"provider": "claude-cli", "model": "opus5"}},
+        {"primary": {"provider": "claude-cli", "model": "claude-opus-5"}},
         {"fallback": {"provider": "codex-cli", "model": "gpt-5.6-sol"}},
         {"text_fallback": {"provider": "qoder-cli", "model": "ultimate"}},
         {
             "allowed_providers": ["claude-cli"],
-            "primary": {"provider": "claude-cli", "model": "opus5"},
+            "primary": {"provider": "claude-cli", "model": "claude-opus-5"},
         },
     ])
     def test_ai_routes_reject_legacy_tiers_with_stable_code(self, ai):
@@ -367,7 +473,7 @@ class TestAIRoleContract:
 
     def test_allowed_provider_must_exist_in_loaded_config(self):
         providers = {"providers": {"claude-cli": {
-            "type": "claude_cli", "model": "opus5", "models": ["opus5"],
+            "type": "claude_cli", "model": "claude-opus-5", "models": ["claude-opus-5"],
             "reasoning_effort": "xhigh", "reasoning_efforts": ["xhigh"],
         }}}
         pipelines = {"p": {"steps": [{
@@ -539,7 +645,7 @@ class TestCompletionEffects:
             for effect in step.get("on_complete", [])
             if effect.get("action") == "index_note"
         ]
-        assert [name for name, _effect in effects] == ["03_structure", "07_concepts"]
+        assert [name for name, _effect in effects] == ["03_structure", "09_publish"]
         assert effects[0][1]["candidates"] == [{
             "note_type": "original",
             "path": "intermediate/document_index.md",
@@ -548,9 +654,14 @@ class TestCompletionEffects:
             "provenance_step": "03_structure",
             "provenance_since_version": "1",
         }]
-        assert [candidate["note_type"] for candidate in effects[1][1]["candidates"]] == [
-            "smart", "translated", "original",
-        ]
+        assert effects[1][1]["candidates"] == [{
+            "note_type": "smart",
+            "path": "output/versions/notes_smart_*",
+            "source_manifest": "intermediate/source_segments.json",
+            "provenance": "output/provenance/smart.json",
+            "provenance_step": "08_review",
+            "provenance_since_version": "2",
+        }]
 
     def test_provenance_boundary_survives_later_producer_version_bump(self):
         pipeline = normalize_pipelines(self._provenance_pipeline())["p"]
@@ -634,7 +745,7 @@ class TestCompletionEffects:
             for candidate in effect["candidates"]
             if candidate.get("provenance")
         ]
-        assert len(candidates) == 7
+        assert len(candidates) == 5
         assert all(candidate.get("provenance_step") for candidate in candidates)
         assert all(
             candidate.get("provenance_since_version") for candidate in candidates
@@ -643,7 +754,7 @@ class TestCompletionEffects:
             candidate for candidate in candidates
             if candidate["provenance_step"].endswith("semantic_attestation")
         ]
-        assert len(semantic_candidates) == 4
+        assert len(semantic_candidates) == 2
         legacy_semantic = [
             candidate for candidate in semantic_candidates
             if candidate["provenance_step"] in {

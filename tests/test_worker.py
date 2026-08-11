@@ -828,7 +828,7 @@ class TestConcreteCliStartupValidation:
     """每个 worker 只能绑定一个可自证的 concrete CLI。"""
 
     _PROVIDERS = {"providers": {
-        "claude-cli": {"type": "claude_cli", "command": ["claude", "-p"], "model": "opus5"},
+        "claude-cli": {"type": "claude_cli", "command": ["claude", "-p"], "model": "claude-opus-5"},
         "qoder-cli": {"type": "qoder_cli", "command": ["qodercli", "-p"], "model": "ultimate"},
         "codex-cli": {"type": "codex_cli", "command": ["codex", "exec"], "model": "gpt-5.6-sol"},
     }}
@@ -1671,7 +1671,7 @@ class TestAITaskExecution:
     """worker 认领并执行独立 AI task(kind='ai'),含白盒审计、错误回执、认领路由。"""
 
     def _ai_claim(self, task_id="at_1", step="synthesis", domain="dl",
-                  provider="claude-cli", model="opus5", audit_context=None):
+                  provider="claude-cli", model="claude-opus-5", audit_context=None):
         claim = {
             "kind": "ai", "task_id": task_id, "step": step, "pool": "ai", "exec_id": "w:1",
             "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
@@ -1718,7 +1718,7 @@ class TestAITaskExecution:
         assert rec["audit_context"]["ask_source_manifest"]["task_id"] == "at_ok"
         assert rec["citation_validation"]["status"] == "valid"
         assert rec["routing"]["requested"] == {
-            "provider": "claude-cli", "model": "opus5",
+            "provider": "claude-cli", "model": "claude-opus-5",
             "reasoning_effort": None,
         }
         assert rec["routing"]["attempts"] == [{"tier": "primary"}]
@@ -2187,7 +2187,7 @@ class TestAITaskTranscript:
         return {
             "kind": "ai", "task_id": task_id, "step": "synthesis", "pool": "ai", "exec_id": "w:1",
             "request": LLMRequest(messages=[{"role": "user", "content": "Q"}], system="S").to_jsonable(),
-            "domain": None, "provider": "claude-cli", "model": "opus5",
+            "domain": None, "provider": "claude-cli", "model": "claude-opus-5",
         }
 
     @pytest.mark.asyncio

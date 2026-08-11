@@ -201,11 +201,12 @@ video:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.video.step_11_smart
-      version: "5"
+      version: "6"
       # 依赖取证:案例类笔记据 evidence.json 引 [E#] 一手来源(非案例类 10_evidence 秒 skip,不挡)。
       needs: ["09_mechanical", "10_evidence"]
       tags: ["vision"]
-      timeout: 1800   # claude-cli 逐张 Read 帧图(最多 20+ 张),与 provider 超时上限对齐
+      # 视觉描述 + 文本成稿最多两轮:2 x 1800s + 300s 收尾余量。
+      timeout: 3900
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
       outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json",
@@ -219,8 +220,8 @@ video:
       version: "6"
       # 统一概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
       needs: ["11_semantic_attestation"]
-      # 证据绑定反馈最多追加一次完整 CLI 调用,预算必须覆盖两轮慢 provider。
-      timeout: 1800
+      # 证据绑定反馈最多追加一次完整 CLI 调用:2 x 1800s + 300s 收尾余量。
+      timeout: 3900
       tags: []
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
@@ -236,7 +237,7 @@ video:
       label: "语义证据独立核验"
       extends: .ai-step
       run: steps.utils.step_semantic_attestation
-      version: "3"
+      version: "4"
       needs: ["11_smart"]
       timeout: 900
       tags: []
@@ -248,7 +249,8 @@ video:
       # 核验步以最终版覆盖 11_smart 先写的 provenance/smart.json,后写者持有(§2.5)。
       output_policy: {overlap_with: ["11_smart"]}
       outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json",
-                "output/ai_logs/11_semantic_attestation.jsonl", "output/ai_logs/11_semantic_attestation.turns.*.jsonl"]
+                "output/ai_logs/11_semantic_attestation.jsonl", "output/ai_logs/11_semantic_attestation.turns.*.jsonl",
+                "output/ai_logs/11_semantic_attestation.semantic.*.jsonl"]
 
     "12_review":
       label: "评审"
@@ -258,7 +260,8 @@ video:
       # 评最新版智能笔记;并读 evidence.json 核 [E#] 忠实性(经传递性排在取证之后)。
       needs: ["12_concepts"]
       tags: []
-      timeout: 1800   # claude-cli 对大 prompt(笔记+机械稿)生成评审较慢,给足时间
+      # 初评失败时可完整修复一次:2 x 1800s + 300s 收尾余量。
+      timeout: 3900
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
       on_complete:
@@ -316,6 +319,8 @@ document:
     "04_translate":
       label: "翻译"
       extends: .ai-step
+      # 默认执行但不参与知识链。耗尽重试后保留失败事实并跳过,不得让阅读辅助分支终止知识发布。
+      allow_failure: true
       run: steps.document.step_04_translate
       prompt_template: 04_translate_document
       needs: ["03_structure"]
@@ -338,8 +343,10 @@ document:
       extends: .ai-step
       run: steps.document.step_05_smart
       prompt_template: 05_smart_document
-      version: "1"
-      needs: ["03_structure", "04_translate"]
+      version: "4"
+      needs: ["03_structure"]
+      # marker 反馈最多追加一次完整 CLI 调用:2 x 1800s + 300s 收尾余量。
+      timeout: 3900
       tags: []
       rules:
         - if_flag: smart_note
@@ -347,7 +354,7 @@ document:
         - when: skip
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
-      outputs: ["output/versions/notes_smart_*", "output/provenance/smart.json", "output/provenance_candidates/smart.json",
+      outputs: ["output/versions/notes_smart_*", "output/provenance_exact/smart.json", "output/provenance_candidates/smart.json",
                 "output/ai_logs/05_smart.jsonl", "output/ai_logs/05_smart.turns.*.jsonl"]
 
     "07_concepts":
@@ -355,46 +362,10 @@ document:
       extends: .ai-step
       run: steps.document.step_07_concepts
       prompt_template: 05_concepts
-      version: "2"
-      needs: ["06_semantic_attestation"]
-      # 证据绑定反馈最多追加一次完整 CLI 调用,预算必须覆盖两轮慢 provider。
-      timeout: 1800
-      tags: []
-      ai:
-        allowed_providers: [claude-cli, codex-cli, qoder-cli]
-      on_complete:
-        - action: index_note
-          candidates:
-            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "06_semantic_attestation", provenance_since_version: "1"}
-            - {note_type: translated, path: "output/translated.html", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/translated.json", provenance_step: "06_semantic_attestation", provenance_since_version: "1"}
-            - {note_type: original, path: "intermediate/document_index.md", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/original.json", provenance_step: "03_structure", provenance_since_version: "1"}
-        - action: collect_glossary
-      outputs: ["output/concepts.json",
-                "output/ai_logs/07_concepts.jsonl", "output/ai_logs/07_concepts.turns.*.jsonl"]
-
-    "06_semantic_attestation":
-      label: "语义证据独立核验"
-      extends: .ai-step
-      run: steps.utils.step_semantic_attestation
-      version: "2"
-      needs: ["05_smart", "04_translate"]
-      timeout: 900
-      tags: []
-      prompt_template: semantic_attestation
-      prompt_locked: true
-      ai:
-        allowed_providers: [claude-cli, codex-cli, qoder-cli]
-      # 核验步以最终版覆盖 05_smart/04_translate 先写的 provenance,后写者持有(§2.5)。
-      output_policy: {overlap_with: ["05_smart", "04_translate"]}
-      outputs: ["output/provenance/smart.json", "output/provenance/translated.json", "output/provenance/semantic_batch.json",
-                "output/ai_logs/06_semantic_attestation.jsonl", "output/ai_logs/06_semantic_attestation.turns.*.jsonl"]
-
-    "08_review":
-      label: "评审"
-      extends: .review
-      run: steps.document.step_08_review
-      version: "1"
-      needs: ["07_concepts"]
+      version: "4"
+      needs: ["05_smart"]
+      # 证据绑定反馈最多追加一次完整 CLI 调用:2 x 1800s + 300s 收尾余量。
+      timeout: 3900
       tags: []
       rules:
         - if_flag: smart_note
@@ -402,10 +373,47 @@ document:
         - when: skip
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
+      outputs: ["output/concepts.json",
+                "output/ai_logs/07_concepts.jsonl", "output/ai_logs/07_concepts.turns.*.jsonl"]
+
+    "08_review":
+      label: "统一评审"
+      extends: .review
+      run: steps.document.step_08_review
+      version: "6"
+      needs: ["07_concepts"]
+      # semantic attestation 一轮 + 评审/修复最多两轮:3 x 1800s + 300s 收尾余量。
+      timeout: 5700
+      tags: []
+      rules:
+        - if_flag: smart_note
+          when: on
+        - when: skip
+      ai:
+        allowed_providers: [claude-cli, codex-cli, qoder-cli]
+      outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json",
+                "output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*",
+                "output/ai_logs/08_review.jsonl", "output/ai_logs/08_review.turns.*.jsonl", "output/ai_logs/08_review.semantic.*.jsonl"]
+
+    "09_publish":
+      label: "知识发布"
+      extends: .cpu-step
+      run: steps.document.step_09_publish
+      version: "1"
+      needs: ["08_review"]
+      timeout: 120
+      rules:
+        - if_flag: smart_note
+          when: on
+        - when: skip
+      effects_require_current_manifest: true
+      effects_required_outputs: ["output/publication.json"]
       on_complete:
+        - action: index_note
+          candidates:
+            - {note_type: smart, path: "output/versions/notes_smart_*", source_manifest: "intermediate/source_segments.json", provenance: "output/provenance/smart.json", provenance_step: "08_review", provenance_since_version: "2"}
         - action: collect_glossary
-      outputs: ["output/review.json", "output/review_input.md", "output/review_sources/*", "output/versions/review_*", "output/versions/review_input_*",
-                "output/ai_logs/08_review.jsonl", "output/ai_logs/08_review.turns.*.jsonl"]
+      outputs: ["output/publication.json"]
 
 audio:
   # AI 步由三个具体 CLI worker 以 allowed_providers OR 语义认领。
@@ -469,8 +477,8 @@ audio:
       version: "6"
       # 统一概念步:播客以智能笔记为源。
       needs: ["04_semantic_attestation"]
-      # 证据绑定反馈最多追加一次完整 CLI 调用,预算必须覆盖两轮慢 provider。
-      timeout: 1800
+      # 证据绑定反馈最多追加一次完整 CLI 调用:2 x 1800s + 300s 收尾余量。
+      timeout: 3900
       tags: []
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
@@ -486,7 +494,7 @@ audio:
       label: "语义证据独立核验"
       extends: .ai-step
       run: steps.utils.step_semantic_attestation
-      version: "3"
+      version: "4"
       needs: ["04_smart_podcast"]
       timeout: 900
       tags: []
@@ -497,7 +505,8 @@ audio:
       # 核验步以最终版覆盖 04_smart_podcast 先写的 provenance/smart.json,后写者持有(§2.5)。
       output_policy: {overlap_with: ["04_smart_podcast"]}
       outputs: ["output/provenance/smart.json", "output/provenance/semantic_batch.json",
-                "output/ai_logs/04_semantic_attestation.jsonl", "output/ai_logs/04_semantic_attestation.turns.*.jsonl"]
+                "output/ai_logs/04_semantic_attestation.jsonl", "output/ai_logs/04_semantic_attestation.turns.*.jsonl",
+                "output/ai_logs/04_semantic_attestation.semantic.*.jsonl"]
 
     "05_review":
       label: "评审"
@@ -505,6 +514,8 @@ audio:
       run: steps.audio.step_05_review
       version: "2"
       needs: ["05_concepts"]
+      # 初评失败时可完整修复一次:2 x 1800s + 300s 收尾余量。
+      timeout: 3900
       tags: []
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]

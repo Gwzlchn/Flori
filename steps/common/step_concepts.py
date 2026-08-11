@@ -181,7 +181,11 @@ class ConceptsStep(StepBase):
             key_terms, failures = self._bind_result(
                 result, parse_failed=parse_failed, snapshot=source.evidence_snapshot,
             )
-            if failures:
+            blocking_failures = [
+                failure for failure in failures
+                if failure != "evidence_binding_incomplete"
+            ]
+            if blocking_failures:
                 raise InputInvalidError(
                     "concept extraction produced no evidence-bound key terms after retry"
                 )
@@ -244,13 +248,40 @@ class ConceptsStep(StepBase):
             snapshot.provenance_nonempty
             and not all_concept_terms_have_evidence(key_terms)
         ):
-            failures.append("evidence_binding_incomplete")
+            key_terms = ConceptsStep._retain_evidence_bound_terms(key_terms)
+            failures.append(
+                "evidence_binding_incomplete"
+                if key_terms else "evidence_binding_empty"
+            )
         if not snapshot.provenance_nonempty:
             failures = [
                 failure for failure in failures
                 if failure not in {"json_parse_failed", "key_terms_empty"}
             ]
         return key_terms, list(dict.fromkeys(failures))
+
+    @staticmethod
+    def _retain_evidence_bound_terms(key_terms: list[Any]) -> list[Any]:
+        """丢弃未绑定项及悬空关系;保留项仍逐条满足来源证据门。"""
+        retained = [
+            dict(item) for item in key_terms
+            if isinstance(item, dict)
+            and isinstance(item.get("evidence_source_segment_ids"), list)
+            and bool(item["evidence_source_segment_ids"])
+        ]
+        names = {
+            item.get("term") for item in retained
+            if isinstance(item.get("term"), str)
+        }
+        for item in retained:
+            related = item.get("related")
+            if isinstance(related, list):
+                item["related"] = [
+                    relation for relation in related
+                    if isinstance(relation, dict)
+                    and relation.get("term") in names
+                ]
+        return retained
 
     @staticmethod
     def _valid_key_term_shape(item: Any) -> bool:

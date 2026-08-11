@@ -819,6 +819,41 @@ def test_exact_quote_marker_requires_consecutive_refs_and_textual_claim() -> Non
     assert mappings == []
 
 
+def test_exact_quote_marker_downgrades_duplicate_but_rejects_bad_followups() -> None:
+    source = _source_manifest()
+    segment = source["segments"][2]
+    segment["support_text"] = "重复引用仍只产生一条证据。"
+    segment["support_artifact"] = {
+        "kind": "html",
+        "path": "input/source.html",
+        "sha256": "c" * 64,
+        "selector": {"start": 40, "end": 60},
+    }
+    token = segment["segment_id"].removeprefix("seg_")
+    marked = (
+        f"重复引用仍只产生一条证据。 [[source:{token}]]\n"
+        f"后续重复 marker 只移除。 [[source:{token}]]"
+    )
+
+    clean, mappings = extract_exact_quote_markers(
+        marked, source, error_prefix="smart note",
+    )
+
+    assert "[[source:" not in clean
+    assert len(mappings) == 1
+    assert mappings[0]["source_segment_ids"] == [segment["segment_id"]]
+
+    unknown = "0" * 64
+    with pytest.raises(ValueError, match="unknown source marker"):
+        extract_exact_quote_markers(
+            f"{marked} [[source:{unknown}]]", source, error_prefix="smart note",
+        )
+    with pytest.raises(ValueError, match="malformed source marker"):
+        extract_exact_quote_markers(
+            f"{marked} [[source:broken", source, error_prefix="smart note",
+        )
+
+
 def test_exact_quote_normalization_applies_nfc_but_not_nfkc() -> None:
     source = _source_manifest()
     source["segments"][0]["support_artifact"] = {

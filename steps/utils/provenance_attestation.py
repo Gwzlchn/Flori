@@ -11,7 +11,6 @@ from shared.errors import AIProviderError
 from shared.note_text import markdown_to_index_text
 from shared.provenance import (
     MAX_SEMANTIC_AI_LOG_BYTES,
-    MAX_SEMANTIC_AI_LOG_RECORDS,
     SEMANTIC_ATTESTATION_POLICY,
     SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
     SEMANTIC_BATCH_COMMIT_PATH,
@@ -30,8 +29,6 @@ from shared.provenance import (
     write_provenance_candidate_manifest,
     write_provenance_manifest,
 )
-
-
 SOURCE_MANIFEST_PATH = "intermediate/source_segments.json"
 _NOTE_TYPES = ("smart", "translated")
 
@@ -111,13 +108,19 @@ def persist_semantic_candidates(
     return {"status": manifest["status"], "candidates": len(candidates)}
 
 
-def semantic_attestation_input_hashes(job_dir: Path) -> dict[str, str]:
+def semantic_attestation_input_hashes(
+    job_dir: Path, *, note_types: Sequence[str] = _NOTE_TYPES,
+    exact_provenance_dir: str = "output/provenance",
+) -> dict[str, str]:
     """独立 attestation step 的幂等输入只绑定 producer 候选和 exact final。"""
+    if exact_provenance_dir not in {"output/provenance", "output/provenance_exact"}:
+        raise ValueError("semantic exact provenance directory is invalid")
     hashes: dict[str, str] = {}
-    for note_type in _NOTE_TYPES:
+    note_types = _validated_note_types(note_types)
+    for note_type in note_types:
         for kind, rel in (
             ("candidate", f"output/provenance_candidates/{note_type}.json"),
-            ("final", f"output/provenance/{note_type}.json"),
+            ("final", f"{exact_provenance_dir}/{note_type}.json"),
         ):
             path = job_dir / rel
             if path.is_file():
@@ -130,8 +133,13 @@ def finalize_pending_semantic_provenance(
     *,
     pipeline: str,
     ai,
+    note_types: Sequence[str] = _NOTE_TYPES,
+    exact_provenance_dir: str = "output/provenance",
 ) -> dict[str, Any]:
     """一次批量调用准备全部 final,再以 commit-last 原子发布可信批次。"""
+    note_types = _validated_note_types(note_types)
+    if exact_provenance_dir not in {"output/provenance", "output/provenance_exact"}:
+        raise ValueError("semantic exact provenance directory is invalid")
     source_path = job_dir / SOURCE_MANIFEST_PATH
     if not source_path.is_file():
         (job_dir / SEMANTIC_BATCH_COMMIT_PATH).unlink(missing_ok=True)
@@ -151,7 +159,7 @@ def finalize_pending_semantic_provenance(
 
     loaded: list[dict[str, Any]] = []
     candidate_artifacts: list[dict[str, str]] = []
-    for note_type in _NOTE_TYPES:
+    for note_type in note_types:
         candidate_path = job_dir / "output" / "provenance_candidates" / f"{note_type}.json"
         if not candidate_path.is_file():
             continue
@@ -222,6 +230,7 @@ def finalize_pending_semantic_provenance(
     if selected_candidate_ids:
         assert isinstance(prompt, str)
         try:
+            expected_call_index = ai.call_index
             response_text = ai.call(prompt, response_format="json", temperature=0)
             calls = 1
             response = ai.last_response
@@ -234,6 +243,9 @@ def finalize_pending_semantic_provenance(
                 prompt=prompt,
                 response_text=response_text,
                 response=response,
+                record=(ai.ai_log_records[-1] if ai.ai_log_records else None),
+                expected_call_index=expected_call_index,
+                next_call_index=ai.call_index,
             )
         except Exception as exc:
             ai.log.warning(
@@ -280,9 +292,10 @@ def finalize_pending_semantic_provenance(
                 response_candidate_ids=selected_candidate_ids,
                 required_response_schema=SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
             )
+        exact_provenance_path = job_dir / exact_provenance_dir / f"{item['note_type']}.json"
         provenance_path = job_dir / "output" / "provenance" / f"{item['note_type']}.json"
         provenance = validate_provenance_manifest(
-            _load_canonical(provenance_path.read_bytes(), "note provenance"),
+            _load_canonical(exact_provenance_path.read_bytes(), "note provenance"),
             source_manifest=source_manifest,
             note_bytes=item["note_bytes"],
             normalized_body=item["normalized_body"],
@@ -351,51 +364,52 @@ def _capture_ai_log_binding(
     prompt: str,
     response_text: str,
     response,
+    record: Mapping[str, Any] | None,
+    expected_call_index: int,
+    next_call_index: int,
 ) -> dict[str, Any]:
-    rel = f"output/ai_logs/{step_name}.jsonl"
-    path = job_dir / rel
-    data = path.read_bytes()
-    if len(data) > MAX_SEMANTIC_AI_LOG_BYTES:
-        raise ValueError("semantic attestor ai_log exceeds size limit")
-    lines = [line for line in data.splitlines() if line.strip()]
-    if len(lines) > MAX_SEMANTIC_AI_LOG_RECORDS:
-        raise ValueError("semantic attestor ai_log has too many records")
-    records = []
-    for line in lines:
-        try:
-            record = json.loads(line)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            raise ValueError("semantic attestor ai_log is invalid JSONL") from exc
-        if not isinstance(record, dict):
-            raise ValueError("semantic attestor ai_log record is invalid")
-        records.append(record)
-    matches = [
-        record for record in records
-        if record.get("job_id") == job_dir.name
-        and record.get("step") == step_name
-        and record.get("session_id") == response.session_id
-        and (record.get("prompt") or {}).get("rendered", {}).get("user") == prompt
-        and (record.get("output") or {}).get("content") == response_text
-        and record.get("ok") is True
-    ]
-    if len(matches) != 1:
-        raise ValueError("semantic attestor ai_log record is not unique")
-    record = matches[0]
+    if not isinstance(record, dict):
+        raise ValueError("semantic attestor ai_log record is unavailable")
+    if (
+        record.get("job_id") != job_dir.name
+        or record.get("step") != step_name
+        or record.get("session_id") != response.session_id
+        or (record.get("prompt") or {}).get("rendered", {}).get("user") != prompt
+        or (record.get("output") or {}).get("content") != response_text
+        or record.get("ok") is not True
+    ):
+        raise ValueError("semantic attestor ai_log record identity changed")
     routing = record.get("routing") or {}
     if routing.get("provider") != response.provider or routing.get("model") != response.model:
         raise ValueError("semantic attestor ai_log routing changed")
     call_index = record.get("call_index")
-    if type(call_index) is not int or call_index < 0:
+    if (
+        type(expected_call_index) is not int
+        or expected_call_index < 0
+        or type(next_call_index) is not int
+        or next_call_index != expected_call_index + 1
+        or type(call_index) is not int
+        or call_index != expected_call_index
+    ):
         raise ValueError("semantic attestor ai_log call_index is invalid")
     try:
         parsed = json.loads(response_text)
         decisions = parsed["decisions"]
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("semantic attestor response is invalid") from exc
+    record_data = canonical_json_bytes(record)
+    if len(record_data) > MAX_SEMANTIC_AI_LOG_BYTES:
+        raise ValueError("semantic attestor ai_log record exceeds size limit")
+    record_sha256 = _sha256(canonical_json_bytes(record))
+    proof_rel = (
+        f"output/ai_logs/{step_name}.semantic.{call_index}."
+        f"{record_sha256[:16]}.jsonl"
+    )
+    _write_bytes_atomic(job_dir / proof_rel, record_data)
     return {
-        "path": rel,
+        "path": proof_rel,
         "call_index": call_index,
-        "record_sha256": _sha256(canonical_json_bytes(record)),
+        "record_sha256": record_sha256,
         "session_id": response.session_id,
         "provider": response.provider,
         "model": response.model,
@@ -469,3 +483,12 @@ def _load_canonical(data: bytes, field: str) -> dict[str, Any]:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _validated_note_types(note_types: Sequence[str]) -> tuple[str, ...]:
+    values = tuple(note_types)
+    if not values or len(values) != len(set(values)):
+        raise ValueError("semantic attestation note types are invalid")
+    if any(value not in _NOTE_TYPES for value in values):
+        raise ValueError("semantic attestation note type is unsupported")
+    return values

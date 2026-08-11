@@ -136,7 +136,7 @@ def test_digital_pdf_keeps_page_bbox_figures_tables_and_references(
     monkeypatch.setattr(
         ScholarlyPdfAdapter,
         "_layout",
-        lambda self: (_digital_pages(), "fixture_layout"),
+        lambda self: (_digital_pages(), "pdftohtml_xml"),
     )
     before_paths = sorted(path.relative_to(job_dir) for path in job_dir.rglob("*"))
 
@@ -172,7 +172,7 @@ def test_digital_pdf_keeps_page_bbox_figures_tables_and_references(
     assert quality["reasons"] == [
         "pdf_table_crop_ambiguous", "pdf_table_structure_unavailable",
     ]
-    assert quality["metrics"]["layout_method"] == "fixture_layout"
+    assert quality["metrics"]["layout_method"] == "pdftohtml_xml"
     assert quality["metrics"]["figure_panel_count"] == 1
 
 
@@ -183,7 +183,7 @@ def test_layout_detector_expands_figure_and_bounds_table_by_caption(
     job_dir, job, _raw = pdf_job
 
     class FakeDetector:
-        model_identity = "sha256:fixture"
+        model_identity = "sha256:" + "f" * 64
 
         @staticmethod
         def detect_pdf_page(
@@ -212,7 +212,7 @@ def test_layout_detector_expands_figure_and_bounds_table_by_caption(
     monkeypatch.setattr(
         ScholarlyPdfAdapter,
         "_layout",
-        lambda self: (_digital_pages(), "fixture_layout"),
+        lambda self: (_digital_pages(), "pdftohtml_xml"),
     )
 
     document, quality = parse_pdf_document(job_dir, job)
@@ -235,7 +235,7 @@ def test_layout_detector_failure_disables_model_and_keeps_geometry_fallback(
     job_dir, job, _raw = pdf_job
 
     class FailingDetector:
-        model_identity = "sha256:fixture"
+        model_identity = "sha256:" + "f" * 64
         calls = 0
 
         @classmethod
@@ -254,7 +254,7 @@ def test_layout_detector_failure_disables_model_and_keeps_geometry_fallback(
     monkeypatch.setattr(
         ScholarlyPdfAdapter,
         "_layout",
-        lambda self: (_digital_pages(), "fixture_layout"),
+        lambda self: (_digital_pages(), "pdftohtml_xml"),
     )
 
     document, quality = parse_pdf_document(job_dir, job)
@@ -302,7 +302,7 @@ def test_pdf_sidecar_metadata_wins_over_container_metadata(
         "Pages": "1", "Title": "NBER WORKING PAPER SERIES", "Author": "",
     })
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: (_digital_pages(), "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: (_digital_pages(), "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -342,7 +342,7 @@ def test_pdf_job_title_wins_over_header_and_recovers_cover_authors(
         "Pages": "16", "Title": "VOLUME 44, NUMBER 1",
     })
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -378,7 +378,7 @@ def test_pdf_cover_ignores_superscript_affiliations_after_fragmented_authors(
         ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "23"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -403,7 +403,7 @@ def test_pdf_cover_single_author_replaces_missing_container_author(
         ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "16"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -432,7 +432,7 @@ def test_pdf_cover_complete_authors_replace_incomplete_container_author(
         "Pages": "22", "Author": "Lopez de Prado, Marcos",
     })
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -462,7 +462,7 @@ def test_pdf_report_body_is_not_misclassified_as_authors(
         ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "5"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -488,7 +488,7 @@ def test_pdf_cover_combines_multiline_title_authors_date_and_report_id(
     ])
     monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "16"})
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -545,7 +545,7 @@ def test_pdf_cover_splits_authors_and_ignores_container_username(
         "Pages": "1", "Author": container_author,
     })
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -573,7 +573,7 @@ def test_pdf_cover_keeps_author_split_by_superscript_marker(
     ])
     monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "1"})
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -605,7 +605,7 @@ def test_pdf_cover_splits_multiline_comma_separated_author_list(
     ])
     monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "1"})
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -637,7 +637,7 @@ def test_repository_cover_reorders_semicolon_authors_and_reads_year(
     ])
     monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "1"})
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -681,7 +681,7 @@ def test_pdf_labeled_cover_uses_article_title_and_complete_author_lineup(
     ])
     monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "9"})
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -716,7 +716,7 @@ def test_digital_pdf_restores_reliable_table_cells_with_bbox(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, quality = parse_pdf_document(job_dir, job)
@@ -741,7 +741,7 @@ def test_scanned_pdf_failed_ocr_is_explicitly_rejected(
     monkeypatch.setattr(ScholarlyPdfAdapter, "_pdf_info", lambda self: {"Pages": "2"})
     monkeypatch.setattr(ScholarlyPdfAdapter, "_layout", lambda self: ([
         PageLayout(1, 600, 800), PageLayout(2, 600, 800),
-    ], "fixture_scan"))
+        ], "pdftohtml_xml"))
     monkeypatch.setattr(ScholarlyPdfAdapter, "_ocr_layout", lambda self: [])
 
     document, quality = parse_pdf_document(job_dir, job)
@@ -767,7 +767,7 @@ def test_forced_scanned_pdf_with_partial_ocr_is_degraded_not_complete(
     })
     monkeypatch.setattr(ScholarlyPdfAdapter, "_layout", lambda self: ([PageLayout(
         1, 600, 800, [LayoutItem("OCR recovered title and one paragraph.", [20, 20, 400, 50])],
-    )], "fixture_ocr"))
+        )], "rapidocr_page_bbox"))
 
     document, quality = parse_pdf_document(job_dir, job)
 
@@ -879,7 +879,7 @@ def test_zero_area_text_bbox_falls_back_to_page_locator(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -906,7 +906,7 @@ def test_prose_figure_references_are_not_registered_as_figures(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -933,7 +933,7 @@ def test_prose_table_references_are_not_registered_as_tables(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -970,7 +970,7 @@ def test_exhibit_uses_layout_semantics_and_merges_full_width_table_panels(
     ])
 
     class FakeDetector:
-        model_identity = "sha256:fixture"
+        model_identity = "sha256:" + "f" * 64
 
         @staticmethod
         def detect_pdf_page(
@@ -1000,7 +1000,7 @@ def test_exhibit_uses_layout_semantics_and_merges_full_width_table_panels(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, quality = parse_pdf_document(job_dir, job)
@@ -1037,7 +1037,7 @@ def test_exhibit_without_layout_semantics_fails_closed(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, quality = parse_pdf_document(job_dir, job)
@@ -1065,7 +1065,7 @@ def test_multiline_figure_caption_uses_complete_nearest_image_cluster(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1100,7 +1100,7 @@ def test_pdf_figure_keeps_all_rows_of_six_panel_grid(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1126,7 +1126,7 @@ def test_pdf_figure_keeps_tall_composite_near_bottom_caption(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1156,7 +1156,7 @@ def test_pdf_figure_with_top_caption_combines_following_image_grid(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1187,7 +1187,7 @@ def test_pdf_table_caption_above_uses_own_column_and_stops_before_section(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1219,7 +1219,7 @@ def test_pdf_table_caption_below_crops_upward_without_previous_prose(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1255,7 +1255,7 @@ def test_pdf_full_width_table_stops_before_two_column_body(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1290,7 +1290,7 @@ def test_pdf_single_column_boxed_table_keeps_all_rows_until_body_gap(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1326,7 +1326,7 @@ def test_pdf_table_with_rotated_header_keeps_normal_rows_until_section(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1352,7 +1352,7 @@ def test_pdf_table_uses_nearby_horizontal_rules_when_text_layout_is_ambiguous(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_table_region",
@@ -1391,7 +1391,7 @@ def test_pdf_rule_table_expands_incomplete_text_crop(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_table_region",
@@ -1428,7 +1428,7 @@ def test_pdf_rule_table_ignores_section_heading_in_other_column(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_table_region",
@@ -1461,7 +1461,7 @@ def test_pdf_rule_tables_do_not_cross_another_table_caption(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_table_region",
@@ -1501,7 +1501,7 @@ def test_pdf_split_same_line_caption_keeps_full_width_table_column(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_table_region",
@@ -1540,7 +1540,7 @@ def test_vector_figure_with_top_caption_crops_until_note(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1565,7 +1565,7 @@ def test_vector_figure_below_right_column_uses_bounded_crop(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1588,7 +1588,7 @@ def test_tiny_raster_icon_does_not_replace_full_vector_figure(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, quality = parse_pdf_document(job_dir, job)
@@ -1622,7 +1622,7 @@ def test_sparse_raster_icons_do_not_truncate_full_vector_figure(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, quality = parse_pdf_document(job_dir, job)
@@ -1654,7 +1654,7 @@ def test_vector_caption_near_page_top_can_describe_figure_above(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1680,7 +1680,7 @@ def test_two_column_vector_crop_excludes_adjacent_prose(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -1707,7 +1707,7 @@ def test_left_column_vector_crop_keeps_visual_wider_than_caption(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -1739,7 +1739,7 @@ def test_heuristic_vector_crop_tightens_to_rasterized_ink(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: raster,
@@ -1775,7 +1775,7 @@ def test_vector_crop_skips_leading_prose_and_section_heading(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: raster,
@@ -1804,7 +1804,7 @@ def test_vector_crop_starts_after_previous_figure_caption(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -1836,7 +1836,7 @@ def test_vector_crop_starts_after_full_multiline_previous_caption(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -1869,7 +1869,7 @@ def test_vector_crop_removes_prose_before_full_width_figure(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -1902,7 +1902,7 @@ def test_vector_caption_below_plot_ignores_tabular_content_after_caption(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -1932,7 +1932,7 @@ def test_vector_crop_keeps_repeated_axes_and_panel_labels_in_multirow_chart(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -1960,7 +1960,7 @@ def test_blank_region_above_caption_is_not_replaced_by_body_prose_below(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -1988,7 +1988,7 @@ def test_landscape_figure_uses_full_page_width_and_tall_candidate(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -2017,7 +2017,7 @@ def test_tall_vector_figure_expands_when_ink_touches_candidate_top(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: raster,
@@ -2050,7 +2050,7 @@ def test_vector_figure_does_not_expand_past_note_boundary(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: raster,
@@ -2083,7 +2083,7 @@ def test_vector_figure_expands_incrementally_without_absorbing_previous_table(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: raster,
@@ -2113,7 +2113,7 @@ def test_vector_crop_discards_isolated_running_header_band(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: raster,
@@ -2143,7 +2143,7 @@ def test_vector_crop_discards_isolated_footer_page_number(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: raster,
@@ -2174,7 +2174,7 @@ def test_vector_crop_does_not_treat_numeric_axis_ticks_as_section_boundaries(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_visual_raster", lambda self, page: None,
@@ -2237,7 +2237,7 @@ def test_pdf_whitepaper_uses_same_kind_with_digital_profile(
         lambda self: {"Pages": "1", "Title": "A Systems Whitepaper"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: (_digital_pages(), "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: (_digital_pages(), "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -2275,7 +2275,7 @@ def test_duplicate_figure_number_keeps_descriptive_caption_not_bare_reference(
         lambda self: {"Pages": "2", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -2310,7 +2310,7 @@ def test_split_figure_caption_beats_longer_fig_reference_at_line_start(
         lambda self: {"Pages": "2", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -2344,7 +2344,7 @@ def test_fragmented_standalone_figure_label_beats_body_reference(
         lambda self: {"Pages": "2", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter, "_page_layout_detections", lambda self, page: [],
@@ -2385,7 +2385,7 @@ def test_explicit_colon_caption_beats_bare_label_followed_by_body_prose(
         lambda self: {"Pages": "2", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -2436,7 +2436,7 @@ def test_layout_caption_detection_beats_longer_split_prose_reference(
         lambda self: {"Pages": "2", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "pdftohtml_xml"),
     )
     monkeypatch.setattr(
         ScholarlyPdfAdapter,
@@ -2474,7 +2474,7 @@ def test_midline_figure_reference_is_not_treated_as_caption(
         lambda self: {"Pages": "2", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: (pages, "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)
@@ -2499,7 +2499,7 @@ def test_right_column_caption_can_share_row_with_left_column_body(
         lambda self: {"Pages": "1", "Title": "Paper title"},
     )
     monkeypatch.setattr(
-        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "fixture_layout"),
+        ScholarlyPdfAdapter, "_layout", lambda self: ([page], "pdftohtml_xml"),
     )
 
     document, _quality = parse_pdf_document(job_dir, job)

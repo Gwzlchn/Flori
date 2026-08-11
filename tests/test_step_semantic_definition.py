@@ -101,6 +101,7 @@ def test_runtime_changes_keep_digest_stable(key: str, value) -> None:
         ("fan_in", ["07_danmaku"]),
         ("rules", [{"exists": "input/*.ass", "when": "on"}]),
         ("condition", "has_danmaku"),
+        ("allow_failure", True),
         ("ai", {"primary": {"provider": "claude-cli", "model": "model-b"}}),
         ("prompt_template", "05_concepts"),
         ("prompt_locked", True),

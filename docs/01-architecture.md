@@ -210,14 +210,13 @@ graph LR
     dl_d["01_download"] --> parse_d["02_parse"] --> structure_d["03_structure"]
     structure_d --> translate_d["04_translate(条件)"]
     structure_d --> smart_d["05_smart(条件)"]
-    translate_d --> smart_d
-    smart_d --> attest_d["06_semantic_attestation"] --> concepts_d["07_concepts"] --> review_d["08_review(条件)"]
+    smart_d --> concepts_d["07_concepts"] --> review_d["08_review(统一评审)"] --> publish_d["09_publish"]
 ```
 
 **音频 / 播客 (audio)** — M6 实现：
 ```mermaid
 graph LR
-    dl_au["01_download"] --> whisper_au["02_whisper"] --> transcript["03_transcript_parse"] --> smart_au["04_smart_podcast"] --> review_au["05_review"]
+    dl_au["01_download"] --> whisper_au["02_whisper"] --> transcript["03_transcript_parse"] --> smart_au["04_smart_podcast"] --> attest_au["04_semantic_attestation"] --> concepts_au["05_concepts"] --> review_au["05_review"]
 ```
 
 三类顶层内容共享 StepBase、调度器和证据基础设施。Document 的体裁由 `document_kind` 表示，
@@ -238,7 +237,7 @@ fan-in 成 Job 级来源、时间线和 assets；`09_mechanical` 只消费该合
 |------|---------|------|---------|
 | io | 1024 | 轻量 IO；单机容量由 Worker concurrency 限制 | 01_download（各 pipeline）, 07_danmaku(v), 09_merge_parts/09_mechanical(v) |
 | cpu | 1024 | CPU 步骤；单机容量由 Worker concurrency 限制 | 02_whisper/03_scene/04_frames/05_dedup/06_ocr(v)、02_parse/03_structure(d)、03_transcript_parse(au) |
-| ai | 1024 | LLM 步骤；再按具体 Provider 与 Worker concurrency 限速 | 08_punctuate/10_evidence/11_smart/11_semantic_attestation/12_concepts/12_review(v)、04_translate/05_smart/06_semantic_attestation/07_concepts/08_review(d)、04_smart_podcast/04_semantic_attestation/05_concepts/05_review(au) |
+| ai | 1024 | LLM 步骤；再按具体 Provider 与 Worker concurrency 限速 | 08_punctuate/10_evidence/11_smart/11_semantic_attestation/12_concepts/12_review(v)、04_translate/05_smart/07_concepts/08_review(d)、04_smart_podcast/04_semantic_attestation/05_concepts/05_review(au) |
 | gpu | 1024 | 可选 GPU 能力池；单机容量由 Worker concurrency 限制 | 02_whisper(au) |
 
 表中是 `configs/pools.yaml` 的默认系统天花板，可由运行时 override 收紧。Worker 实际订阅池和

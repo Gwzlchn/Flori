@@ -113,6 +113,17 @@ def test_model_checksum_mismatch_blocks_session_loading(tmp_path: Path) -> None:
         )
 
 
+def test_model_identity_hashes_model_without_configured_checksum(tmp_path: Path) -> None:
+    detector, _session = _detector(
+        tmp_path,
+        np.empty((1, 0, 6), dtype=np.float32),
+    )
+
+    assert detector.model_identity == "sha256:" + hashlib.sha256(
+        b"fixed-model"
+    ).hexdigest()
+
+
 def test_unknown_model_label_is_rejected() -> None:
     with pytest.raises(LayoutDetectorError, match="unknown label"):
         _model_names({**_NAMES, 10: "malicious"})

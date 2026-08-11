@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 DEFAULT_AI_PROVIDER = "claude-cli"
-DEFAULT_AI_MODEL = "opus5"
+DEFAULT_AI_MODEL = "claude-opus-5"
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_QODER_MODEL = "ultimate"
 DEFAULT_KIMI_MODEL = "moonshot-v1-128k"

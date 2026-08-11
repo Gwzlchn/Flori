@@ -91,6 +91,7 @@ class DocumentLayoutDetector:
     ) -> None:
         self.model_path = model_path
         self.expected_sha256 = str(expected_sha256 or "").removeprefix("sha256:")
+        self._actual_sha256: str | None = None
         self.confidence = confidence
         self.threads = threads
         self._session_factory = session_factory
@@ -114,15 +115,23 @@ class DocumentLayoutDetector:
 
     @property
     def model_identity(self) -> str:
-        return "sha256:" + self.expected_sha256 if self.expected_sha256 else self.model_path.name
+        if self.expected_sha256:
+            return "sha256:" + self.expected_sha256
+        if self._actual_sha256 is None:
+            if not self.model_path.is_file() or self.model_path.stat().st_size <= 0:
+                raise LayoutDetectorError("layout model file is unavailable")
+            self._actual_sha256 = _file_sha256(self.model_path)
+        return "sha256:" + self._actual_sha256
 
     def _load_session(self) -> Any:
         if self._session is not None:
             return self._session
         if not self.model_path.is_file() or self.model_path.stat().st_size <= 0:
             raise LayoutDetectorError("layout model file is unavailable")
-        if self.expected_sha256 and _file_sha256(self.model_path) != self.expected_sha256:
+        actual_sha256 = _file_sha256(self.model_path)
+        if self.expected_sha256 and actual_sha256 != self.expected_sha256:
             raise LayoutDetectorError("layout model checksum does not match")
+        self._actual_sha256 = actual_sha256
         try:
             if self._session_factory is None:
                 import onnxruntime as ort

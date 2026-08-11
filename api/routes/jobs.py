@@ -2490,7 +2490,7 @@ def _provider_available(
 
 
 async def _rerun_step_requirements(
-    config: AppConfig, pipeline: str, step_names: tuple[str, str],
+    config: AppConfig, pipeline: str, step_names: tuple[str, ...],
     storage: StorageBackend, job_id: str,
 ) -> list[tuple[str, list[str]]] | None:
     """目标步骤的 pool、静态标签和本次产物条件能力来自 pipeline 定义。"""
@@ -2532,18 +2532,18 @@ async def rerun_smart(
     storage: StorageBackend = Depends(get_storage),
     config: AppConfig = Depends(get_config),
 ):
-    """用指定 provider 重跑智能笔记 + 评审,生成新版本(旧版本保留)。"""
+    """用指定 provider 重跑智能笔记、概念与评审,生成新版本(旧版本保留)。"""
     validate_path_segment(job_id, "job_id")
     job = await asyncio.to_thread(db.get_job, job_id)
     if not job:
         raise HTTPException(404, "job not found")
     _require_activated_for_execution(job)
     try:
-        smart_step, review_step = pipeline_ai_roles(job.pipeline)
+        role_steps = pipeline_ai_roles(job.pipeline)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     requirements = await _rerun_step_requirements(
-        config, job.pipeline, (smart_step, review_step), storage, job_id,
+        config, job.pipeline, role_steps, storage, job_id,
     )
     workers = await _provider_workers(redis)
     if requirements is None or not _provider_available(
@@ -2579,15 +2579,15 @@ async def rerun_smart(
         doc["ai_overrides"] = overrides
     if not isinstance(overrides, dict):
         raise HTTPException(409, "job.json ai_overrides 必须是对象")
-    doc["ai_overrides"][smart_step] = req.provider
-    doc["ai_overrides"][review_step] = req.provider
+    for step in role_steps:
+        doc["ai_overrides"][step] = req.provider
     param_overrides = doc.get("ai_param_overrides")
     if param_overrides is None and "ai_param_overrides" not in doc:
         param_overrides = {}
     if not isinstance(param_overrides, dict):
         raise HTTPException(409, "job.json ai_param_overrides 必须是对象")
-    # 未带参数也要清掉两步的旧参数覆盖:换 provider 后残留的 model/effort 会指向错误取值域。
-    for step in (smart_step, review_step):
+    # 未带参数也要清掉全部目标步的旧参数覆盖:换 provider 后残留值会落到错误取值域。
+    for step in role_steps:
         if params:
             param_overrides[step] = dict(params)
         else:
@@ -2599,12 +2599,12 @@ async def rerun_smart(
     await storage.write_file(job_id, "job.json",
                              json.dumps(doc, ensure_ascii=False, indent=2).encode("utf-8"))
     await redis.append_lifecycle_event("job_command", {
-        "action": "rerun", "job_id": job_id, "from_step": smart_step,
+        "action": "rerun", "job_id": job_id, "from_step": role_steps[0],
     })
     return {"job_id": job_id, "status": "processing", "provider": req.provider,
             "model": model_override or None,
             "reasoning_effort": effort_override or None,
-            "from_step": smart_step, "review_step": review_step}
+            "from_step": role_steps[0], "review_step": role_steps[-1]}
 
 
 @router.post("/{job_id}/resubmit", response_model=JobStatusResponse)

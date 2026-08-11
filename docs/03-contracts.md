@@ -121,9 +121,9 @@ arXiv 推断为 `document/research_paper`，非 arXiv 直链 PDF 推断为 `docu
 调用方提供的来源标题，优先于 PDF 容器内易受编译器、期刊页眉污染的 Title；未传时保持来源自动识别。
 投递指定 `collection_id` 时，省略 `domain` 或传 `general` 会继承集合 domain；显式传入其它 domain
 返回 `409`，避免 collection 与 job 的领域不变量漂移。upload 路径遵循同一规则。
-可选字段 `smart_note`（bool，默认 `null`）控制智能笔记及评审；`null` 时
-`document_kind=article` 默认关闭，其他顶层类型/Document kind 默认开启。概念提取仍执行；关闭时跳过
-Document `05_smart` 和 `08_review`。该开关写入 `job.meta.flags`，由 scheduler 的规则求值。
+可选字段 `smart_note`（bool，默认 `null`）控制智能笔记及其知识加工链；`null` 时
+`document_kind=article` 默认关闭，其他顶层类型/Document kind 默认开启。关闭时跳过 Document
+`05_smart`、`07_concepts`、`08_review` 和 `09_publish`。该开关写入 `job.meta.flags`，由 scheduler 的规则求值。
 
 可选字段 `mechanical_only`(bool,默认 `false`)定义纯机械处理范围。为 `true` 时入口门禁不要求
 AI Worker,scheduler 对当前及未来所有 `pool=ai` 步骤统一标记 `skipped(reason=mechanical_only)`,这些
@@ -565,22 +565,22 @@ running job:不 kill worker,其推回结果经 `cas_step_status`(steps hash 已�
 > 审计:job / collection / knowledge_base 的增删改经 `shared.audit.audit(entity_type, entity_id, action, actor, detail)`
 > 结构化输出(`evt=audit`)到容器日志,在 **Dozzle** 查看(不建表/不建前端页;可扩展:加新实体只传新 `entity_type`)。
 
-#### POST /api/jobs/{id}/rerun-smart — 换 provider 重跑智能笔记 + 评审
+#### POST /api/jobs/{id}/rerun-smart — 换 provider 重跑知识 AI 链
 
-用指定 AI provider 重新生成智能笔记并重评(生成新版本,旧版本保留)。智能步与评审步按 pipeline 动态解析,不写死 video 步名:
+用指定 AI provider 重新生成智能笔记、证据核验、概念与评审(生成新版本,旧版本保留)。目标 AI 步按 pipeline 动态解析,不写死 video 步名:
 
-| pipeline | 智能步 | 评审步 |
-|----------|--------|--------|
-| `video` | `11_smart` | `12_review` |
-| `document` | `05_smart` | `08_review` |
-| `audio` | `04_smart_podcast` | `05_review` |
+| pipeline | 按执行顺序覆盖的 AI 步 |
+|----------|-------------------------|
+| `video` | `11_smart`、`11_semantic_attestation`、`12_concepts`、`12_review` |
+| `document` | `05_smart`、`07_concepts`、`08_review` |
+| `audio` | `04_smart_podcast`、`04_semantic_attestation`、`05_concepts`、`05_review` |
 
 ```bash
 curl -X POST http://localhost:8000/api/jobs/j_xxx/rerun-smart \
   -d '{"provider": "anthropic"}'
 ```
 
-请求体:`{"provider":"anthropic"}`(必填),可选 `model` 与 `reasoning_effort`(前端 provider/模型/档位选择器用)。provider 必须存在于当前运行配置，且智能步、评审步各自都有在线、未暂停、属于目标 pool 并满足硬标签的 Worker。两步可由不同 Worker 满足；Document 始终读取结构化 document/translation 产物，不以旧 Markdown 触发读文件回退。
+请求体:`{"provider":"anthropic"}`(必填),可选 `model` 与 `reasoning_effort`(前端 provider/模型/档位选择器用)。provider 必须存在于当前运行配置，且智能步、概念步与评审步各自都有在线、未暂停、属于目标 pool 并满足硬标签的 Worker。各步可由不同 Worker 满足；Document 的知识链只读取原始 Document、来源段、智能笔记和概念产物,不读取译文或旧 Markdown。重跑从智能步开始会使概念、统一评审和发布门一并失效并按 DAG 重算。
 
 `model` / `reasoning_effort` 覆盖规则:
 - 只能与当前配置中的**具体** provider 搭配;不存在虚拟或运行时再解析的 provider。
@@ -591,13 +591,14 @@ curl -X POST http://localhost:8000/api/jobs/j_xxx/rerun-smart \
 写入 `job.json`（关键字段）：
 ```json
 {
-  "ai_overrides": {"11_smart": "anthropic", "12_review": "anthropic"},
-  "ai_param_overrides": {"11_smart": {"model": "claude-sonnet-4-6", "reasoning_effort": "high"},
-                          "12_review": {"model": "claude-sonnet-4-6", "reasoning_effort": "high"}}
+  "ai_overrides": {"05_smart": "qoder-cli", "07_concepts": "qoder-cli", "08_review": "qoder-cli"},
+  "ai_param_overrides": {"05_smart": {"model": "ultimate", "reasoning_effort": "max"},
+                          "07_concepts": {"model": "ultimate", "reasoning_effort": "max"},
+                          "08_review": {"model": "ultimate", "reasoning_effort": "max"}}
 }
 ```
 
-`ai_param_overrides` 仅当请求带参数时写入;不带参数的 rerun 会**清除**两个角色步的既有参数覆盖(防旧 model 名残留到新 provider 的取值域)。其它步骤键不受影响。步骤执行端(`shared.ai_routing.parse_ai_param_override` + `shared.step_ai`)按同样规则 fail-closed:参数覆盖缺 provider 覆盖、provider 不存在或形状非法都判 `input_invalid`。参数覆盖走**输入指纹**(智能/评审步的 `provider` 指纹项变为 `provider|model=…;reasoning_effort=…` 复合串)驱动重跑;`def_digest` 仍只由 pipeline 定义(version + ai 配置)决定,job 级覆盖不改变它。
+`ai_param_overrides` 仅当请求带参数时写入;不带参数的 rerun 会**清除**全部知识 AI 角色步的既有参数覆盖(防旧 model 名残留到新 provider 的取值域)。其它步骤键不受影响。步骤执行端(`shared.ai_routing.parse_ai_param_override` + `shared.step_ai`)按同样规则 fail-closed:参数覆盖缺 provider 覆盖、provider 不存在或形状非法都判 `input_invalid`。参数覆盖走**输入指纹**(目标 AI 步的 `provider` 指纹项变为 `provider|model=…;reasoning_effort=…` 复合串)驱动重跑;`def_digest` 仍只由 pipeline 定义(version + ai 配置)决定,job 级覆盖不改变它。
 
 > `job.json` 另有 `prompt_overrides`(白盒编辑,见 §1.15):`{step: {content, version, document_kind, scope}}`,并兼容存量 `{step: content}` 字符串形态。job 创建时由 API 按 `(scope, domain, pipeline, document_kind, step)` 解析当时激活的 DB 覆盖,固化进 job 后再下发给 pure Worker。覆盖键始终使用 pipeline 运行时步骤名,正文模板名可由 pipeline 显式映射。Worker 与 Prompt API 通过同一解析契约读取覆盖和默认模板,与 `ai_overrides`(provider 覆盖)/`ai_param_overrides`(参数覆盖)正交。
 
@@ -609,7 +610,7 @@ Response `200`:
 ```
 `model` / `reasoning_effort` 未覆盖时回 `null`。
 
-错误语义:job 不存在返回 `404`;pipeline 没有智能/评审角色、provider 未配置、没有匹配 Worker、provider 不支持所需能力、参数覆盖违反上述规则返回 `400`;`job.json` 不是合法 JSON、顶层不是对象、`ai_overrides` 或 `ai_param_overrides` 不是对象返回 `409`;请求体缺字段或类型错误返回 `422`。所有失败都发生在写 `job.json` 和发布 rerun 命令之前,保持零副作用。成功时才把两个角色的 provider(和可选参数)覆盖写进 `job.json`,并从智能步发布 rerun。
+错误语义:job 不存在返回 `404`;pipeline 没有智能/评审角色、provider 未配置、没有匹配 Worker、provider 不支持所需能力、参数覆盖违反上述规则返回 `400`;`job.json` 不是合法 JSON、顶层不是对象、`ai_overrides` 或 `ai_param_overrides` 不是对象返回 `409`;请求体缺字段或类型错误返回 `422`。所有失败都发生在写 `job.json` 和发布 rerun 命令之前,保持零副作用。成功时才把全部知识 AI 角色步的 provider(和可选参数)覆盖写进 `job.json`,并从智能步发布 rerun。
 
 ### 1.2 笔记与产物
 
@@ -1832,15 +1833,18 @@ Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投
   exact quote，且每个 mapping 必须恰好绑定一个 source segment。整行 claim 只做 NFC 和有限
   空白归一后，必须逐字包含于该 segment 的 support text；不做 NFKC 兼容归一，也不对
   所有来源全局做 HTML entity 解码。同行多 ref，包括同源和跨模态组合，均不产生映射。
+  producer 输出的未知或畸形 `[[source:ID]]` 必须 fail-closed。同一 ID 重复出现时只允许首次
+  marker 进入候选，后续 marker 从正文移除但不生成重复 mapping；正文可以保留，不能把重复陈述
+  伪装成多条独立已验证证据。
 - 跨语言翻译和语义改写不得放宽 v2 的 exact-quote 规则。producer 另写
   `output/provenance_candidates/{smart|translated}.json` v2；顶层状态为
   `ready|empty|no_source`，后两者是覆盖旧候选的显式 tombstone。每个候选必须绑定 note/source
   SHA、唯一正文锚点及 prefix/suffix/section 上下文、单个 source segment、`transform_kind`、producer
   component 和 invocation identity。候选文件只能作为待核验输入，不能直接进入 canonical evidence。
-- 三类 pipeline 在 producer 与 concepts 之间增加独立语义核验步：video 为
-  `11_semantic_attestation`，Document 为 `06_semantic_attestation`，audio 为
-  `04_semantic_attestation`。同一 job 仍只允许一次 AI 调用和一条日志。调用前必须完整校验
-  smart/translated manifests 及跨 manifest 候选 ID 唯一性，再按 smart→translated、各 manifest 原顺序
+- video 和 audio 在 producer 与 concepts 之间使用独立语义核验步,分别为
+  `11_semantic_attestation` 和 `04_semantic_attestation`。Document 由 `08_review` 在质量评审前核验
+  smart 候选,不读取或核验 translated 候选。每个 semantic batch 只允许一次 AI 调用和一条绑定日志。
+  调用前必须完整校验本批次 manifests 及跨 manifest 候选 ID 唯一性，再按各 manifest 原顺序
   确定性选择单次调用子集；子集最多 100 条，按受控协议渲染后的 UTF-8 prompt 最多 64 KiB。达到条数
   上限或加入某候选会超出字节上限时，该候选记为 `budget_rejected`，继续尝试后续候选，不截断字段，
   不为其生成 mapping；存在这类拒绝时步骤结果标记 `degraded=true`，而不是让整个批次失败。完整候选 manifests
@@ -1862,7 +1866,12 @@ Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投
 - `output/provenance/semantic_batch.json` v1 是 commit-last 批次提交清单。它绑定 job/pipeline/batch、
   attestor component、候选 manifest 和最终 provenance 的 path/SHA，以及实际 AI 日志记录中的
   provider/model/session/prompt/response/decision。canonical reader 必须在受信 job 根目录内重读并
-  复算全部候选、最终产物、source manifest 和 AI 日志；日志最大 2 MiB、128 条记录。缺少提交清单、
+  复算全部候选、最终产物、source manifest 和 AI 日志。writer 只接受本次串行 AIInvocation 刚完成且
+  身份逐字段匹配的内存审计记录,并原子写成单记录 immutable proof；proof 最大 2 MiB。累计 JSONL
+  只保留运行审计历史,其大小或记录数不参与本批证明定位,后续评审调用或 rerun 追加历史不得改变既有
+  批次证明。累计 JSONL 刷盘失败会记录告警；只要本次内存记录完整且独立 proof 原子发布成功,批次仍可
+  由 proof 重验。三个 pipeline 都必须在步骤 outputs 中认领 proof glob,使 manifest、portable 与 exact DR
+  携带该证明。缺少提交清单、
   部分发布、跨 job 重放、字段篡改、哈希重签、日志不一致或未知 schema 均 fail-closed。
 - reader 严格兼容 v1 direct original/transcript/mechanical；v1 smart 非空 mapping、额外字段、未知 policy、
   改写/纯数字 claim、PDF 空白页或提取失败页均 fail-closed。未经上述独立批次核验的跨语言
@@ -2010,7 +2019,7 @@ Digest task 的 `source_manifest` 与 `citation_validation` 同样只从 origina
 镜像 DAG 的 `GET /api/jobs/{id}/ai-logs`：读 `ai_task_logs`（§3.1），返回该 task 每次 CLI 调用的完整审计（路由/尝试链/渲染 prompt/输出/raw/用量/`transcript` agentic 全轨迹），最近在前。
 
 ```json
-{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"opus5","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"transcript":{"jsonl":"…","turns":12,"truncated":false,"path":"…"},"usage":{…}}}]}
+{"task_id":"at_…","count":1,"calls":[{"task_id":"at_…","exec_id":"…","step":"synthesis","domain":"ml","provider":"claude-cli","model":"claude-opus-5","ok":true,"error":null,"created_at":"…","record":{"routing":{"attempts":[…]},"prompt":{"system":"…","messages":[…]},"output":"…","raw":{…},"transcript":{"jsonl":"…","turns":12,"truncated":false,"path":"…"},"usage":{…}}}]}
 ```
 
 > `record.transcript`(agentic 全轨迹白盒):AI task 不挂 job、无 storage 产物区,CLI 会话 transcript **全文内嵌** `record_json`(`{"jsonl": 全文, "turns", "truncated", "path"}`;>5MB 截断并 `truncated:true`;不可得为 `{"jsonl": null, "reason": …}`)。Ask 审计另持久化 `record.audit_context.ask_source_manifest` 与 `record.citation_validation`，即使 Redis 结果 TTL 到期也能按本次来源复算。
@@ -2324,11 +2333,11 @@ Response `200`（数组）：
      "default_model": null, "reasoning_efforts": [], "reasoning_efforts_by_model": {},
      "default_reasoning_effort": null},
     {"name": "claude-cli", "type": "claude_cli", "available": true, "label": "CLI",
-     "models": ["opus5", "claude-opus-4-8[1m]", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
-     "default_model": "opus5",
+     "models": ["claude-opus-5", "claude-opus-4-8[1m]", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
+     "default_model": "claude-opus-5",
      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
      "reasoning_efforts_by_model": {
-       "opus5": ["low", "medium", "high", "xhigh", "max"],
+       "claude-opus-5": ["low", "medium", "high", "xhigh", "max"],
        "claude-opus-4-8[1m]": ["low", "medium", "high", "xhigh", "max"],
        "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],
        "claude-sonnet-4-6": ["low", "medium", "high", "xhigh", "max"],
@@ -2807,6 +2816,8 @@ job:{job_id}:step_commit:{execution_step}   # HASH: token_id / exec_id / job_gen
 
 GitLab-CI 风格：顶层 `default` 全局默认 + `.` 前缀隐藏模板（不直接运行）+ 每个 content_type 一段 `variables`/`jobs`。加载时把 `default`、`extends` 模板、job 字段按键深合并归一化为内部 step 结构，步骤顺序由 `needs` 推导出 DAG。调度器据 Job 的 `pipeline` 字段加载对应段。
 
+活跃 Job 每次推进 DAG 前把 Redis/DB 步骤集与当前展开结果对齐:新增步骤先以 `waiting` 进入终态门,已移除且非 running 的步骤从两侧删除并清旧队列;已移除但仍 running 的步骤保留到终态后再删除。因此滚动升级新增发布门时,旧 Job 不会因 Redis 中缺少新步骤而提前 `done`。
+
 **顶层结构**：
 
 ```yaml
@@ -2994,13 +3005,30 @@ video:
 **各顶层内容族的 job 链**（`needs` 推导）：
 
 - **video**:`01_download` → `03_scene` → `04_frames` → `05_dedup` → `06_ocr`;`02_whisper` 由 `01_download` 旁路触发;`08_punctuate` 汇合 `01_download` + `02_whisper` + `06_ocr`,一次发布含字幕与 OCR 图像段的 Part 来源清单;`09_merge_parts` fan-in 各 Part 的 `07_danmaku` + `08_punctuate` → `09_mechanical` → `10_evidence` → `11_smart` → `11_semantic_attestation` → `12_concepts` → `12_review`。`11_smart` 同时依赖 `09_mechanical` 与 `10_evidence`。
-- **document**：`01_download → 02_parse → 03_structure → 04_translate(条件) → 05_smart(条件) → 06_semantic_attestation → 07_concepts → 08_review(条件)`。
+- **document**：`01_download → 02_parse → 03_structure` 后分成 `04_translate(条件)` 阅读分支和
+  `05_smart → 07_concepts → 08_review → 09_publish` 知识分支。翻译默认按语言条件运行,但不属于知识分支的
+  `needs`、输入指纹、Prompt 或发布清单。
   - 所有论文、文章、白皮书等业务体裁共用此 DAG，`document_kind` 只选择展示/Prompt/评审 profile；adapter 只按 source profile/capability 选择。
   - `02_parse` 同时登记实际存在的 HTML/PDF source，各自绑定 source ID 与 fingerprint；HTML 产稳定 DOM locator，数字 PDF 产 page+bbox/text layer，扫描 PDF 产带置信度 OCR locator。HTML↔PDF 只有唯一高置信文本匹配才建立 crosswalk，歧义时 fail-closed。
   - `intermediate/document.json` 保存 canonical metadata、blocks、Figure/Table registry、sources 与 locator；`quality.json` 保存 complete/degraded/rejected 及缺失原因；不生成或读取 `output/original.md`、`output/translated.md`、`intermediate/figures.json`。
-  - `04_translate` 按稳定 block ID 翻译自然语言，冻结公式、代码、数字、单位和引用，发布 `translation.json + translated.html`。schema 支持 1:1、1:N、N:1 对齐；违反 segment/cardinality/表格结构不变量时重试后拒绝发布。
+  - `04_translate` 按稳定 block ID 翻译自然语言，冻结公式、代码、数字、单位和引用，发布 `translation.json + translated.html`。schema 支持 1:1、1:N、N:1 对齐；违反 segment/cardinality/表格结构不变量时重试后拒绝发布。该步骤 `allow_failure=true`，但仍先耗尽正常重试；最终失败保留错误与失败统计并签发当前 lifecycle generation 的 `allowed_failure` skipped manifest，不终止知识分支。配置加载期禁止任何 `needs/fan_in` 指向 `allow_failure` 步骤，避免把可选失败伪装成完成前提。并发 rerun 后迟到的旧代 manifest 不参与恢复；有效 manifest 可同时修复 Redis 与 DB 的终态投影。
   - 原文 HTML 通过 CSP/sandbox 安全副本展示，PDF 由 PDF.js 保留原始版式并按 page+bbox 高亮；Figure/Table 使用稳定 visual ID、分组目录、结构表或 source crop 降级。
-  - `05_smart` 和 `08_review` 受 `smart_note` 门控；`07_concepts` 始终执行并通过 `on_complete` 按 `smart → translated → original projection` 选择当前最佳产物原子写入 Search/Ask/MCP，共用 canonical evidence resolver。
+  - `05_smart` 消费 `document.json + quality.json + source_segments.json`,不因译文存在而换正文或失效指纹。Quality schema 只接受枚举原因码和有界浅层指标,单文件上限 64 KiB；历史 v1 的 `scanned_pdf_ocr_error:<ExceptionName>` 只在后缀满足安全标识符时归一为 `scanned_pdf_ocr_failed`。每次 AI 调用前都重验最终 prompt 的 4 MiB 上限。解析状态不是 `complete` 时,程序确定性写入来源质量提示,并同时投影成功 crosswalk 数和歧义/失败数。`pdf_crosswalk_blocks>0`只证明部分正文块保留页码/bbox,`pdf_crosswalk_visuals>0`只证明部分视觉项保留映射；两者不得互相代替或把 partial 退化夸大成对应维度全部缺失。来源冲突必须明确标成“来源内部未决矛盾”。它把 exact baseline 独占发布到 `output/provenance_exact/smart.json`。`08_review` 读取该不可变基线并把 semantic final 发布到 `output/provenance/smart.json`,因此单独 rerun 08 只删除自身 final,不会删除必需输入。
+    `07_concepts` 从智能笔记选择概念,但模型自报 refs 一律清空,由服务端按原始 source segment 的
+    `support_text` 逐字绑定每个概念。`08_review` 先把 smart semantic candidates 核验为最终 provenance,
+    再统一评审原始 Document、解析质量、智能笔记和概念清单。质量报告先经 schema 校验和旧字段归一,
+    再以内容地址快照写入 `output/review_sources/quality-<sha256>.md`;提示词和持久评审只绑定该规范化快照,
+    读时从原始 `quality.json` 复算并比对,不得把历史文件名等开放文本直接送入模型。原始 `document.json` 先确定性投影为
+    content-addressed 有界审查包:绑定完整文件摘要与字节数,保留全部已绑定证据块,再按标题/摘要/标题层级、
+    Figure/Table/公式和文档顺序填充 768 KiB 预算；覆盖率和遗漏 kind 写入包内。最终 Document 评审 Prompt
+    必须不超过 1 MiB,Qoder 等 provider 不得接收超出声明 context 的多 MiB 隐式全文。响应经同一严格
+    schema 最多修复重试一次；仍然 schema 非法、completion error 或其它不可靠结果时以可重试
+    processing failure 结束 08,不签发完成 manifest,不能把诊断用 `review.json` 伪装成已完成评审。
+  - `09_publish` 是唯一派生知识发布门。它重验持久评审及全部来源,要求 reliable、overall≥3、
+    accuracy/traceability≥3、各维度≥2 且没有 error issue；通过后写 `output/publication.json`,随后才触发
+    smart FTS/canonical evidence 与 glossary/occurrence。拒绝时保留 review 和失败元信息,不发布派生知识。
+    09 的即时完成、active 终态重放与历史索引补账都必须持有当前 definition 的 done manifest,且 manifest
+    明确绑定并校验 `output/publication.json`;Redis done 或旧 Job 状态都不能单独授权发布副作用。
 - **audio**:`01_download` → `02_whisper` → `03_transcript_parse` → `04_smart_podcast` → `04_semantic_attestation` → `05_concepts` → `05_review`。
   - `01_download`(`content_type=audio`):支持音频直链(`.mp3/.m4a/.wav/.aac/.flac`)与播客**页面 URL**(best-effort 从页面 `og:audio`/`<audio>`/`<source>`/`<enclosure>`/裸 `*.mp3` 链解析音频真链);下载后 **ffprobe 校验**(无可解码时长=拿到 HTML/404 → `InputInvalidError`,不再拖到 whisper 才报晦涩 ffmpeg 错)。
   - `02_whisper`:超时**随时长伸缩**(见 `timeout_per_min`/`timeout_max_sec`)——无 GPU 时长集 CPU 转写远超固定 1800s。worker 跑步前读 `input/metadata.json.duration_sec`,有效超时 = `clamp(max(timeout, ceil(分钟)*timeout_per_min), timeout_max_sec)`;缺 `timeout_per_min` 或读不到时长则用静态 `timeout`(行为不变)。机制通用,任何步均可在 pipeline 加这两字段启用。
@@ -3009,7 +3037,9 @@ video:
 三类顶层 pipeline 的概念步共用一份来源解析契约：
 
 - video 和 audio 只允许使用最新的版本化智能笔记,不回落到机械稿或转写。
-- Document 依次选择最新智能笔记、`output/translation.json` 和 `intermediate/document.json` 的结构化文本；禁止回退原文 Markdown。
+- Document 只选择最新智能笔记作为概念语义输入,并从 `intermediate/source_segments.json` 构造独立的
+  原始证据锚点快照；智能笔记缺失、来源段无 support 或任一身份不匹配均 fail-closed。译文和旧原文
+  Markdown 都不参与概念输入或证据绑定。
 - validate、input hash 和 execute 共用同一份来源快照,不在三个阶段重新选源或重读。快照绑定类型、路径和 SHA-256。
 - 所有允许的来源均缺失、来源损坏或 pipeline 类型未知时 fail-closed,不发起 AI 调用。
 
@@ -3064,7 +3094,8 @@ cell 必须有稳定 ID、row/col、rowspan/colspan、role、text 和可选 bloc
 
 `intermediate/quality.json` 使用 schema v1，包含 `job_id/status/reasons/metrics`。status 只允许
 `complete|degraded|rejected`；metrics 至少记录 block/figure/table/asset/translation coverage，PDF/OCR 还记录
-页数、OCR 置信阈值、表格 cell 和 crosswalk 计数。
+页数、OCR 置信阈值、表格 cell 和 crosswalk 计数。新布局模型身份固定为实际文件的 `sha256:<64 hex>`；
+历史 v1 的安全 `.onnx/.ort` 文件名只在读时归一为不可逆 `legacy-name-sha256:<64 hex>`，不得原样进入 AI Prompt。
 
 `output/translation.json` 使用 schema v2，包含来源 Document fingerprint、译文语言、segments 和 coverage。
 每个译文 segment 绑定 `source_segment_ids[]`、`alignment=one_to_one|one_to_many|many_to_one`、译文 text/hash
@@ -3203,8 +3234,12 @@ net_routing:
 - `severity` 只能是 `info / warning / error`。
 - `evidence_status=supported` 必须带 `locator={source,quote,offset}`,且 quote 必须逐字命中本次送评的真实来源。
 - `evidence_status=insufficient` 必须带非空 `reason`,不能伪造 locator。
+- Document `08_review` 的首轮 supported quote 未逐字命中时先要求模型严格修复一次；第二轮仍只剩该错误时,
+  服务端仅把该 issue 确定性降为 insufficient,保留类型、严重度、维度、主张和说明,删除 locator 并记录
+  固定 reason。服务端不做模糊匹配、文本归一或 quote 修补；来源标签无效、quote 为空或其它结构错误
+  仍使评审失败。Video/Audio 评审不启用该降级。
 
-`review_input` 与 `review_input.sources[]` 都记录 `artifact / sha256 / bytes / chars / truncated`;source 另带唯一 `label`。来源最多 14 个,单件、持久化 prompt 和来源合计分别以 8 MiB 为硬上限,任何超限都在 AI 调用或可信投影前失败,不静默截断。送评来源按内容摘要持久化,保证历史 locator 可重算。
+`review_input` 与 `review_input.sources[]` 都记录 `artifact / sha256 / bytes / chars / truncated`;source 另带唯一 `label`。来源最多 14 个,单件、持久化 prompt 和来源合计分别以 8 MiB 为通用硬上限,任何超限都在 AI 调用或可信投影前失败,不对已声明的送评 artifact 静默截断。Document 的 `document` source 是上述 768 KiB 确定性审查包而不是原始多 MiB JSON,另有 1 MiB Prompt 上限；首轮与追加错误反馈的严格修复轮都使用该上限,修复轮超限时不发起第二次调用。读时必须从当前 `document.json + concepts.json + smart provenance` 重建同一包并逐字相等。送评来源按内容摘要持久化,保证历史 locator 可重算。
 
 `review_reliable=true` 不是可直接信任的自报字段。生成时和每次读取时都必须同时满足:
 
@@ -3296,7 +3331,7 @@ v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / ev
 ### 4.11 概念实体与关系边(output/concepts.json / glossary 归一,工单 26-07-06/09)
 
 - **`output/concepts.json`**(三类顶层链的 concepts 步产出,scheduler `_collect_glossary` 优先采集):
-  顶层可带 `evidence_note_type=smart|translated|transcript`；`key_terms` 元素
+  顶层可带 `evidence_note_type=original|smart|translated|transcript`；`key_terms` 元素
   `{term,definition,zh_name|null,related:[{term,rel}],evidence_source_segment_ids:[source_segment_id]}`。
   `source_segment_id` 与 source/provenance 共用
   `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` 域,可由 producer 使用 `blk_*`、`seg_*`、`S1.P1`
@@ -3308,8 +3343,9 @@ v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / ev
   别名猜测或“唯一 evidence 绑定全部概念”。key_terms 最多 64 项，term/zh_name 最多 256 UTF-8 bytes，
   related 每项最多 64 条，单次投影最多接收 500 个去重后的来源段 ID。可信 provenance 非空时，
   解析失败、结构非法、空 key_terms 或任一概念没有绑定会把
-  机器可读 JSON 反馈给同一输入快照并且只重试一次；第二次仍不合格以 `input_invalid` 失败，不得发布新的
-  `concepts.json` 或完成 manifest。三条 concepts 步骤的执行窗口统一为 1800 秒,覆盖两次完整 CLI 调用。
+  机器可读 JSON 反馈给同一输入快照并且只重试一次；第二次仍部分未绑定时，服务端只保留已绑定项并
+  删除指向被拒项的 related 边。第二次仍无任何绑定，或结构仍非法时以 `input_invalid` 失败，不得发布
+  新的 `concepts.json` 或完成 manifest。三条 concepts 步骤的执行窗口统一为 3900 秒,覆盖两次各 1800 秒的完整 CLI 调用和 300 秒收尾余量。Document `05_smart` 使用相同两轮预算；`08_review` 可执行一轮 semantic attestation 和两轮评审,总窗口为 5700 秒。
   通过完整验证但 `segments=[]` 的 provenance 可诚实退化为空绑定。
   Scheduler 在 canonical
   index 完成后把 `(job,note_type,source_segment_id)` 映射为当前 evidence ID，并按整 job 原子替换
@@ -3517,7 +3553,7 @@ RETRY_POLICY = {
 - durable completion authority = 中心存储中校验通过的 step manifest;SQLite `job_steps.status` 与 Redis 步状态只是可修复的运行投影。
 - `STEP_COMPLETION_MODE=dual|manifest-only`(默认 dual):dual 下 manifest 优先、缺失时退回 `.done` 既有语义;manifest-only 下缺失/损坏即降 waiting 并失效 DAG 下游。dual 是迁移期形态,完成阶段 C 验证后切 manifest-only 并删除兼容代码。
 - 对账表(scheduler 启动执行,先修投影再恢复入队):有效 manifest + 投影落后 → 修复为 done/skipped 并幂等重放 on_complete;manifest 缺失/损坏/输出校验失败 + DB done → manifest-only 下降 waiting 失效下游(下游闭包一律删 manifest,状态仅对 done/skipped 置 waiting)。
-- generation 不参与对账裁决:旧代 manifest 由 rerun 删除流程负责清除(删除失败让整个 lifecycle 命令失败,PEL 重投重试整个 rerun,幂等);backfill(`job_generation=0`)与 clone 重签发(保留父代 generation)因此合法。未动步骤的旧代 manifest 是合法完成事实。
+- generation 通常不参与对账裁决:旧代 manifest 由 rerun 删除流程负责清除(删除失败让整个 lifecycle 命令失败,PEL 重投重试整个 rerun,幂等);backfill(`job_generation=0`)与 clone 重签发(保留父代 generation)因此合法。唯一例外是 `allowed_failure` scheduler skip:它来自迟到失败事件,恢复时必须与当前 lifecycle generation 精确相等,防旧失败跨代跳过新执行。
 
 ### 7.2 对象布局
 
@@ -3541,7 +3577,7 @@ RETRY_POLICY = {
 - manifest canonical 上限 1 MiB、outputs 上限 100000,超限拒绝不截断。
 - `input_fingerprints` 有界 str->str(空串值合法 = "该输入不存在",与 `.done.input_hashes` 语义对齐)、无密钥样式;`input_digest` 必须等于 fingerprints 的 canonical 摘要。
 - 整数字段(size_bytes/part_index/job_generation/attempt 等)上界 int64(2^63-1),bool 拒绝伪装 int,超界拒绝不截断。
-- 时间 UTC RFC3339;摘要一律小写 `sha256:{64hex}`;`skip.rule_digest/condition_digest` 可为 null;`skip.reason_code=no_worker` 等环境性 skip 被 schema 拒绝(不是持久完成事实)。
+- 时间 UTC RFC3339;摘要一律小写 `sha256:{64hex}`;`skip.rule_digest/condition_digest` 可为 null;`skip.reason_code=no_worker` 等环境性 skip 被 schema 拒绝(不是持久完成事实)。`allowed_failure` 仅在声明为可选失败且重试耗尽后由 Scheduler 签发，`condition_digest` 绑定失败类型、错误摘要输入与重试次数；manifest 写入失败时整个 Job 仍 fail-closed。
 - manifest 本体摘要不写入自身(防自引用);提交期由 commit token 的 `candidate_digest` 绑定,持久场景直接对 canonical 字节重算,不做 DB 缓存。
 
 NAS 只读源不是 output:`01_download` NAS 分支产物只有 `input/metadata.json`,源身份以 `source_ref/source_digest/source_size_bytes` 并入 `compatibility.input_fingerprints`,校验器绝不从中心存储拉源对象(源完整性由 `job_parts` + `shared/source_library.py` 承担)。gateway `STORAGE_NO_PUSH_GLOBS` 与 >10 GiB 超限输出同款豁免:不在 manifest 即不被完成权威证明,备份/下游按 manifest 语义忽略。

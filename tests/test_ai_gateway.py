@@ -81,6 +81,10 @@ class TestDryRunProvider:
         assert resp.provider == "dry-run"
         assert resp.cost_usd == 0.0
         assert resp.input_tokens == 0
+        assert resp.tier_used == "primary"
+        assert resp.attempts == [{
+            "tier": "primary", "provider": "dry-run", "model": "test-model", "ok": True,
+        }]
 
     @pytest.mark.asyncio
     async def test_document_translation_echoes_strict_segment_shape(self):
@@ -98,6 +102,44 @@ class TestDryRunProvider:
         assert json.loads(response.content) == {
             "segments": [{"id": "S1", "text": "Latency is 3 ms."}],
         }
+
+    @pytest.mark.asyncio
+    async def test_document_knowledge_prompts_return_contract_shapes(self):
+        provider = DryRunProvider()
+        smart = await provider.complete(LLMRequest(messages=[{
+            "role": "user",
+            "content": (
+                "--- 可引用来源坐标 ---\n"
+                "引用事实时保留 [[source:ID]]。\n"
+                "[[source:S1]] Latency is 3 ms."
+            ),
+        }]))
+        concepts = await provider.complete(LLMRequest(
+            messages=[{"role": "user", "content": (
+                '--- 已验证概念证据锚点(JSON) ---\n'
+                '{"anchors":["Latency is 3 ms."],"truncated":false}\n'
+            )}],
+            response_format="json",
+        ))
+        review = await provider.complete(LLMRequest(
+            messages=[{"role": "user", "content": (
+                "评分维度（每项打 1-5 的整数）：\n"
+                "1. accuracy: 准确\n2. traceability: 可追溯\n"
+            )}],
+            response_format="json",
+        ))
+        semantic = await provider.complete(LLMRequest(
+            messages=[{"role": "user", "content": (
+                '你是独立证据核验器\nINPUT={"items":[{"decision_id":"d000"}]}'
+            )}],
+            response_format="json",
+        ))
+
+        assert "[[source:S1]]" in smart.content
+        assert "[[source:ID]]" not in smart.content
+        assert json.loads(concepts.content)["key_terms"][0]["term"] == "Latency"
+        assert json.loads(review.content)["accuracy"] == 4
+        assert json.loads(semantic.content)["decisions"][0]["decision_id"] == "d000"
 
 
 class TestProviderKeyFromEnv:
@@ -646,6 +688,30 @@ class TestClaudeCLIProvider:
             with pytest.raises(AIProviderError, match="timeout"):
                 await provider.complete(req)
         assert killed["n"] == 1                 # 超时路径确实 kill 了进程
+
+    @pytest.mark.asyncio
+    async def test_slow_text_call_uses_step_level_budget(self, monkeypatch):
+        """Opus 完整论文生成不得被旧的 600 秒 provider 预算提前终止。"""
+        import asyncio
+
+        seen = []
+
+        async def fake_exec(*_args, **_kwargs):
+            return _FakeProc(json.dumps({"result": "ok", "usage": {}}).encode())
+
+        original_wait_for = asyncio.wait_for
+
+        async def capture_timeout(coro, timeout):
+            seen.append(timeout)
+            return await original_wait_for(coro, timeout=timeout)
+
+        monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+        monkeypatch.setattr("shared.ai_gateway.asyncio.wait_for", capture_timeout)
+        await ClaudeCLIProvider(["claude", "-p"]).complete(
+            LLMRequest(messages=[{"role": "user", "content": "x"}]),
+        )
+
+        assert seen == [1800]
 
 
 class TestClaudeCLIVision:
@@ -1582,6 +1648,30 @@ class TestQoderCLIProvider:
         cmd = seen["cmd"]
         assert cmd[cmd.index("-o") + 1] == "json"
         assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "Cantus"
+
+    @pytest.mark.asyncio
+    async def test_slow_text_call_uses_step_level_budget(self, monkeypatch):
+        """大论文纯文本生成不得被旧的 600 秒 provider 预算提前终止。"""
+        import asyncio
+
+        seen = []
+
+        async def fake_exec(*_args, **_kwargs):
+            return _FakeProc(json.dumps({"result": "ok", "usage": {}}).encode())
+
+        original_wait_for = asyncio.wait_for
+
+        async def capture_timeout(coro, timeout):
+            seen.append(timeout)
+            return await original_wait_for(coro, timeout=timeout)
+
+        monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+        monkeypatch.setattr("shared.ai_gateway.asyncio.wait_for", capture_timeout)
+        await QoderCLIProvider(["qodercli", "-p"]).complete(
+            LLMRequest(messages=[{"role": "user", "content": "x"}]),
+        )
+
+        assert seen == [1800]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

@@ -67,6 +67,7 @@ def _write_valid_review(job_dir, rel="output/review.json"):
     (job_dir / "intermediate").mkdir(exist_ok=True)
     document_rel = "intermediate/document.json"
     quality_rel = "intermediate/quality.json"
+    concepts_rel = "output/concepts.json"
     fingerprint = "sha256:" + "a" * 64
     locator = {
         "html": {
@@ -119,18 +120,27 @@ def _write_valid_review(job_dir, rel="output/review.json"):
     (job_dir / quality_rel).write_text(
         json.dumps(quality, ensure_ascii=False), encoding="utf-8",
     )
+    (job_dir / concepts_rel).write_text(
+        json.dumps({"summary": "摘要", "key_terms": []}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     document_text, document_record = source_record(
         job_dir, document_rel, label="document",
     )
     quality_text, quality_record = source_record(job_dir, quality_rel, label="quality")
+    concepts_text, concepts_record = source_record(
+        job_dir, concepts_rel, label="concepts",
+    )
     prompt_rel = "output/versions/review_input_claude-cli_claude-opus-4-8_20260101-000000.md"
     (job_dir / prompt_rel).write_text(
-        "strict review prompt\n" + smart_text + document_text + quality_text,
+        "strict review prompt\n" + smart_text + document_text + quality_text + concepts_text,
         encoding="utf-8",
     )
     _, prompt_record = source_record(job_dir, prompt_rel, label="prompt")
     prompt_record.pop("label")
-    prompt_record["sources"] = [smart_record, document_record, quality_record]
+    prompt_record["sources"] = [
+        smart_record, document_record, quality_record, concepts_record,
+    ]
     score_keys = [
         "completeness", "accuracy", "structure", "terminology",
         "formula_integrity", "visual_references", "traceability",
@@ -160,6 +170,7 @@ def _write_valid_review(job_dir, rel="output/review.json"):
             "smart": smart_text,
             "document": document_text,
             "quality": quality_text,
+            "concepts": concepts_text,
         },
     )
     review.update({

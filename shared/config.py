@@ -116,6 +116,77 @@ def validate_ai_pipeline_contract(pipelines: dict, providers: dict | None = None
             allowed_providers_from_ai(ai, providers)
 
 
+def validate_failure_policy(pipelines: dict) -> None:
+    """校验可选失败分支不能成为其它步骤的完成前提。"""
+    for pipeline, body in pipelines.items():
+        steps = body.get("steps", [])
+        allowed_failure_steps: set[str] = set()
+        for step in steps:
+            value = step.get("allow_failure", False)
+            if type(value) is not bool:
+                raise ValueError(
+                    f"allow_failure must be boolean: {pipeline}/{step.get('name')}"
+                )
+            if value:
+                allowed_failure_steps.add(step["name"])
+        for step in steps:
+            dependencies = {
+                *step.get("depends_on", []),
+                *step.get("fan_in", []),
+            }
+            invalid = sorted(dependencies & allowed_failure_steps)
+            if invalid:
+                raise ValueError(
+                    "allow_failure step cannot be a dependency: "
+                    f"{pipeline}/{step.get('name')}/{invalid}"
+                )
+
+
+def validate_completion_effect_policy(pipelines: dict) -> None:
+    """校验副作用 manifest 门配置与步骤输出声明自洽。"""
+    for pipeline, body in pipelines.items():
+        for step in body.get("steps", []):
+            where = f"{pipeline}/{step.get('name')}"
+            required = step.get("effects_required_outputs")
+            if "effects_require_current_manifest" not in step:
+                if required is not None:
+                    raise ValueError(
+                        f"effects_required_outputs requires manifest gate: {where}"
+                    )
+                continue
+            enabled = step.get("effects_require_current_manifest")
+            if type(enabled) is not bool:
+                raise ValueError(
+                    f"effects_require_current_manifest must be boolean: {where}"
+                )
+            if not enabled:
+                if required is not None:
+                    raise ValueError(
+                        f"disabled manifest gate cannot require outputs: {where}"
+                    )
+                continue
+            if not step.get("on_complete"):
+                raise ValueError(f"manifest gate requires completion effects: {where}")
+            if not isinstance(required, list) or not required:
+                raise ValueError(
+                    f"effects_required_outputs must be a non-empty list: {where}"
+                )
+            declared = step.get("outputs") or []
+            for item in required:
+                _validate_output_glob(item, f"{where}/effects_required_outputs")
+                if any(char in item for char in "*?["):
+                    raise ValueError(
+                        f"effects_required_outputs must use exact paths: {where}/{item}"
+                    )
+                if not any(
+                    isinstance(pattern, str) and fnmatch.fnmatch(item, pattern)
+                    for pattern in declared
+                ):
+                    raise ValueError(
+                        f"required effect output is not declared: {where}/{item}"
+                    )
+
+
 def validate_provenance_pipeline_contract(pipelines: dict) -> None:
     """校验 index candidate 的 sidecar producer 与引入版本边界。"""
     for pipeline, body in pipelines.items():
@@ -557,7 +628,9 @@ def normalize_pipelines(raw: dict, config_dir: Path | None = None) -> dict:
         result[name] = normalize_pipeline(body, default=default, templates=templates)
     validate_provenance_pipeline_contract(result)
     validate_pipeline_scopes(result)
+    validate_failure_policy(result)
     validate_output_ownership(result)
+    validate_completion_effect_policy(result)
     validate_ai_pipeline_contract(result)
     return result
 

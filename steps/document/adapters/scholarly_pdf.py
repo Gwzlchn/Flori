@@ -313,10 +313,7 @@ class ScholarlyPdfAdapter:
                 "ocr_confidence_min": min(ocr_confidences, default=None),
                 "ocr_exact_evidence_threshold": _OCR_RELIABLE_THRESHOLD,
                 "layout_detector_enabled": self._layout_detector is not None,
-                "layout_detector_model": (
-                    self._layout_detector.model_identity
-                    if self._layout_detector is not None else None
-                ),
+                "layout_detector_model": self._layout_model_identity(),
                 "layout_detector_pages": self._layout_detector_pages,
                 "layout_detector_figure_matches": self._layout_detector_figure_matches,
                 "layout_detector_table_matches": self._layout_detector_table_matches,
@@ -324,6 +321,19 @@ class ScholarlyPdfAdapter:
             },
         )
         return document, report
+
+    def _layout_model_identity(self) -> str | None:
+        if self._layout_detector is None:
+            return None
+        try:
+            return self._layout_detector.model_identity
+        except LayoutDetectorError:
+            self._layout_detector_disabled = True
+            if self._layout_detector_failures == 0:
+                self._layout_detector_failures = 1
+            if "pdf_layout_detector_failed" not in self.reasons:
+                self.reasons.append("pdf_layout_detector_failed")
+            return None
 
     def _paper_metadata(
         self,
@@ -893,8 +903,9 @@ class ScholarlyPdfAdapter:
                         page.text_items.append(LayoutItem(text, bbox, score))
                     pages.append(page)
             return pages
-        except Exception as exc:
-            self.reasons.append(f"scanned_pdf_ocr_error:{type(exc).__name__}")
+        except Exception:
+            if "scanned_pdf_ocr_failed" not in self.reasons:
+                self.reasons.append("scanned_pdf_ocr_failed")
             return []
 
     @staticmethod

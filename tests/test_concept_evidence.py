@@ -11,6 +11,7 @@ import shared.concept_evidence as concept_evidence
 from shared.concept_evidence import (
     attach_concept_source_segments,
     validate_concept_evidence_snapshot,
+    validate_source_concept_evidence_snapshot,
 )
 from shared.note_text import markdown_to_index_text
 from shared.provenance import (
@@ -223,3 +224,45 @@ def test_nonempty_provenance_with_no_complete_anchor_in_budget_fails(monkeypatch
 
     with pytest.raises(ValueError, match="anchors exceed prompt budget"):
         _snapshot(note=note, source=source, provenance=provenance)
+
+
+def test_original_source_snapshot_binds_concepts_without_smart_provenance():
+    _note, source, _provenance, segment_ids = _sidecars()
+    supported = copy.deepcopy(source)
+    for segment in supported["segments"]:
+        segment["support_text"] = segment["locator"]["exact"]
+        segment["support_artifact"] = {
+            "kind": "html",
+            "path": "input/source.html",
+            "sha256": supported["source_artifacts"][0]["sha256"],
+            "selector": {"start": segment["start"], "end": segment["end"]},
+        }
+    snapshot = validate_source_concept_evidence_snapshot(
+        job_id="job-concepts",
+        pipeline="document",
+        source_manifest_data=canonical_json_bytes(supported),
+    )
+
+    attached = attach_concept_source_segments(
+        [{"term": "first", "evidence_source_segment_ids": ["forged"]}],
+        snapshot=snapshot,
+    )
+
+    assert snapshot.provenance_nonempty is True
+    assert attached[0]["evidence_source_segment_ids"] == [segment_ids[0]]
+
+
+def test_original_source_snapshot_rejects_wrong_job_and_no_support():
+    _note, source, _provenance, _segment_ids = _sidecars()
+    with pytest.raises(ValueError, match="identity mismatch"):
+        validate_source_concept_evidence_snapshot(
+            job_id="wrong",
+            pipeline="document",
+            source_manifest_data=canonical_json_bytes(source),
+        )
+    with pytest.raises(ValueError, match="no concept evidence"):
+        validate_source_concept_evidence_snapshot(
+            job_id="job-concepts",
+            pipeline="document",
+            source_manifest_data=canonical_json_bytes(source),
+        )

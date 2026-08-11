@@ -38,8 +38,11 @@ class RecoveryCoordinator:
         for job_id in active_jobs:
             statuses = await self.owner.redis.get_all_step_statuses(job_id)
             if not statuses:
-                await self.owner.redis.remove_active_job(job_id)
-                continue
+                pipeline = await self.owner.redis.get_job_pipeline(job_id)
+                job = await asyncio.to_thread(self.owner.db.get_job, job_id)
+                if not pipeline or job is None:
+                    await self.owner.redis.remove_active_job(job_id)
+                    continue
 
             # §2.7 启动顺序:先按 manifest 修复投影/重放副作用,再恢复入队。
             try:
@@ -48,6 +51,7 @@ class RecoveryCoordinator:
                 logger.warning(
                     "manifest_reconcile_failed", job_id=job_id, exc_info=True,
                 )
+                continue
             statuses = await self.owner.redis.get_all_step_statuses(job_id)
 
             for step, status in statuses.items():
@@ -264,6 +268,7 @@ class RecoveryCoordinator:
             await self.owner.redis.release_holders({holder})
             await self.owner.redis.revoke_task_lease(holder)
         await self.owner.redis.clear_step_resources(job_id, step)
+        await self.owner.redis.clear_step_execution_identity(job_id, step)
         return holder, generation
 
     async def _reclaim_step(
@@ -324,18 +329,23 @@ class RecoveryCoordinator:
                 if status != "running":
                     continue
                 progress_file = self.owner.jobs_dir / job_id / f".{step}.progress"
+                file_latest = None
                 if progress_file.exists():
                     try:
                         data = json.loads(await asyncio.to_thread(progress_file.read_text))
                     except (json.JSONDecodeError, OSError):
-                        continue
-                    latest = max(
+                        data = {}
+                    file_latest = max(
                         filter(None, [data.get("updated_at"), data.get("worker_heartbeat_at")]),
                         default=None,
                     )
-                else:
-                    # 远程 job:退回 redis 步进度心跳(无文件且无心跳=刚起步/未上报,跳过)。
-                    latest = await self.owner.redis.get_step_progress_at(job_id, step)
+                # 认领时会立即刷新 Redis 心跳。本地旧 .progress 可能来自上次执行,
+                # 若只信文件会在新进程首个 10s 心跳前误杀刚认领的重试。
+                redis_latest = await self.owner.redis.get_step_progress_at(job_id, step)
+                latest = max(
+                    filter(None, [file_latest, redis_latest]),
+                    default=None,
+                )
                 if latest is None:
                     continue
                 age = time.time() - latest
@@ -478,11 +488,41 @@ class RecoveryCoordinator:
         downstream = self.owner._get_downstream(steps, from_step)
         reset_steps = [from_step] + downstream
 
+        statuses = await self.owner.redis.get_all_step_statuses(job_id)
+        reset_steps.extend(
+            name for name, status in statuses.items()
+            if status == "running" and name in steps and name not in reset_steps
+        )
+        removed_running = [
+            name for name, status in statuses.items()
+            if status == "running" and name not in steps
+        ]
+
         generation, should_apply = await self.owner.redis.begin_job_generation(
             job_id, idempotency_key,
         )
         if not should_apply:
             return reset_steps
+
+        # ready sibling 可在上方快照后、generation 推进前被认领。换代后再扫一次,
+        # 只收拢 step_generation 不是新代的 running;新代 claim 不受影响。
+        fresh = await self.owner.redis.get_all_step_statuses(job_id)
+        for name, status in fresh.items():
+            if status not in ("running", "failed"):
+                continue
+            step_generation = await self.owner.redis.get_step_generation(job_id, name)
+            if step_generation == generation:
+                continue
+            if name in steps:
+                if name not in reset_steps:
+                    reset_steps.append(name)
+            elif name not in removed_running:
+                removed_running.append(name)
+
+        for name in removed_running:
+            await self.owner._revoke_step_execution(job_id, name)
+            await self.owner.redis.delete_step_status(job_id, name)
+            await asyncio.to_thread(self.owner.db.delete_step, job_id, name)
 
         for step in reset_steps:
             await self.owner._revoke_step_execution(job_id, step)
@@ -581,7 +621,8 @@ class RecoveryCoordinator:
         if not should_apply:
             return
         steps = await self.owner._get_job_pipeline_steps(job_id) or {}
-        # 状态真源:redis(运行态)优先,redis 无则用 DB,都无则 waiting,并保留已完成/已跑步骤状态.
+        # DB 只是运行态投影。Redis 缺字段时初始化 waiting,随后只允许当前 manifest
+        # 恢复 terminal;旧 done/running 不能穿过重提交边界。
         existing = await self.owner.redis.get_all_step_statuses(job_id)
         from shared.step_scope import execution_step_key
         db_status = {
@@ -593,16 +634,28 @@ class RecoveryCoordinator:
 
         # 删去当前 pipeline 不再有的步:redis 与 DB 都删,否则 DB 残留旧步。
         for name in (set(existing) | set(db_status)) - set(steps):
+            if existing.get(name) == "running":
+                await self.owner._revoke_step_execution(job_id, name)
             await self.owner.redis.delete_step_status(job_id, name)
             await asyncio.to_thread(self.owner.db.delete_step, job_id, name)
 
-        # 当前 pipeline 的每个步:取已有状态(缺则 waiting),redis 与 DB 都对齐到该状态。
+        # 当前 pipeline 的每个步:保留 Redis 状态;缺失字段原子初始化 waiting。
         # DB 侧:已有行只在状态变化时 update_step(status=),不能 upsert_step 整行替换,
         # 否则会抹掉已完成步的 started_at/finished_at/duration/input_hash(流水线显示无时间);
         # 仅 DB 缺该步(分叉)时才 upsert_step 新建。
         for name, cfg in steps.items():
-            status = existing.get(name) or db_status.get(name) or "waiting"
-            await self.owner.redis.set_step_status(job_id, name, status)
+            status = existing.get(name)
+            if status == "running":
+                await self.owner._revoke_step_execution(job_id, name)
+                status = "waiting"
+                await self.owner.redis.set_step_status(job_id, name, status)
+            elif status is None:
+                status = "waiting"
+                initialized = await self.owner.redis.init_missing_step_waiting(
+                    job_id, name,
+                )
+                if not initialized:
+                    status = await self.owner.redis.get_step_status(job_id, name) or "waiting"
             if name in db_status:
                 if db_status[name] != status:
                     await asyncio.to_thread(
@@ -621,12 +674,16 @@ class RecoveryCoordinator:
                 )
 
         await asyncio.to_thread(
-            self.owner.db.update_job, job_id, status=JobStatus.PROCESSING,
+            self.owner.db.update_job,
+            job_id,
+            status=JobStatus.PROCESSING,
+            pipeline_digest=None,
         )
         await self.owner.redis.add_active_job(job_id)
         await self.owner.redis.complete_job_generation(
             job_id, idempotency_key, generation,
         )
+        await self.owner.reconcile_step_manifests(job_id)
         await self.owner._check_downstream(job_id)
 
         logger.info("job_resubmit", job_id=job_id, pipeline=pipeline)
@@ -685,15 +742,36 @@ class RecoveryCoordinator:
             MODE_MANIFEST_ONLY,
             completion_mode,
             read_valid_manifest,
+            step_definition_digest_for,
             verify_manifest_outputs_metadata,
         )
-        from shared.step_scope import parse_execution_step
+        from shared.step_scope import execution_step_key, parse_execution_step
+        from shared.runner_ops import parse_style_tags
 
         mode = completion_mode()
+        pipeline = await self.owner.redis.get_job_pipeline(job_id)
+        if not pipeline:
+            return
         steps = await self.owner._get_job_pipeline_steps(job_id) or {}
         if not steps:
             return
         statuses = await self.owner.redis.get_all_step_statuses(job_id)
+        current_generation = await self.owner.redis.get_job_generation(job_id)
+        db_steps = {
+            execution_step_key(item.scope_key, item.name): item
+            for item in await asyncio.to_thread(self.owner.db.get_steps, job_id)
+        }
+        db_statuses = {
+            key: (
+                item.status.value
+                if isinstance(item.status, StepStatus)
+                else str(item.status)
+            )
+            for key, item in db_steps.items()
+        }
+        info = await self.owner.redis.get_job_info(job_id)
+        domain = info.get("domain", "general")
+        style_tags = parse_style_tags(info.get("style_tags", "[]"))
         repaired = False
         for name, cfg in steps.items():
             status = statuses.get(name)
@@ -703,6 +781,54 @@ class RecoveryCoordinator:
             manifest = await read_valid_manifest(
                 self.owner.storage, job_id, scope_key, template_step,
             )
+            definition_mismatch = False
+            if manifest is not None:
+                try:
+                    current_definition = step_definition_digest_for(
+                        pipeline,
+                        cfg,
+                        config=self.owner.config,
+                        domain=domain,
+                        style_tags=style_tags,
+                    )
+                except Exception:
+                    current_definition = None
+                if (
+                    current_definition is None
+                    or manifest.get("job_id") != job_id
+                    or (manifest.get("scope") or {}).get("scope_key")
+                    != cfg["scope_key"]
+                    or manifest.get("step") != cfg["template_step"]
+                    or (manifest.get("compatibility") or {}).get(
+                        "definition_digest"
+                    ) != current_definition
+                ):
+                    logger.warning(
+                        "step_manifest_definition_stale",
+                        job_id=job_id,
+                        step=name,
+                    )
+                    definition_mismatch = True
+                    manifest = None
+            if (
+                manifest is not None
+                and manifest.get("outcome") == "skipped"
+                and (manifest.get("skip") or {}).get("reason_code")
+                == "allowed_failure"
+                and status != "skipped"
+                and (manifest.get("execution") or {}).get("job_generation")
+                != current_generation
+            ):
+                logger.warning(
+                    "allowed_failure_manifest_stale_generation",
+                    job_id=job_id,
+                    step=name,
+                    manifest_generation=(manifest.get("execution") or {}).get(
+                        "job_generation"
+                    ),
+                    current_generation=current_generation,
+                )
+                manifest = None
             if manifest is not None:
                 outputs_ok = await verify_manifest_outputs_metadata(
                     self.owner.storage, job_id, manifest,
@@ -720,20 +846,41 @@ class RecoveryCoordinator:
                         )
                     continue
                 desired = "done" if manifest["outcome"] == "done" else "skipped"
-                if status not in ("done", "skipped"):
+                redis_repaired = status != desired
+                db_repaired = (
+                    db_statuses.get(name) != desired
+                    or (
+                        desired == "done"
+                        and db_steps.get(name) is not None
+                        and db_steps[name].error is not None
+                    )
+                )
+                if redis_repaired:
                     # 行 2:manifest 有效而投影落后(崩溃窗口 §2.7 行 3)→ 修复投影。
                     await self.owner.redis.set_step_status(job_id, name, desired)
-                    await asyncio.to_thread(
-                        self.owner.db.update_step, job_id, name, status=desired,
-                    )
                     statuses[name] = desired
+                if db_repaired:
+                    update_fields = {"status": desired}
+                    if desired == "done":
+                        update_fields["error"] = None
+                    await asyncio.to_thread(
+                        self.owner.db.update_step, job_id, name, **update_fields,
+                    )
+                    db_statuses[name] = desired
+                if redis_repaired or db_repaired:
                     repaired = True
                     logger.info(
                         "manifest_reconcile_repaired", job_id=job_id,
                         step=name, status=desired,
+                        redis_repaired=redis_repaired,
+                        db_repaired=db_repaired,
                     )
                 continue
             # manifest 缺失
+            if definition_mismatch:
+                # 保留原 terminal 状态给 active alignment 做 generation fence、owned
+                # outputs 清理与下游失效;这里若先降 waiting 会丢失精确旧 manifest。
+                continue
             if status == "done" and mode != MODE_MANIFEST_ONLY:
                 # dual 遥测:切 manifest-only 前据此计数评估 backfill 覆盖度。
                 logger.warning(
@@ -744,6 +891,17 @@ class RecoveryCoordinator:
                     job_id, name, steps, statuses, "manifest_missing",
                 )
                 continue
+            if (
+                status in ("waiting", "ready", "failed")
+                and db_statuses.get(name) != status
+            ):
+                # 旧 generation 在 Redis CAS 后、DB 写前换代时可能留下迟到投影。
+                # 无当前完成 manifest 时 Redis 是运行态真源,启动对账必须修回 DB。
+                await asyncio.to_thread(
+                    self.owner.db.update_step, job_id, name, status=status,
+                )
+                db_statuses[name] = status
+                repaired = True
             if status == "skipped":
                 # §2.8:无 skipped manifest 的 skip 重新求值;可确定性重推导才保留,
                 # 否则(典型 no_worker)转 waiting,由调度按当前环境重新决定。

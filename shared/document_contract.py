@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from copy import deepcopy
 from collections.abc import Mapping
@@ -20,6 +21,102 @@ DOCUMENT_SCHEMA_VERSION = 2
 QUALITY_SCHEMA_VERSION = 1
 TRANSLATION_SCHEMA_VERSION = 2
 QUALITY_STATUSES = frozenset({"complete", "degraded", "rejected"})
+MAX_QUALITY_JSON_BYTES = 64 * 1024
+MAX_QUALITY_REASONS = 64
+MAX_QUALITY_REASON_BYTES = 96
+MAX_QUALITY_METRICS = 64
+MAX_QUALITY_METRIC_TEXT_BYTES = 128
+QUALITY_REASON_CODES = frozenset({
+    "asset_missing",
+    "body_boundary_uncertain",
+    "body_missing",
+    "body_too_short",
+    "canonical_conflict",
+    "canonical_cross_origin",
+    "canonical_url_invalid",
+    "encoding_replacement",
+    "figure_media_missing",
+    "html_asset_missing",
+    "html_asset_reference_missing",
+    "html_asset_remote",
+    "html_body_empty",
+    "html_figure_media_incomplete",
+    "html_table_empty",
+    "html_title_missing",
+    "html_unsafe_reference_ignored",
+    "html_visual_asset_incomplete",
+    "dynamic_content_unavailable",
+    "full_text_unavailable",
+    "metadata_identifier_conflict",
+    "metadata_title_conflict",
+    "overlapping_table_span",
+    "pagination_detected",
+    "paywall_detected",
+    "pdf_crosswalk_partial",
+    "pdf_crosswalk_source_rejected",
+    "pdf_crosswalk_unmatched",
+    "pdf_exhibit_kind_ambiguous",
+    "pdf_figure_crop_heuristic",
+    "pdf_layout_detector_failed",
+    "pdf_layout_fallback",
+    "pdf_layout_fallback_failed",
+    "pdf_layout_primary_failed",
+    "pdf_layout_unavailable",
+    "pdf_table_crop_ambiguous",
+    "pdf_table_crop_locator_unavailable",
+    "pdf_table_crop_render_failed",
+    "pdf_table_crop_rule_fallback",
+    "pdf_table_structure_unavailable",
+    "pdf_title_inferred",
+    "pdf_title_missing",
+    "pdf_visual_render_incomplete",
+    "pdf_visual_locator_unavailable",
+    "pdf_visual_media_missing",
+    "pdf_visual_source_blank",
+    "possible_truncation",
+    "read_more_boundary_detected",
+    "scanned_pdf_ocr_applied",
+    "scanned_pdf_ocr_failed",
+    "scanned_pdf_ocr_low_confidence",
+    "scanned_pdf_source",
+    "severe_truncation",
+    "source_fingerprint_mismatch",
+    "table_structure_degraded",
+    "table_structure_unavailable",
+    "unsafe_embed_ignored",
+})
+QUALITY_METRIC_KEYS = frozenset({
+    "asset_count", "assets", "block_count", "blocks", "body_candidate",
+    "body_chars", "chars_per_page", "code_blocks", "declared_body_chars",
+    "embeds", "extraction_coverage", "figure_count", "figure_panel_count",
+    "figures", "formula_count", "full_text_candidate", "headings",
+    "html_visual_asset_failures", "html_visual_assets_localized",
+    "ignored_nodes", "layout_detector_enabled", "layout_detector_failures",
+    "layout_detector_figure_matches", "layout_detector_model",
+    "layout_detector_pages", "layout_detector_table_matches",
+    "layout_method", "layout_page_count", "lists", "ocr_confidence_min",
+    "ocr_exact_evidence_threshold", "page_count", "pdf_crosswalk_ambiguous",
+    "pdf_crosswalk_blocks", "pdf_crosswalk_visual_ambiguous",
+    "pdf_crosswalk_visuals", "pdf_layout_detector_enabled",
+    "pdf_layout_detector_failures", "pdf_layout_detector_figure_matches",
+    "pdf_layout_detector_model", "pdf_layout_detector_pages",
+    "pdf_layout_detector_table_matches", "pdf_source_quality",
+    "reference_count", "references", "registry_block_count",
+    "registry_table_count", "replacement_chars", "scan_detected",
+    "source_block_count", "source_bytes", "source_table_count", "table_cell_count",
+    "table_count", "tables", "text_chars", "unsafe_embeds",
+    "unsafe_references", "visual_asset_failures", "visual_assets_rendered",
+})
+QUALITY_METRIC_TEXT_DOMAINS = {
+    "body_candidate": frozenset({"article", "body", "content", "document", "main"}),
+    "layout_method": frozenset({
+        "pdftohtml_xml", "pdftotext_bbox", "rapidocr_page_bbox", "unavailable",
+    }),
+    "pdf_source_quality": QUALITY_STATUSES,
+}
+QUALITY_METRIC_DIGEST_KEYS = frozenset({
+    "layout_detector_model", "pdf_layout_detector_model",
+})
 BLOCK_KINDS = frozenset({
     "title", "heading", "abstract", "paragraph", "list", "list_item",
     "quote", "code", "formula", "figure", "caption", "table",
@@ -752,6 +849,8 @@ def validate_document(document: object, *, expected_job_id: str | None = None) -
 
 def validate_quality(report: object, *, expected_job_id: str | None = None) -> dict[str, Any]:
     root = dict(_require_mapping(report, "quality"))
+    if set(root) != {"schema_version", "job_id", "status", "reasons", "metrics"}:
+        raise DocumentContractError("quality fields are invalid")
     if root.get("schema_version") != QUALITY_SCHEMA_VERSION:
         raise DocumentContractError("unsupported quality schema_version")
     job_id = _require_text(root.get("job_id"), "quality.job_id")
@@ -759,15 +858,95 @@ def validate_quality(report: object, *, expected_job_id: str | None = None) -> d
         raise DocumentContractError("quality report belongs to another job")
     if root.get("status") not in QUALITY_STATUSES:
         raise DocumentContractError("quality.status is invalid")
-    if not isinstance(root.get("reasons"), list) or any(
-        not isinstance(reason, str) or not reason for reason in root["reasons"]
+    raw_reasons = root.get("reasons")
+    if not isinstance(raw_reasons, list) or len(raw_reasons) > MAX_QUALITY_REASONS or any(
+        not isinstance(reason, str)
+        or not reason
+        or len(reason.encode("utf-8")) > MAX_QUALITY_REASON_BYTES
+        for reason in raw_reasons
     ):
         raise DocumentContractError("quality.reasons must be a list of codes")
-    if not isinstance(root.get("metrics"), dict):
+    if len(set(raw_reasons)) != len(raw_reasons):
+        raise DocumentContractError("quality.reasons must not contain duplicates")
+    reasons: list[str] = []
+    for reason in raw_reasons:
+        if reason.startswith("scanned_pdf_ocr_error:"):
+            suffix = reason.removeprefix("scanned_pdf_ocr_error:")
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", suffix) is None:
+                raise DocumentContractError("quality.reasons must be a list of codes")
+            reason = "scanned_pdf_ocr_failed"
+        if reason not in QUALITY_REASON_CODES:
+            raise DocumentContractError("quality.reasons must be a list of codes")
+        if reason not in reasons:
+            reasons.append(reason)
+    root["reasons"] = reasons
+    metrics = root.get("metrics")
+    if not isinstance(metrics, dict) or len(metrics) > MAX_QUALITY_METRICS:
         raise DocumentContractError("quality.metrics must be an object")
-    if root["status"] != "complete" and not root["reasons"]:
+    metrics = dict(metrics)
+    root["metrics"] = metrics
+    unknown_metrics = set(metrics) - QUALITY_METRIC_KEYS
+    if unknown_metrics:
+        raise DocumentContractError("quality.metrics contains unknown keys")
+    for key, value in metrics.items():
+        if not isinstance(key, str) or len(key.encode("utf-8")) > 64:
+            raise DocumentContractError("quality.metrics key is invalid")
+        if value is None or type(value) is bool:
+            continue
+        if type(value) is int:
+            if abs(value) > 10**18:
+                raise DocumentContractError("quality.metrics number is out of range")
+            continue
+        if type(value) is float:
+            if not math.isfinite(value) or abs(value) > 10**18:
+                raise DocumentContractError("quality.metrics number is out of range")
+            continue
+        if isinstance(value, str):
+            if len(value.encode("utf-8")) > MAX_QUALITY_METRIC_TEXT_BYTES:
+                raise DocumentContractError("quality.metrics text is invalid")
+            domain = QUALITY_METRIC_TEXT_DOMAINS.get(key)
+            if domain is not None and value not in domain:
+                raise DocumentContractError("quality.metrics text is outside its domain")
+            if key in QUALITY_METRIC_DIGEST_KEYS:
+                if re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None:
+                    continue
+                if re.fullmatch(r"legacy-name-sha256:[0-9a-f]{64}", value) is not None:
+                    continue
+                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.(?:onnx|ort)", value):
+                    metrics[key] = "legacy-name-sha256:" + hashlib.sha256(
+                        value.encode("utf-8")
+                    ).hexdigest()
+                    continue
+                raise DocumentContractError("quality.metrics digest is invalid")
+            if domain is None and key not in QUALITY_METRIC_DIGEST_KEYS:
+                raise DocumentContractError("quality.metrics text key is not declared")
+            continue
+        raise DocumentContractError("quality.metrics values must be bounded scalars")
+    if root["status"] == "complete" and reasons:
+        raise DocumentContractError("complete quality must not contain reasons")
+    if root["status"] != "complete" and not reasons:
         raise DocumentContractError("non-complete quality requires reasons")
+    try:
+        encoded = json.dumps(
+            root, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise DocumentContractError("quality is not canonical JSON") from exc
+    if len(encoded) > MAX_QUALITY_JSON_BYTES:
+        raise DocumentContractError("quality exceeds byte limit")
     return root
+
+
+def canonical_quality_text(
+    report: object, *, expected_job_id: str | None = None,
+) -> str:
+    """把旧版质量报告归一为无副作用的紧凑 JSON,供提示词和读时重验共用。"""
+    quality = validate_quality(report, expected_job_id=expected_job_id)
+    return json.dumps(
+        quality, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def validate_translation(value: object, *, expected_job_id: str | None = None) -> dict[str, Any]:

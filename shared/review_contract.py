@@ -6,9 +6,11 @@ import hashlib
 import json
 import math
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from .document_contract import canonical_quality_text
 from .models import LLMResponse
 from .storage import publish_content_addressed_path, read_path_bounded
 
@@ -17,8 +19,14 @@ REVIEW_SCHEMA_VERSION = 2
 MAX_REVIEW_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_REVIEW_SOURCES = 14
 MAX_REVIEW_SOURCE_AGGREGATE_BYTES = 8 * 1024 * 1024
+MAX_DOCUMENT_REVIEW_PACK_BYTES = 768 * 1024
+MAX_DOCUMENT_REVIEW_PROMPT_BYTES = 1024 * 1024
+MAX_DOCUMENT_REVIEW_BLOCK_TEXT_BYTES = 8 * 1024
 ISSUE_TYPES = {"consistency", "missing_in_source", "missing_external", "traceability"}
 ISSUE_SEVERITIES = {"info", "warning", "error"}
+UNBOUND_REVIEW_QUOTE_REASON = (
+    "model-provided quote did not match bound source exactly"
+)
 _SCORE_KEYS_BY_PIPELINE = {
     "video": ("completeness", "accuracy", "structure", "terminology", "visual_integration", "readability"),
     "document": (
@@ -43,7 +51,7 @@ _ISSUE_BASE_KEYS = {
 }
 _ATTEMPT_BASE_KEYS = {"tier", "provider", "model", "ok"}
 _CONTENT_ADDRESSED_SOURCE_RE = re.compile(
-    r"output/review_sources/(?P<label>sections|transcript|figures)-(?P<digest>[0-9a-f]{64})\.md",
+    r"output/review_sources/(?P<label>document|quality|sections|transcript|figures)-(?P<digest>[0-9a-f]{64})\.md",
 )
 
 
@@ -112,6 +120,246 @@ def persist_review_source(job_dir: Path, text: str, *, label: str) -> tuple[str,
     return source_record_from_data(data, rel, label=label)
 
 
+def _clip_utf8(value: Any, limit: int) -> tuple[str, bool]:
+    text = value if type(value) is str else ""
+    data = text.encode("utf-8")
+    if len(data) <= limit:
+        return text, False
+    clipped = data[:limit]
+    while clipped:
+        try:
+            return clipped.decode("utf-8"), True
+        except UnicodeDecodeError:
+            clipped = clipped[:-1]
+    return "", True
+
+
+def _compact_document_block(block: Any) -> dict[str, Any] | None:
+    if not isinstance(block, dict):
+        return None
+    block_id = block.get("block_id")
+    order = block.get("order")
+    kind = block.get("kind")
+    if type(block_id) is not str or not block_id or type(order) is not int or type(kind) is not str:
+        return None
+    text, truncated = _clip_utf8(block.get("text"), MAX_DOCUMENT_REVIEW_BLOCK_TEXT_BYTES)
+    compact: dict[str, Any] = {
+        "block_id": block_id,
+        "kind": kind,
+        "order": order,
+        "parent_id": block.get("parent_id") if type(block.get("parent_id")) is str else None,
+        "text": text,
+    }
+    if truncated:
+        compact["text_truncated"] = True
+    locator = block.get("locator")
+    if isinstance(locator, dict):
+        html = locator.get("html")
+        if isinstance(html, dict) and type(html.get("dom_path")) is str:
+            compact["html_dom_path"] = html["dom_path"]
+        pdf = locator.get("pdf")
+        if isinstance(pdf, dict) and type(pdf.get("page")) is int:
+            compact["pdf_page"] = pdf["page"]
+            bboxes = pdf.get("bboxes")
+            if isinstance(bboxes, list):
+                compact["pdf_bboxes"] = bboxes[:4]
+    return compact
+
+
+def _document_bound_segment_ids(concepts: Any, provenance: Any) -> set[str]:
+    result: set[str] = set()
+    if isinstance(concepts, dict):
+        for term in concepts.get("key_terms") or []:
+            if not isinstance(term, dict):
+                continue
+            for segment_id in term.get("evidence_source_segment_ids") or []:
+                if type(segment_id) is str and segment_id:
+                    result.add(segment_id)
+    if isinstance(provenance, dict):
+        for segment in provenance.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            for segment_id in segment.get("source_segment_ids") or []:
+                if type(segment_id) is str and segment_id:
+                    result.add(segment_id)
+    return result
+
+
+def build_document_review_pack(
+    document: dict[str, Any],
+    document_data: bytes,
+    concepts: dict[str, Any],
+    provenance: dict[str, Any],
+) -> str:
+    """把完整 Document 确定性压成有界审查包,并保留原文件身份与覆盖缺口。"""
+    if not isinstance(document, dict) or not isinstance(document_data, bytes):
+        raise ValueError("document review pack input is invalid")
+    if not isinstance(concepts, dict) or not isinstance(provenance, dict):
+        raise ValueError("document review pack dependencies are invalid")
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    authors = []
+    for author in metadata.get("authors") or []:
+        if isinstance(author, dict) and type(author.get("name")) is str:
+            authors.append(author["name"])
+    sources = []
+    for source in document.get("sources") or []:
+        if not isinstance(source, dict):
+            continue
+        sources.append({
+            key: source.get(key)
+            for key in (
+                "source_id", "source_profile", "capabilities", "path", "url",
+                "mime_type", "size_bytes", "fingerprint", "immutable",
+            )
+            if key in source
+        })
+
+    def compact_visual(item: Any, *, figure: bool) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        keys = (
+            ("figure_id", "block_id", "label", "caption", "order")
+            if figure else
+            ("table_id", "block_id", "label", "caption", "order", "rows", "cols")
+        )
+        compact = {key: item.get(key) for key in keys if key in item}
+        extraction = item.get("extraction")
+        if isinstance(extraction, dict):
+            compact["extraction"] = {
+                key: extraction.get(key) for key in ("status", "reasons") if key in extraction
+            }
+        if figure:
+            media = []
+            for panel in item.get("media") or []:
+                if isinstance(panel, dict):
+                    media.append({
+                        key: panel.get(key)
+                        for key in ("asset_id", "artifact", "role", "width", "height")
+                        if key in panel
+                    })
+            compact["media"] = media
+        return compact
+
+    figures = [
+        compact for item in document.get("figures") or []
+        if (compact := compact_visual(item, figure=True)) is not None
+    ]
+    tables = [
+        compact for item in document.get("tables") or []
+        if (compact := compact_visual(item, figure=False)) is not None
+    ]
+    blocks = [
+        compact for item in document.get("blocks") or []
+        if (compact := _compact_document_block(item)) is not None
+    ]
+    bound_ids = _document_bound_segment_ids(concepts, provenance)
+    structural_kinds = {"title", "abstract", "heading"}
+    visual_kinds = {"figure", "caption", "table", "formula", "theorem", "proof", "algorithm"}
+
+    def priority(block: dict[str, Any]) -> int:
+        if block["block_id"] in bound_ids:
+            return 0
+        if block["kind"] in structural_kinds:
+            return 1
+        if block["kind"] in visual_kinds:
+            return 2
+        return 3
+
+    pack: dict[str, Any] = {
+        "schema_version": 1,
+        "source": {
+            "artifact": "intermediate/document.json",
+            "bytes": len(document_data),
+            "sha256": sha256_bytes(document_data),
+        },
+        "document": {
+            key: document.get(key)
+            for key in (
+                "schema_version", "job_id", "content_type", "document_kind",
+                "source_profile", "capabilities", "primary_source_id",
+            )
+        },
+        "metadata": {
+            "titles": metadata.get("titles"),
+            "authors": authors,
+            "abstract": metadata.get("abstract"),
+            "published_at": metadata.get("published_at"),
+            "updated_at": metadata.get("updated_at"),
+            "publisher": metadata.get("publisher"),
+            "venue": metadata.get("venue"),
+            "identifiers": metadata.get("identifiers"),
+            "lang": metadata.get("lang"),
+        },
+        "sources": sources,
+        "figures": figures,
+        "tables": tables,
+        "blocks": [],
+        "coverage": {},
+    }
+    base_bytes = len(json.dumps(
+        pack, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    remaining = MAX_DOCUMENT_REVIEW_PACK_BYTES - base_bytes - 8192
+    if remaining <= 0:
+        raise ValueError("document review pack metadata exceeds budget")
+    selected: list[tuple[int, dict[str, Any], int]] = []
+    used = 0
+    for block in sorted(blocks, key=lambda item: (priority(item), item["order"], item["block_id"])):
+        encoded_size = len(json.dumps(
+            block, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")) + 1
+        if used + encoded_size > remaining:
+            continue
+        selected.append((priority(block), block, encoded_size))
+        used += encoded_size
+    selected_blocks = [item[1] for item in sorted(
+        selected, key=lambda item: (item[1]["order"], item[1]["block_id"]),
+    )]
+    selected_ids = {item["block_id"] for item in selected_blocks}
+    if not bound_ids <= selected_ids:
+        raise ValueError("document review pack cannot fit all bound evidence blocks")
+    omitted = [item for item in blocks if item["block_id"] not in selected_ids]
+    pack["blocks"] = selected_blocks
+    pack["coverage"] = {
+        "source_blocks": len(blocks),
+        "selected_blocks": len(selected_blocks),
+        "omitted_blocks": len(omitted),
+        "truncated": bool(omitted),
+        "bound_segment_ids": len(bound_ids),
+        "selected_bound_segment_ids": len(bound_ids & selected_ids),
+        "omitted_kinds": dict(sorted(Counter(item["kind"] for item in omitted).items())),
+        "selection": "bound_then_structure_then_visual_then_document_order_v1",
+        "block_text_limit_bytes": MAX_DOCUMENT_REVIEW_BLOCK_TEXT_BYTES,
+        "pack_limit_bytes": MAX_DOCUMENT_REVIEW_PACK_BYTES,
+    }
+    encoded = json.dumps(
+        pack, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    while len(encoded) > MAX_DOCUMENT_REVIEW_PACK_BYTES and selected:
+        selected.pop()
+        selected_blocks = [item[1] for item in sorted(
+            selected, key=lambda item: (item[1]["order"], item[1]["block_id"]),
+        )]
+        selected_ids = {item["block_id"] for item in selected_blocks}
+        omitted = [item for item in blocks if item["block_id"] not in selected_ids]
+        pack["blocks"] = selected_blocks
+        pack["coverage"].update({
+            "selected_blocks": len(selected_blocks),
+            "omitted_blocks": len(omitted),
+            "truncated": True,
+            "selected_bound_segment_ids": len(bound_ids & selected_ids),
+            "omitted_kinds": dict(sorted(Counter(item["kind"] for item in omitted).items())),
+        })
+        encoded = json.dumps(
+            pack, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+    if not bound_ids <= selected_ids:
+        raise ValueError("document review pack cannot fit all bound evidence blocks")
+    if not selected_blocks or len(encoded) > MAX_DOCUMENT_REVIEW_PACK_BYTES:
+        raise ValueError("document review pack cannot fit required metadata and blocks")
+    return encoded.decode("utf-8")
+
+
 def _terminal_status(
     provider: str, raw_reason: str | None, raw_error: bool | None,
 ) -> str:
@@ -173,13 +421,32 @@ def completion_from_response(response: LLMResponse) -> dict[str, Any]:
         raw_error = False
     status = _terminal_status(provider, raw_reason or None, raw_error)
 
+    attempts: Any = response.attempts
+    if isinstance(attempts, list):
+        projected_attempts: list[Any] = []
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                projected_attempts.append(attempt)
+                continue
+            keys = set(_ATTEMPT_BASE_KEYS)
+            if attempt.get("ok") is False:
+                keys.update({"error_class", "error"})
+                if "transcript_path" in attempt:
+                    keys.add("transcript_path")
+            projected_attempts.append({
+                key: attempt[key] for key in keys if key in attempt
+            })
+        attempts = projected_attempts
+
     return {
         "schema_version": 2,
         "status": status,
         "raw_finish_reason": raw_reason or None,
         "raw_error": raw_error,
         "tier_used": response.tier_used,
-        "attempts": response.attempts,
+        # 完整 requested/resolved/effective 路由保留在 AI 日志。评审只绑定
+        # 可重算终态所需字段,避免审计 schema 扩展破坏持久评审证明。
+        "attempts": attempts,
     }
 
 
@@ -304,6 +571,51 @@ def _strict_issues(
                 canonical["reason"] = reason.strip()
         result.append(canonical)
     return result
+
+
+def downgrade_unbound_review_issue_quotes(
+    raw: str,
+    review_source_texts: dict[str, str],
+) -> tuple[str, int]:
+    """把修复后仍未逐字命中的 locator 降为证据不足,不猜测或改写 quote。"""
+    try:
+        obj = json.loads((raw or "").strip())
+    except (json.JSONDecodeError, ValueError):
+        return raw, 0
+    if not isinstance(obj, dict) or not isinstance(obj.get("issues"), list):
+        return raw, 0
+
+    changed = 0
+    for index, item in enumerate(obj["issues"]):
+        if (
+            not isinstance(item, dict)
+            or set(item) != _ISSUE_BASE_KEYS | {"locator"}
+            or item.get("evidence_status") != "supported"
+        ):
+            continue
+        locator = item.get("locator")
+        if not isinstance(locator, dict) or set(locator) != {"source", "quote"}:
+            continue
+        source = locator.get("source")
+        quote = locator.get("quote")
+        source_text = review_source_texts.get(source) if isinstance(source, str) else None
+        if (
+            source_text is None
+            or not isinstance(quote, str)
+            or not quote.strip()
+            or source_text.find(quote) >= 0
+        ):
+            continue
+        obj["issues"][index] = {
+            key: value for key, value in item.items() if key != "locator"
+        }
+        obj["issues"][index]["evidence_status"] = "insufficient"
+        obj["issues"][index]["reason"] = UNBOUND_REVIEW_QUOTE_REASON
+        changed += 1
+
+    if changed == 0:
+        return raw, 0
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")), changed
 
 
 def _extract_object(raw: str) -> dict[str, Any] | None:
@@ -670,6 +982,7 @@ def _content_addressed_source_is_bound(record: dict[str, Any], label: str) -> bo
 
 async def _validate_pipeline_sources(
     pipeline: str | None,
+    job_id: str,
     source_records: dict[str, dict],
     source_texts: dict[str, str],
     read_file: Callable[[str], Awaitable[bytes | None]],
@@ -696,24 +1009,70 @@ async def _validate_pipeline_sources(
         return
     if pipeline != "document":
         return
-    expected = {"smart", "document", "quality"}
-    try:
-        translation = await read_file("output/translation.json")
-    except (OSError, ValueError):
-        translation = None
-    if translation is not None:
-        expected.add("translation")
+    expected = {"smart", "document", "quality", "concepts"}
     if labels != expected:
         errors.append("document_source_profile_mismatch")
-    exact_paths = {
+    document_record = source_records.get("document")
+    if not isinstance(document_record, dict) or not _content_addressed_source_is_bound(
+        document_record, "document",
+    ):
+        errors.append("document_document_source_invalid")
+    quality_record = source_records.get("quality")
+    if not isinstance(quality_record, dict) or not _content_addressed_source_is_bound(
+        quality_record, "quality",
+    ):
+        errors.append("document_quality_source_invalid")
+    concepts_record = source_records.get("concepts")
+    if not isinstance(concepts_record, dict) or concepts_record.get("artifact") != (
+        "output/concepts.json"
+    ):
+        errors.append("document_concepts_source_invalid")
+    required = {
         "document": "intermediate/document.json",
         "quality": "intermediate/quality.json",
-        "translation": "output/translation.json",
+        "concepts": "output/concepts.json",
+        "provenance": "output/provenance/smart.json",
     }
-    for label in expected - {"smart"}:
-        record = source_records.get(label)
-        if not isinstance(record, dict) or record.get("artifact") != exact_paths[label]:
-            errors.append(f"document_{label}_source_invalid")
+    loaded: dict[str, tuple[dict[str, Any], bytes]] = {}
+    for label, rel in required.items():
+        try:
+            data = await read_file(rel)
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, bytes):
+            errors.append(f"document_review_pack_{label}_missing")
+            continue
+        try:
+            value = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            errors.append(f"document_review_pack_{label}_invalid")
+            continue
+        if not isinstance(value, dict):
+            errors.append(f"document_review_pack_{label}_invalid")
+            continue
+        loaded[label] = (value, data)
+    if set(loaded) == set(required):
+        try:
+            expected_pack = build_document_review_pack(
+                loaded["document"][0],
+                loaded["document"][1],
+                loaded["concepts"][0],
+                loaded["provenance"][0],
+            )
+        except ValueError:
+            errors.append("document_review_pack_rebuild_failed")
+        else:
+            if source_texts.get("document") != expected_pack:
+                errors.append("document_review_pack_mismatch")
+        try:
+            expected_quality = canonical_quality_text(
+                loaded["quality"][0], expected_job_id=job_id,
+            )
+        except ValueError:
+            errors.append("document_quality_rebuild_failed")
+        else:
+            if source_texts.get("quality") != expected_quality:
+                errors.append("document_quality_source_mismatch")
 
 
 async def verify_persisted_review(
@@ -850,7 +1209,7 @@ async def verify_persisted_review(
             if source_text not in prompt_text:
                 errors.append(f"review_source_{label}_not_in_prompt")
     await _validate_pipeline_sources(
-        pipeline, source_records, source_texts, read_file, errors,
+        pipeline, job_id, source_records, source_texts, read_file, errors,
     )
     smart_record = source_records.get("smart")
     note_file = data.get("note_file")

@@ -564,11 +564,11 @@ describe('JobDetailView 换 provider 重跑(model/effort 覆盖)', () => {
       models: ['claude-opus-4-8', 'claude-sonnet-4-6'], default_model: 'claude-sonnet-4-6',
       reasoning_efforts: [], reasoning_efforts_by_model: {}, default_reasoning_effort: null },
     { name: 'claude-cli', type: 'claude_cli', available: true, label: 'CLI',
-      models: ['opus5', 'claude-opus-4-8[1m]', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
-      default_model: 'opus5',
+      models: ['claude-opus-5', 'claude-opus-4-8[1m]', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+      default_model: 'claude-opus-5',
       reasoning_efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       reasoning_efforts_by_model: {
-        opus5: ['low', 'medium', 'high', 'xhigh', 'max'],
+        'claude-opus-5': ['low', 'medium', 'high', 'xhigh', 'max'],
         'claude-opus-4-8[1m]': ['low', 'medium', 'high', 'xhigh', 'max'],
         'claude-opus-4-8': ['low', 'medium', 'high', 'xhigh', 'max'],
         'claude-sonnet-4-6': ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -624,17 +624,17 @@ describe('JobDetailView 换 provider 重跑(model/effort 覆盖)', () => {
       { provider: 'anthropic', model: 'claude-sonnet-4-6' })
   })
 
-  it('claude-cli 预选 opus5 + xhigh 并按具体 provider 提交', async () => {
+  it('claude-cli 预选 claude-opus-5 + xhigh 并按具体 provider 提交', async () => {
     const w = await mountWithRerunConfirm('claude-cli')
     const model = w.find('[data-testid="rerun-model"]')
     expect(model.exists()).toBe(true)
-    expect((model.element as HTMLSelectElement).value).toBe('opus5')
+    expect((model.element as HTMLSelectElement).value).toBe('claude-opus-5')
     const effort = w.find('[data-testid="rerun-effort"]')
     expect((effort.element as HTMLSelectElement).value).toBe('xhigh')
 
     await confirmRerun(w)
     expect(api.post).toHaveBeenCalledWith('/api/jobs/job_BV1abc/rerun-smart',
-      { provider: 'claude-cli', model: 'opus5', reasoning_effort: 'xhigh' })
+      { provider: 'claude-cli', model: 'claude-opus-5', reasoning_effort: 'xhigh' })
   })
 
   it('codex-cli 档位下拉按默认模型收窄,不是全局并集', async () => {

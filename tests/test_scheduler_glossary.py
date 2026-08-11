@@ -304,7 +304,7 @@ async def test_collects_key_terms_with_definition():
         "missing_concepts": ["Y"],
     }
     db = _DBStub(domain="ml", content_type="document", document_kind="article")
-    engine = _make_engine(_StorageStub(review), db)
+    engine = _make_engine(_ConceptsStorageStub(review), db)
 
     await engine._collect_glossary("j_g_001")
 
@@ -325,7 +325,7 @@ async def test_missing_concepts_not_fed():
         "missing_concepts": ["Y"],
     }
     db = _DBStub()
-    engine = _make_engine(_StorageStub(review), db)
+    engine = _make_engine(_ConceptsStorageStub(review), db)
 
     await engine._collect_glossary("j_g_001")
 

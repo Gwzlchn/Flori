@@ -87,7 +87,7 @@ sudo ./svc.sh install && sudo ./svc.sh start
   **② `document-pdf-e2e` —— 真实素材端到端**（`tests/integration/ci_document_pdf_e2e.sh`，`DRY_RUN=1` 起同一栈）：
   投一个仓库自带的微型 PDF `tests/fixtures/sample.pdf`，走 `POST /api/jobs/upload?content_type=document&document_kind=research_paper` 进入 Document pipeline，轮询到 `done`，断言 `document.json / quality.json / source_segments.json / document_index.md / translation.json / translated.html`、智能笔记和 review。**无需任何外部网络 / arXiv / B站 / API key**。这是 GitHub-hosted runner 上的真实接线覆盖，不等同于外网与真实模型验收。
   - **真跑(REAL)**：`01_download`(upload 模式)、`02_parse`(Poppler/PyMuPDF Document adapter)、`03_structure`(结构验收、来源锚点和原文索引投影)。
-  - **合成(SYNTHETIC)**：`04_translate`、`05_smart`、`06_semantic_attestation`、`07_concepts`、`08_review` 经 schema-aware `DRY_RUN=1` 响应完成；DAG、严格 JSON、落盘与版本化接线仍真实。integration compose 显式传 `INSTALL_CLAUDE_CODE=0`，不为不会调用的 dry-run provider 下载 CLI；生产 worker 默认仍安装并校验 CLI。
+  - **合成(SYNTHETIC)**：`04_translate`、`05_smart`、`07_concepts`、`08_review`、`09_publish` 经 schema-aware `DRY_RUN=1` 响应完成；DAG、smart-only 语义核验、严格 JSON、质量发布门、落盘与版本化接线仍真实。integration compose 显式传 `INSTALL_CLAUDE_CODE=0`，不为不会调用的 dry-run provider 下载 CLI；生产 worker 默认仍安装并校验 CLI。
   - 脚本用独立 compose 项目名（默认 `flori-ci-document-pdf`）+ 退出 trap `down -v` 拆栈，本地跑也不会误碰生产栈（本地若 8000 被占，需先停占用方或换独立项目；CI runner 干净直接用 8000）。
 
   **仍是人工/自托管的覆盖**（本 workflow 不跑）：真实**视频** mp4 / 真连 B站·arXiv 联网下载 / **真实 AI** 笔记全链路。`01_download` 对 URL 源会真连 B站/arXiv（`DRY_RUN` 不绕过下载），真实 AI 步需真 API key，GitHub-hosted runner 无网络素材跑不通，只能在装好素材的机器上对**已部署栈**手动执行：

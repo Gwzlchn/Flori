@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Document PDF/research_paper 端到端 CI 回归。
 # 自带微型 PDF 无需外网或 API key。01_download、02_parse、03_structure 真跑，
-# 04_translate、05_smart、06_semantic_attestation、07_concepts、08_review 用
+# 04_translate、05_smart、07_concepts、08_review、09_publish 用
 # DRY_RUN 合成响应，覆盖 DAG、scheduler、worker、step 和文件契约接线。
 #
 # 真实视频 / B站·arXiv 联网 / 真实 AI 笔记链路仍是人工/自托管覆盖
@@ -174,7 +174,7 @@ python3 -c 'import sys,json; json.load(open("/tmp/ci_review.json"))' \
   || die "review.json 不是合法 JSON"
 log "review 200 + 合法 JSON ✓"
 
-# (c) 真实 Document 解析、结构投影、译文契约全部存在且内部一致。
+# (c) 真实 Document 解析、结构投影、译文和发布门产物全部存在且内部一致。
 PARSE_SUMMARY="$("${COMPOSE[@]}" exec -T worker-cpu python3 -c "
 import json
 from pathlib import Path
@@ -183,21 +183,25 @@ document = json.load(open(root / 'intermediate/document.json'))
 quality = json.load(open(root / 'intermediate/quality.json'))
 manifest = json.load(open(root / 'intermediate/source_segments.json'))
 translation = json.load(open(root / 'output/translation.json'))
+concepts = json.load(open(root / 'output/concepts.json'))
+publication = json.load(open(root / 'output/publication.json'))
 assert document['content_type'] == 'document'
 assert document['document_kind'] == 'research_paper'
 assert document['blocks']
 assert quality['status'] in {'complete', 'degraded'}
 assert manifest['segments']
 assert translation['segments']
+assert concepts['key_terms']
+assert publication['status'] == 'published'
 for rel in ('intermediate/document_index.md', 'output/translated.html'):
     assert (root / rel).stat().st_size > 0
 print(len(document['blocks']), len(manifest['segments']), len(translation['segments']))
 " 2>/dev/null)" || die "Document 结构/质量/锚点/译文产物断言失败"
-log "Document 真实产物 ✓ (blocks/source_segments/translation_segments=${PARSE_SUMMARY})"
+log "Document 真实产物与发布门 ✓ (blocks/source_segments/translation_segments=${PARSE_SUMMARY})"
 
 log "════════════════════════════════════════"
 log "PASS: Document PDF/research_paper 真实素材 E2E 全程到 done"
 log "  真跑: 01_download(upload) · 02_parse · 03_structure"
-log "  合成: 04_translate · 05_smart · 06_semantic_attestation · 07_concepts · 08_review"
+log "  合成: 04_translate · 05_smart · 07_concepts · 08_review · 09_publish"
 log "════════════════════════════════════════"
 exit 0

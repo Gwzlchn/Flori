@@ -120,8 +120,8 @@ def test_ai_param_override_parser_missing_and_valid():
 _THREE_CLI_PROVIDERS = {"providers": {
     "claude-cli": {
         "type": "claude_cli",
-        "model": "opus5",
-        "models": ["opus5", "claude-sonnet-4-6"],
+        "model": "claude-opus-5",
+        "models": ["claude-opus-5", "claude-sonnet-4-6"],
         "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
     },
     "codex-cli": {
@@ -430,9 +430,9 @@ def test_ai_task_allowed_providers_do_not_become_and_tags():
 
 
 @pytest.mark.parametrize(("pipeline", "steps"), [
-    ("video", ("11_smart", "12_review")),
-    ("document", ("05_smart", "08_review")),
-    ("audio", ("04_smart_podcast", "05_review")),
+    ("video", ("11_smart", "11_semantic_attestation", "12_concepts", "12_review")),
+    ("document", ("05_smart", "07_concepts", "08_review")),
+    ("audio", ("04_smart_podcast", "04_semantic_attestation", "05_concepts", "05_review")),
 ])
 def test_pipeline_rerun_roles(pipeline, steps):
     assert pipeline_ai_roles(pipeline) == steps

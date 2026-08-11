@@ -22,10 +22,9 @@ graph LR
   Parse --> Structure["03_structure"]
   Structure --> Translate["04_translate 条件"]
   Structure --> Smart["05_smart 条件"]
-  Translate --> Smart
-  Smart --> Attest["06_semantic_attestation"]
-  Attest --> Concepts["07_concepts"]
-  Concepts --> Review["08_review 条件"]
+  Smart --> Concepts["07_concepts"]
+  Concepts --> Review["08_review 统一评审"]
+  Review --> Publish["09_publish"]
 ```
 
 ## 产物边界
@@ -35,13 +34,15 @@ graph LR
 | 01_download | URL 或上传 | `input/source.html`、`input/source.pdf`、metadata、assets | 原始来源不可变；同时存在 HTML/PDF 时两者都是独立 source |
 | 02_parse | 原始 source | `intermediate/document.json`、`quality.json` | 所有 profile 输出同一个 Document Model；HTML/PDF crosswalk 只接受唯一高置信匹配 |
 | 03_structure | Document Model | `source_segments.json`、PDF support | 稳定 block id 投影到既有 provenance；低置信 OCR 不发布逐字支持 |
-| 04_translate | blocks + glossary | `translation.json`、`translated.html` | 支持 1:1、1:N、N:1 对齐；公式、数字、单位、引用等 token fail-closed |
-| 05_smart | Document/Translation | 版本化智能笔记 + provenance | 标题由程序固定为“中文标题 - 笔记”；不读取原文 Markdown |
-| 06–08 | 笔记、Document、证据 | attestation、concepts、review | locator、Figure/Table id 和 document kind 贯穿消费者 |
+| 04_translate | blocks + glossary | `translation.json`、`translated.html` | 默认阅读分支；支持 1:1、1:N、N:1 对齐；不进入知识链输入 |
+| 05_smart | 原始 Document + quality + source segments | 版本化智能笔记 + 确定性来源质量提示 + immutable exact provenance + candidate provenance | 不做逐段翻译；标题由程序固定；只引用原始来源 marker |
+| 07_concepts | 智能笔记 + 原始 source segments | `concepts.json` | 模型 refs 全部丢弃；每个概念由原始 support text 逐字绑定 |
+| 08_review | 智能笔记、exact provenance、Document、quality、concepts | 最终 smart provenance、semantic batch、content-addressed 有界 Document/quality 审查包、review | exact baseline 由 05 独占在 `output/provenance_exact/`;quality 先规范化再按内容地址持久化,reader 从原始报告复算;Document 审查包绑定完整摘要并优先保留全部 evidence blocks;supported quote 修复后仍不逐字命中时只降级该 issue 为 insufficient;08 可独立失效和重跑 |
+| 09_publish | review、concepts、smart provenance | `publication.json` | 重验可靠性和质量阈值；通过后才允许 FTS、canonical evidence 与 glossary side effect |
 
 Document 不生成或读取 `output/original.md`、`output/translated.md`、`intermediate/figures.json`。
 原文展示直接使用隔离后的 `input/source.html` 或 PDF.js；译文的真相源是 `translation.json`，
-`translated.html` 只是可再生阅读视图。
+`translated.html` 只是可再生阅读视图。译文失败或变化不会改变智能笔记、概念、评审和发布的输入指纹。
 
 ## 原文、译文和证据定位
 

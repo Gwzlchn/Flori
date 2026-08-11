@@ -29,6 +29,7 @@ SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION = 3
 # 所以它同时是"备份必须捞到"的契约路径。产出侧 shared/step_ai.py 与产物声明共用此常量。
 SEMANTIC_AI_LOG_PREFIX = "output/ai_logs/"
 MAX_SEMANTIC_AI_LOG_BYTES = 2 * 1024 * 1024
+MAX_SEMANTIC_AI_LOG_HISTORY_BYTES = 32 * 1024 * 1024
 MAX_SEMANTIC_AI_LOG_RECORDS = 128
 _SEMANTIC_NOTE_TYPES = ("smart", "translated")
 _SEMANTIC_PROMPT_BUDGET_ERROR = (
@@ -1274,7 +1275,9 @@ def extract_attestable_markers(
             if token not in known:
                 raise ValueError(f"{error_prefix} contains an unknown source marker")
             if token in seen:
-                raise ValueError(f"{error_prefix} source marker is duplicated")
+                # 同一来源被模型重复引用时只保留首次 evidence 绑定。后续 marker 仍从正文移除,
+                # 但不生成第二条 mapping,避免把重复陈述伪装成独立已验证证据。
+                continue
             seen.add(token)
             refs.append(known[token])
         clean_line = marker_re.sub("", line)
@@ -1667,7 +1670,8 @@ def extract_exact_quote_markers(
             if token not in known:
                 raise ValueError(f"{error_prefix} contains an unknown source marker")
             if token in seen:
-                raise ValueError(f"{error_prefix} source marker is duplicated")
+                # exact-only fallback 与 attestable 路径保持同一降级语义。
+                continue
             seen.add(token)
             refs.append(known[token])
         clean_line = marker_re.sub("", line)

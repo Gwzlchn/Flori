@@ -324,6 +324,49 @@ class TestCAS:
         assert acquired2 is False
         assert await rc.get_step_status("j_x", "A") == "running"
 
+    @pytest.mark.asyncio
+    async def test_generation_cas_rejects_status_change_after_rerun(self, rc):
+        await rc.init_job("j_x", "document", {})
+        generation = await rc.get_job_generation("j_x")
+        await rc.set_step_status("j_x", "A", "failed")
+        await rc.advance_job_generation("j_x")
+
+        assert await rc.cas_step_status_generation(
+            "j_x", "A", "failed", "skipped", generation,
+        ) is False
+        assert await rc.get_step_status("j_x", "A") == "failed"
+
+    @pytest.mark.asyncio
+    async def test_init_missing_step_is_atomic_and_never_clears_new_execution(self, rc):
+        for sub in (
+            "retries", "step_worker", "step_exec", "step_generation",
+            "step_resources", "step_progress",
+        ):
+            await rc.r.hset(f"job:j_x:{sub}", "A", "stale")
+        await rc.r.set("job:j_x:step_commit:A", "stale")
+
+        assert await rc.init_missing_step_waiting("j_x", "A") is True
+        assert await rc.get_step_status("j_x", "A") == "waiting"
+        assert await rc.r.get("job:j_x:step_commit:A") is None
+        assert all(
+            value is None for value in [
+                await rc.r.hget(f"job:j_x:{sub}", "A")
+                for sub in (
+                "retries", "step_worker", "step_exec", "step_generation",
+                "step_resources", "step_progress",
+                )
+            ]
+        )
+
+        assert await rc.cas_step_status("j_x", "A", "waiting", "ready")
+        assert await rc.cas_step_status("j_x", "A", "ready", "running")
+        await rc.r.hset("job:j_x:step_exec", "A", "exec-new")
+        await rc.r.set("job:j_x:step_commit:A", "commit-new")
+        assert await rc.init_missing_step_waiting("j_x", "A") is False
+        assert await rc.get_step_status("j_x", "A") == "running"
+        assert await rc.r.hget("job:j_x:step_exec", "A") == "exec-new"
+        assert await rc.r.get("job:j_x:step_commit:A") == "commit-new"
+
 
 class TestDeleteStepStatus:
     @pytest.mark.asyncio

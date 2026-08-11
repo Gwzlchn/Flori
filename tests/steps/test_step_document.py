@@ -12,13 +12,22 @@ from shared.document_contract import (
     TRANSLATION_SCHEMA_VERSION,
     validate_translation,
 )
+from shared.errors import InputInvalidError, ProcessingError
 from shared.models import LLMResponse
+from shared.review_contract import (
+    MAX_DOCUMENT_REVIEW_PACK_BYTES,
+    MAX_DOCUMENT_REVIEW_PROMPT_BYTES,
+)
 from steps.document.step_02_parse import DocumentParseStep
 from steps.document.step_03_structure import DocumentStructureStep
 from steps.document.step_04_translate import DocumentTranslateStep
-from steps.document.step_05_smart import DocumentSmartStep
+from steps.document.step_05_smart import (
+    MAX_DOCUMENT_SMART_PROMPT_BYTES,
+    DocumentSmartStep,
+)
 from steps.document.step_07_concepts import DocumentConceptsStep
 from steps.document.step_08_review import DocumentReviewStep
+from steps.document.step_09_publish import DocumentPublishStep
 from steps.document.translation import (
     materialize_translation_segments,
     protected_tokens,
@@ -444,7 +453,9 @@ def test_document_translation_retry_includes_exact_validation_feedback(tmp_path,
     assert "不得通过单位、数量级或数制换算改变数字" in prompts[1]
 
 
-def test_smart_note_title_is_deterministic_and_uses_translation(tmp_path, monkeypatch):
+def test_smart_note_uses_original_document_even_when_translation_exists(
+    tmp_path, monkeypatch,
+):
     job = _fixture(tmp_path)
     translate_config = make_step_config(
         tmp_path, step_name="04_translate", pool="ai", pipeline="document",
@@ -472,7 +483,10 @@ def test_smart_note_title_is_deterministic_and_uses_translation(tmp_path, monkey
     config["step"]["prompt_template"] = "05_smart_document"
     step = DocumentSmartStep("05_smart", job, config)
 
-    def call(_prompt, **_kwargs):
+    prompts = []
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
         step.ai.last_response = LLMResponse(
             content="", model="m", provider="anthropic", session_id="smart-session",
         )
@@ -483,12 +497,227 @@ def test_smart_note_title_is_deterministic_and_uses_translation(tmp_path, monkey
     monkeypatch.setattr(step.ai, "call", call)
     result = step.execute()
     note = (job / result["note_file"]).read_text(encoding="utf-8")
-    assert note.splitlines()[0] == "# 标题 - 笔记"
+    assert note.splitlines()[0] == "# Title - 笔记"
     assert "模型自拟标题" not in note
-    assert result["source"] == "translation"
+    assert result["source"] == "document"
+    assert "Latency is 3 ms." in prompts[0]
+    assert "延迟为 3 ms。" not in prompts[0]
+    assert "translation" not in step.step_input_hashes()
+    assert (job / "output/provenance_exact/smart.json").is_file()
+    assert not (job / "output/provenance/smart.json").exists()
 
 
-def test_smart_note_retries_with_exact_marker_validation_feedback(tmp_path, monkeypatch):
+def test_smart_note_binds_and_discloses_degraded_source_quality(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    step = DocumentSmartStep("05_smart", job, config)
+    complete_hash = step.step_input_hashes()["quality"]
+    quality = {
+        "schema_version": 1,
+        "job_id": job.name,
+        "status": "degraded",
+        "reasons": ["pdf_crosswalk_partial"],
+        "metrics": {
+            "pdf_source_quality": "degraded",
+            "pdf_crosswalk_blocks": 54,
+            "pdf_crosswalk_visuals": 19,
+            "pdf_crosswalk_ambiguous": 287,
+            "pdf_layout_detector_failures": 1,
+        },
+    }
+    (job / "intermediate" / "quality.json").write_text(
+        json.dumps(quality, ensure_ascii=False), encoding="utf-8",
+    )
+    prompts: list[str] = []
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
+        step.ai.last_response = LLMResponse(
+            content="", model="m", provider="anthropic", session_id="smart-session",
+        )
+        step.ai.last_provider = "anthropic"
+        step.ai.last_model = "m"
+        return "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]"
+
+    monkeypatch.setattr(step.ai, "call", call)
+
+    result = step.execute()
+    note = (job / result["note_file"]).read_text(encoding="utf-8")
+    assert step.step_input_hashes()["quality"] != complete_hash
+    assert '"status":"degraded"' in prompts[0]
+    assert '"pdf_crosswalk_ambiguous":287' in prompts[0]
+    assert '"pdf_crosswalk_blocks":54' in prompts[0]
+    assert '"pdf_crosswalk_visuals":19' in prompts[0]
+    assert "来源内部未决矛盾" in prompts[0]
+    assert "> 来源质量提示：结构化解析状态为 degraded" in note
+    assert "pdf_crosswalk_partial" in note
+    assert "pdf_crosswalk_ambiguous=287" in note
+    assert "pdf_crosswalk_blocks=54" in note
+    assert "pdf_crosswalk_visuals=19" in note
+    assert result["quality_status"] == "degraded"
+    assert result["quality_disclosed"] is True
+
+
+def test_smart_note_rejects_rejected_source_quality(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    quality = {
+        "schema_version": 1,
+        "job_id": job.name,
+        "status": "rejected",
+        "reasons": ["pdf_layout_unavailable"],
+        "metrics": {},
+    }
+    (job / "intermediate" / "quality.json").write_text(
+        json.dumps(quality), encoding="utf-8",
+    )
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    step = DocumentSmartStep("05_smart", job, config)
+    calls = 0
+
+    def call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("rejected quality must not call AI")
+
+    monkeypatch.setattr(step.ai, "call", call)
+
+    with pytest.raises(InputInvalidError, match="rejects rejected source quality"):
+        step.execute()
+    assert calls == 0
+    assert not (job / "output" / "provenance_exact" / "smart.json").exists()
+    assert not (job / "output" / "provenance_candidates" / "smart.json").exists()
+    assert not list((job / "output" / "versions").glob("notes_smart_*"))
+
+
+@pytest.mark.parametrize(("blocks", "visuals"), [(54, 19), (54, 0), (0, 19), (0, 0)])
+def test_smart_quality_crosswalk_dimensions_stay_independent(blocks, visuals):
+    quality = {
+        "status": "degraded",
+        "reasons": ["pdf_crosswalk_partial"],
+        "metrics": {
+            "pdf_crosswalk_blocks": blocks,
+            "pdf_crosswalk_visuals": visuals,
+        },
+    }
+
+    prompt_quality = json.loads(DocumentSmartStep._quality_prompt_block(quality))
+    notice = DocumentSmartStep._quality_notice(quality)
+    assert prompt_quality["metrics"] == {
+        "pdf_crosswalk_blocks": blocks,
+        "pdf_crosswalk_visuals": visuals,
+    }
+    assert f"pdf_crosswalk_blocks={blocks}" in notice
+    assert f"pdf_crosswalk_visuals={visuals}" in notice
+
+
+def test_smart_note_rejects_oversized_quality_before_json_parse(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    (job / "intermediate" / "quality.json").write_bytes(b" " * (64 * 1024 + 1))
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    step = DocumentSmartStep("05_smart", job, config)
+    monkeypatch.setattr(
+        step.ai, "call",
+        lambda *_args, **_kwargs: pytest.fail("oversized quality must not call AI"),
+    )
+
+    with pytest.raises(InputInvalidError, match="quality exceeds byte limit"):
+        step.execute()
+
+
+def test_smart_note_rejects_oversized_prompt_before_ai(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    step = DocumentSmartStep("05_smart", job, config)
+    monkeypatch.setattr(
+        step, "_build_prompt",
+        lambda *_args, **_kwargs: "x" * (MAX_DOCUMENT_SMART_PROMPT_BYTES + 1),
+    )
+    monkeypatch.setattr(
+        step.ai, "call",
+        lambda *_args, **_kwargs: pytest.fail("oversized prompt must not call AI"),
+    )
+
+    with pytest.raises(InputInvalidError, match="smart prompt exceeds byte limit"):
+        step.execute()
+
+
+def test_smart_note_rechecks_prompt_limit_before_marker_retry(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    step = DocumentSmartStep("05_smart", job, config)
+    monkeypatch.setattr(
+        step, "_build_prompt",
+        lambda *_args, **_kwargs: "x" * MAX_DOCUMENT_SMART_PROMPT_BYTES,
+    )
+    calls = 0
+
+    def call(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return "无效来源。[[source:UNKNOWN]]"
+
+    monkeypatch.setattr(step.ai, "call", call)
+
+    with pytest.raises(InputInvalidError, match="smart prompt exceeds byte limit"):
+        step.execute()
+    assert calls == 1
+    assert not (job / "output" / "provenance_exact" / "smart.json").exists()
+    assert not (job / "output" / "provenance_candidates" / "smart.json").exists()
+
+
+def test_smart_note_accepts_safe_legacy_ocr_quality_after_restore(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    quality = {
+        "schema_version": 1,
+        "job_id": job.name,
+        "status": "degraded",
+        "reasons": ["scanned_pdf_ocr_error:RuntimeError", "scanned_pdf_ocr_failed"],
+        "metrics": {"layout_detector_model": "doclayout_yolo.onnx"},
+    }
+    (job / "intermediate" / "quality.json").write_text(
+        json.dumps(quality), encoding="utf-8",
+    )
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    step = DocumentSmartStep("05_smart", job, config)
+    prompts: list[str] = []
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
+        step.ai.last_response = LLMResponse(
+            content="", model="m", provider="anthropic", session_id="smart-session",
+        )
+        step.ai.last_provider = "anthropic"
+        step.ai.last_model = "m"
+        return "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]"
+
+    monkeypatch.setattr(step.ai, "call", call)
+    result = step.execute()
+    note = (job / result["note_file"]).read_text(encoding="utf-8")
+    assert "scanned_pdf_ocr_failed" in prompts[0]
+    assert "scanned_pdf_ocr_error" not in prompts[0]
+    assert "doclayout_yolo.onnx" not in prompts[0]
+    assert note.count("scanned_pdf_ocr_failed") == 1
+
+
+def test_smart_note_drops_duplicate_marker_binding_without_retry(tmp_path, monkeypatch):
     job = _fixture(tmp_path)
     config = make_step_config(
         tmp_path, step_name="05_smart", pool="ai", pipeline="document",
@@ -504,25 +733,24 @@ def test_smart_note_retries_with_exact_marker_validation_feedback(tmp_path, monk
         )
         step.ai.last_provider = "anthropic"
         step.ai.last_model = "m"
-        if len(prompts) == 1:
-            return (
-                "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]\n\n"
-                "## 证据\n\n来源再次报告延迟。[[source:S1.P1]]"
-            )
-        return "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]"
+        return (
+            "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]\n\n"
+            "## 证据\n\n来源再次报告延迟。[[source:S1.P1]]"
+        )
 
     monkeypatch.setattr(step.ai, "call", call)
 
     result = step.execute()
     note = (job / result["note_file"]).read_text(encoding="utf-8")
     assert "延迟为 3 ms" in note
-    assert len(prompts) == 2
+    assert "来源再次报告延迟" in note
+    assert "[[source:" not in note
+    assert result["semantic_candidates"] == 1
+    assert len(prompts) == 1
     assert "validation_error" not in prompts[0]
-    assert "note source marker is duplicated" in prompts[1]
-    assert "每个[[source:ID]]在整篇输出中最多出现一次" in prompts[1]
 
 
-def test_smart_note_rejects_duplicate_markers_after_retry_without_publishing(
+def test_smart_note_duplicate_downgrade_does_not_hide_unknown_marker(
     tmp_path, monkeypatch,
 ):
     job = _fixture(tmp_path)
@@ -541,12 +769,13 @@ def test_smart_note_rejects_duplicate_markers_after_retry_without_publishing(
         )
         return (
             "## 核心\n\n延迟为 3 ms。[[source:S1.P1]]\n\n"
-            "## 证据\n\n来源再次报告延迟。[[source:S1.P1]]"
+            "## 证据\n\n来源再次报告延迟。[[source:S1.P1]]\n\n"
+            "## 未知\n\n无效来源。[[source:UNKNOWN]]"
         )
 
     monkeypatch.setattr(step.ai, "call", call)
 
-    with pytest.raises(ValueError, match="source marker is duplicated"):
+    with pytest.raises(ValueError, match="unknown source marker"):
         step.execute()
     assert calls == 2
     assert not (job / "output" / "provenance" / "smart.json").exists()
@@ -556,6 +785,11 @@ def test_smart_note_rejects_duplicate_markers_after_retry_without_publishing(
 def test_document_concepts_never_read_legacy_original_markdown(tmp_path):
     job = _fixture(tmp_path)
     (job / "output" / "original.md").write_text("LEGACY MUST NOT BE READ", encoding="utf-8")
+    versions = job / "output" / "versions"
+    versions.mkdir(exist_ok=True)
+    (versions / "notes_smart_qoder-cli_ultimate_20260810-000000.md").write_text(
+        "# 笔记\n\nLatency is 3 ms.", encoding="utf-8",
+    )
     config = make_step_config(
         tmp_path, step_name="07_concepts", pool="ai", pipeline="document",
     )
@@ -563,16 +797,60 @@ def test_document_concepts_never_read_legacy_original_markdown(tmp_path):
     step = DocumentConceptsStep("07_concepts", job, config)
     source = step._resolve_concept_source()
     assert source is not None
-    assert source.kind == "document"
+    assert source.kind == "smart_note"
+    assert source.note_type == "original"
     assert "LEGACY" not in source.text
 
 
-def test_document_review_uses_document_quality_and_translation_sources(tmp_path, monkeypatch):
+def test_document_concepts_bind_terms_to_original_source_segments(tmp_path, monkeypatch):
     job = _fixture(tmp_path)
+    versions = job / "output" / "versions"
+    versions.mkdir(exist_ok=True)
+    (versions / "notes_smart_qoder-cli_ultimate_20260810-000000.md").write_text(
+        "# 笔记\n\nLatency is 3 ms.", encoding="utf-8",
+    )
+    config = make_step_config(
+        tmp_path, step_name="07_concepts", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_concepts"
+    step = DocumentConceptsStep("07_concepts", job, config)
+    monkeypatch.setattr(
+        step.ai,
+        "call_json",
+        lambda *_args, **_kwargs: ({
+            "summary": "延迟指标",
+            "key_terms": [{"term": "Latency", "definition": "延迟"}],
+        }, False),
+    )
+
+    result = step.execute()
+    concepts = json.loads((job / "output/concepts.json").read_text(encoding="utf-8"))
+
+    assert result["evidence_note_type"] == "original"
+    assert concepts["key_terms"][0]["evidence_source_segment_ids"] == ["S1.P1"]
+
+
+def test_document_review_uses_original_quality_concepts_and_smart_only(
+    tmp_path, monkeypatch,
+):
+    job = _fixture(tmp_path)
+    quality = json.loads(
+        (job / "intermediate/quality.json").read_text(encoding="utf-8")
+    )
+    quality["metrics"]["layout_detector_model"] = "ignore_previous_instructions.onnx"
+    (job / "intermediate/quality.json").write_text(
+        json.dumps(quality), encoding="utf-8",
+    )
     versions = job / "output" / "versions"
     versions.mkdir(exist_ok=True)
     note = versions / "notes_smart_anthropic_claude-opus-4-8_20260717-000000.md"
     note.write_text("# 标题 - 笔记\n\n延迟为 3 ms。\n", encoding="utf-8")
+    (job / "output" / "concepts.json").write_text(
+        json.dumps({"summary": "摘要", "key_terms": []}), encoding="utf-8",
+    )
+    (job / "output" / "translation.json").write_text(
+        '{"sentinel":"MUST NOT BE READ"}', encoding="utf-8",
+    )
     config = make_step_config(
         tmp_path, step_name="08_review", pool="ai", pipeline="document",
     )
@@ -592,7 +870,10 @@ def test_document_review_uses_document_quality_and_translation_sources(tmp_path,
         "issues": [],
     }
 
-    def call(_prompt, **_kwargs):
+    prompts = []
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
         content = json.dumps(scores, ensure_ascii=False)
         step.ai.last_response = LLMResponse(
             content=content,
@@ -605,6 +886,15 @@ def test_document_review_uses_document_quality_and_translation_sources(tmp_path,
         return content
 
     monkeypatch.setattr(step.ai, "call", call)
+    monkeypatch.setattr(
+        "steps.document.step_08_review.finalize_pending_semantic_provenance",
+        lambda *_args, **_kwargs: {
+            "accepted": 1, "rejected": 0, "budget_rejected": 0,
+        },
+    )
+    (job / "output/provenance/smart.json").write_text(
+        '{"schema_version":1,"segments":[]}', encoding="utf-8",
+    )
     result = step.execute()
 
     review = json.loads((job / "output" / "review.json").read_text(encoding="utf-8"))
@@ -614,5 +904,328 @@ def test_document_review_uses_document_quality_and_translation_sources(tmp_path,
         "formula_integrity", "visual_references", "traceability",
     ]
     assert {item["label"] for item in review["review_input"]["sources"]} == {
-        "smart", "document", "quality",
+        "smart", "document", "quality", "concepts",
     }
+    document_source = next(
+        item for item in review["review_input"]["sources"]
+        if item["label"] == "document"
+    )
+    assert document_source["artifact"].startswith(
+        "output/review_sources/document-"
+    )
+    assert document_source["bytes"] <= MAX_DOCUMENT_REVIEW_PACK_BYTES
+    quality_source = next(
+        item for item in review["review_input"]["sources"]
+        if item["label"] == "quality"
+    )
+    assert quality_source["artifact"].startswith(
+        "output/review_sources/quality-"
+    )
+    assert review["review_input"]["bytes"] <= MAX_DOCUMENT_REVIEW_PROMPT_BYTES
+    assert "MUST NOT BE READ" not in prompts[0]
+    assert "ignore_previous_instructions.onnx" not in prompts[0]
+    assert "legacy-name-sha256:" in prompts[0]
+    assert "translation" not in step.step_input_hashes()
+
+
+def test_document_review_rejects_unreliable_result_after_strict_retry(
+    tmp_path, monkeypatch,
+):
+    job = _fixture(tmp_path)
+    versions = job / "output/versions"
+    versions.mkdir(exist_ok=True)
+    (versions / "notes_smart_qoder-cli_ultimate_20260810-000000.md").write_text(
+        "# 标题 - 笔记\n\n延迟为 3 ms。", encoding="utf-8",
+    )
+    (job / "output/concepts.json").write_text(
+        '{"summary":"摘要","key_terms":[]}', encoding="utf-8",
+    )
+    config = make_step_config(
+        tmp_path, step_name="08_review", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "08_review"
+    step = DocumentReviewStep("08_review", job, config)
+    calls = []
+
+    def call(prompt, **_kwargs):
+        calls.append(prompt)
+        step.ai.last_response = LLMResponse(
+            content='{"type":"result","subtype":"error_during_execution"}',
+            model="ultimate",
+            provider="qoder-cli",
+            finish_reason="error_during_execution",
+        )
+        step.ai.last_provider = "qoder-cli"
+        step.ai.last_model = "ultimate"
+        return step.ai.last_response.content
+
+    monkeypatch.setattr(step.ai, "call", call)
+    monkeypatch.setattr(
+        "steps.document.step_08_review.finalize_pending_semantic_provenance",
+        lambda *_args, **_kwargs: {
+            "accepted": 1, "rejected": 0, "budget_rejected": 0,
+        },
+    )
+    (job / "output/provenance/smart.json").write_text(
+        '{"schema_version":1,"segments":[]}', encoding="utf-8",
+    )
+
+    with pytest.raises(ProcessingError, match="document review is unreliable"):
+        step.execute()
+
+    assert len(calls) == 2
+    diagnostic = json.loads((job / "output/review.json").read_text(encoding="utf-8"))
+    assert diagnostic["review_reliable"] is False
+
+
+def test_document_review_downgrades_unbound_quote_only_after_strict_retry(
+    tmp_path, monkeypatch,
+):
+    job = _fixture(tmp_path)
+    versions = job / "output/versions"
+    versions.mkdir(exist_ok=True)
+    (versions / "notes_smart_qoder-cli_ultimate_20260810-000000.md").write_text(
+        "# 标题 - 笔记\n\n延迟为 3 ms。", encoding="utf-8",
+    )
+    (job / "output/concepts.json").write_text(
+        '{"summary":"摘要","key_terms":[]}', encoding="utf-8",
+    )
+    config = make_step_config(
+        tmp_path, step_name="08_review", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "08_review"
+    step = DocumentReviewStep("08_review", job, config)
+    score_keys = [
+        "completeness", "accuracy", "structure", "terminology",
+        "formula_integrity", "visual_references", "traceability",
+    ]
+    response = json.dumps({
+        **{key: 5 for key in score_keys},
+        "key_terms": [], "missing_concepts": [],
+        "top3_improvements": ["a", "b", "c"],
+        "issues": [{
+            "type": "traceability", "severity": "error", "dimension": "accuracy",
+            "claim": "延迟", "message": "模型改写了引用",
+            "evidence_status": "supported",
+            "locator": {"source": "smart", "quote": "延迟约为 3 ms。"},
+        }],
+    }, ensure_ascii=False)
+    calls = []
+
+    def call(prompt, **_kwargs):
+        calls.append(prompt)
+        step.ai.last_response = LLMResponse(
+            content=response, model="ultimate", provider="qoder-cli",
+            finish_reason="success", raw={"is_error": False},
+        )
+        step.ai.last_provider = "qoder-cli"
+        step.ai.last_model = "ultimate"
+        return response
+
+    monkeypatch.setattr(step.ai, "call", call)
+    monkeypatch.setattr(
+        "steps.document.step_08_review.finalize_pending_semantic_provenance",
+        lambda *_args, **_kwargs: {
+            "accepted": 1, "rejected": 0, "budget_rejected": 0,
+        },
+    )
+    (job / "output/provenance/smart.json").write_text(
+        '{"schema_version":1,"segments":[]}', encoding="utf-8",
+    )
+
+    result = step.execute()
+    review = json.loads((job / "output/review.json").read_text(encoding="utf-8"))
+
+    assert len(calls) == 2
+    assert result["parse_failed"] is False
+    assert review["review_reliable"] is True
+    assert review["issues"] == [{
+        "type": "traceability", "severity": "error", "dimension": "accuracy",
+        "claim": "延迟", "message": "模型改写了引用",
+        "evidence_status": "insufficient",
+        "reason": "model-provided quote did not match bound source exactly",
+    }]
+
+
+def test_document_review_fingerprint_binds_semantic_source_protocol_and_owned_state(
+    tmp_path, monkeypatch,
+):
+    job = _fixture(tmp_path)
+    versions = job / "output/versions"
+    versions.mkdir(exist_ok=True)
+    (versions / "notes_smart_qoder-cli_ultimate_20260810-000000.md").write_text(
+        "# 笔记\n\n延迟为 3 ms。", encoding="utf-8",
+    )
+    (job / "output/concepts.json").write_text(
+        '{"summary":"摘要","key_terms":[]}', encoding="utf-8",
+    )
+    (job / "output/provenance_exact").mkdir(exist_ok=True)
+    (job / "output/provenance_exact/smart.json").write_text("{}", encoding="utf-8")
+    (job / "output/provenance_candidates/smart.json").write_text("{}", encoding="utf-8")
+    (job / "output/provenance/smart.json").write_text("{}", encoding="utf-8")
+    (job / "output/provenance/semantic_batch.json").write_text("{}", encoding="utf-8")
+    (job / "output/ai_logs").mkdir(exist_ok=True)
+    (job / "output/ai_logs/08_review.jsonl").write_text("{}\n", encoding="utf-8")
+    config = make_step_config(
+        tmp_path, step_name="08_review", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "08_review"
+    step = DocumentReviewStep("08_review", job, config)
+    template_digests = {
+        "08_review": "review-v1",
+        "semantic_attestation": "semantic-v1",
+    }
+    monkeypatch.setattr(
+        step.ai, "template_hash", lambda name: template_digests[name],
+    )
+
+    before = step.step_input_hashes()
+    assert {
+        "source_manifest", "semantic_attestation_template",
+        "semantic_batch_commit", "semantic_ai_log", "semantic_smart_final",
+        "semantic_smart_published",
+    } <= set(before)
+
+    source_path = job / "intermediate/source_segments.json"
+    source_path.write_bytes(source_path.read_bytes() + b"\n")
+    assert step.step_input_hashes()["source_manifest"] != before["source_manifest"]
+
+    template_digests["semantic_attestation"] = "semantic-v2"
+    assert (
+        step.step_input_hashes()["semantic_attestation_template"]
+        != before["semantic_attestation_template"]
+    )
+    (job / "output/provenance/smart.json").write_text(
+        '{"changed":true}', encoding="utf-8",
+    )
+    assert (
+        step.step_input_hashes()["semantic_smart_published"]
+        != before["semantic_smart_published"]
+    )
+
+
+def _publication_fixture(tmp_path):
+    job = _fixture(tmp_path)
+    versions = job / "output" / "versions"
+    versions.mkdir(exist_ok=True)
+    note = versions / "notes_smart_qoder-cli_ultimate_20260810-000000.md"
+    note.write_text("# 笔记\n\nLatency is 3 ms.", encoding="utf-8")
+    (job / "output/concepts.json").write_text("{}", encoding="utf-8")
+    (job / "output/review.json").write_text("{}", encoding="utf-8")
+    (job / "output/provenance/smart.json").write_text("{}", encoding="utf-8")
+    return job, str(note.relative_to(job))
+
+
+def test_document_publish_writes_bound_manifest_after_reliable_review(
+    tmp_path, monkeypatch,
+):
+    job, note_file = _publication_fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="09_publish", pool="cpu", pipeline="document",
+    )
+    step = DocumentPublishStep("09_publish", job, config)
+
+    async def verified(*_args, **_kwargs):
+        return {
+            "review_reliable": True,
+            "score_keys": ["accuracy", "traceability", "structure"],
+            "overall": 4.0,
+            "accuracy": 4,
+            "traceability": 4,
+            "structure": 3,
+            "issues": [],
+            "note_file": note_file,
+        }
+
+    monkeypatch.setattr("steps.document.step_09_publish.verify_persisted_review", verified)
+    verified_chain = [{"evidence_id": "ce_test"}]
+
+    async def verify_chain(**_kwargs):
+        return verified_chain
+
+    monkeypatch.setattr(
+        "steps.document.step_09_publish.build_canonical_evidence_records_with_reader",
+        verify_chain,
+    )
+    result = step.execute()
+    publication = json.loads((job / "output/publication.json").read_text(encoding="utf-8"))
+
+    assert result["published"] is True
+    assert result["canonical_evidence"] == 1
+    assert publication["status"] == "published"
+    assert {item["path"] for item in publication["artifacts"]} >= {
+        "output/review.json", "output/concepts.json", note_file,
+    }
+
+
+def test_document_publish_source_hash_uses_canonical_reader_format(tmp_path):
+    job, _note_file = _publication_fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="09_publish", pool="cpu", pipeline="document",
+    )
+    step = DocumentPublishStep("09_publish", job, config)
+    source = (job / "input/source.html").read_bytes()
+
+    actual = __import__("asyncio").run(step._sha256_evidence_file("input/source.html"))
+
+    assert actual == __import__("hashlib").sha256(source).hexdigest()
+    assert not actual.startswith("sha256:")
+
+
+def test_document_publish_rejects_unreliable_review_without_output(
+    tmp_path, monkeypatch,
+):
+    job, note_file = _publication_fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="09_publish", pool="cpu", pipeline="document",
+    )
+    step = DocumentPublishStep("09_publish", job, config)
+
+    async def rejected(*_args, **_kwargs):
+        return {
+            "review_reliable": False,
+            "score_keys": ["accuracy", "traceability"],
+            "overall": 4.0,
+            "accuracy": 4,
+            "traceability": 4,
+            "issues": [],
+            "note_file": note_file,
+        }
+
+    monkeypatch.setattr("steps.document.step_09_publish.verify_persisted_review", rejected)
+    with pytest.raises(InputInvalidError, match="review_unreliable"):
+        step.execute()
+    assert not (job / "output/publication.json").exists()
+
+
+def test_document_publish_rejects_invalid_semantic_chain_without_output(
+    tmp_path, monkeypatch,
+):
+    job, note_file = _publication_fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="09_publish", pool="cpu", pipeline="document",
+    )
+    step = DocumentPublishStep("09_publish", job, config)
+
+    async def verified(*_args, **_kwargs):
+        return {
+            "review_reliable": True,
+            "score_keys": ["accuracy", "traceability"],
+            "overall": 4.0,
+            "accuracy": 4,
+            "traceability": 4,
+            "issues": [],
+            "note_file": note_file,
+        }
+
+    async def invalid_chain(**_kwargs):
+        raise ValueError("semantic batch provenance is incomplete")
+
+    monkeypatch.setattr("steps.document.step_09_publish.verify_persisted_review", verified)
+    monkeypatch.setattr(
+        "steps.document.step_09_publish.build_canonical_evidence_records_with_reader",
+        invalid_chain,
+    )
+    with pytest.raises(ValueError, match="semantic batch provenance is incomplete"):
+        step.execute()
+    assert not (job / "output/publication.json").exists()

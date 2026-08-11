@@ -449,8 +449,8 @@ class TestTargetEnvironmentAIParams:
             params={"11_smart": {"model": "claude-sonnet-4-6"}},
         )
         narrowed = _target_configs(tmp_path, lambda providers: providers["claude-cli"].update(
-            models=["opus5"],
-            reasoning_efforts_by_model={"opus5": ["low", "medium", "high", "xhigh", "max"]},
+            models=["claude-opus-5"],
+            reasoning_efforts_by_model={"claude-opus-5": ["low", "medium", "high", "xhigh", "max"]},
         ))
 
         plan = self._plan(source, target, narrowed)
@@ -1294,8 +1294,8 @@ class TestSearchRebuild:
 _TARGET_PROVIDERS = {"providers": {
     "claude-cli": {
         "type": "claude_cli",
-        "model": "opus5",
-        "models": ["opus5", "claude-sonnet-4-6"],
+        "model": "claude-opus-5",
+        "models": ["claude-opus-5", "claude-sonnet-4-6"],
         "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
     },
     "codex-cli": {

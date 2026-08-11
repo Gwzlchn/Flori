@@ -24,6 +24,19 @@ def test_all_templates_present():
     assert {f.stem for f in TEMPLATES_DIR.glob("*.md")} == set(TEMPLATE_NAMES)
 
 
+def test_document_smart_note_preserves_source_internal_conflicts():
+    body = (TEMPLATES_DIR / "05_smart_document.md").read_text(encoding="utf-8")
+    assert "中性并列两侧原意" in body
+    assert "不得优先采信一侧" in body
+    assert "不得" in body and "确定性结论" in body
+    assert "不得仅因没有独立 marker" in body
+    assert "无可用来源坐标" in body
+    assert "无法合并时省略该细粒度事实" in body
+    assert "pdf_crosswalk_blocks>0" in body
+    assert "pdf_crosswalk_visuals>0" in body
+    assert "两个维度不得互相代替" in body
+
+
 def test_semantic_attestation_template_uses_short_decision_refs():
     """模型只回传稳定短引用,完整 candidate ID 不进入 prompt。"""
     from shared.provenance import build_semantic_attestation_prompt

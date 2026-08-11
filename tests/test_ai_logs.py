@@ -369,7 +369,7 @@ class TestPendingPhase:
 
 _CLI_PROVIDERS_CONFIG = {
     "providers": {
-        "claude-cli": {"type": "claude_cli", "model": "opus5",
+        "claude-cli": {"type": "claude_cli", "model": "claude-opus-5",
                        "reasoning_effort": "xhigh", "features": ["read"]},
         "qoder-cli": {"type": "qoder_cli", "model": "ultimate",
                       "reasoning_effort": "max", "features": ["read"]},
@@ -385,11 +385,11 @@ class TestEffectiveSelectionAudit:
         gw = AIGateway(
             _CLI_PROVIDERS_CONFIG,
             {"steps": [{"name": "s", "ai": {
-                "primary": {"provider": "claude-cli", "model": "opus5"}}}]},
+                "primary": {"provider": "claude-cli", "model": "claude-opus-5"}}}]},
         )
 
         async def ok(self, request):
-            return LLMResponse(content="ok", model="opus5",
+            return LLMResponse(content="ok", model="claude-opus-5",
                                provider="claude-cli")
 
         gw._providers["claude-cli"] = type("P", (), {"complete": ok})()
@@ -443,14 +443,14 @@ class TestEffectiveSelectionAudit:
     def test_step_log_of_a_total_failure_keeps_attempt_semantics(self, tmp_path):
         step = _Step(tmp_path, {
             "step": {"name": "11_smart"},
-            "ai": {"primary": {"provider": "claude-cli", "model": "opus5"}},
+            "ai": {"primary": {"provider": "claude-cli", "model": "claude-opus-5"}},
             "providers": _CLI_PROVIDERS_CONFIG,
         })
         step.ai.gateway = _FakeGW(exc=AllProvidersFailedError("down", attempts=[{
             "tier": "primary", "ok": False,
-            "requested_provider": "claude-cli", "requested_model": "opus5",
+            "requested_provider": "claude-cli", "requested_model": "claude-opus-5",
             "requested_reasoning_effort": None,
-            "provider": "claude-cli", "model": "opus5",
+            "provider": "claude-cli", "model": "claude-opus-5",
             "reasoning_effort": "xhigh", "reasoning_effort_source": "provider_default",
         }]))
         with pytest.raises(AllProvidersFailedError):

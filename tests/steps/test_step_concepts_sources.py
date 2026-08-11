@@ -297,13 +297,6 @@ def test_a20_nonempty_provenance_retries_exact_feedback_then_binds(
             "summary": "",
             "key_terms": [{"term": "Transformer", "definition": {"bad": True}}],
         }, False),
-        ({
-            "summary": "",
-            "key_terms": [
-                {"term": "Transformer", "definition": "bound"},
-                {"term": "Parallelism", "definition": "unbound"},
-            ],
-        }, False),
     ],
 )
 def test_nonempty_provenance_second_invalid_result_does_not_publish(
@@ -327,6 +320,44 @@ def test_nonempty_provenance_second_invalid_result_does_not_publish(
         step.execute()
 
     assert not (job / "output" / "concepts.json").exists()
+
+
+def test_second_partial_binding_publishes_only_the_evidence_bound_subset(
+    tmp_path, monkeypatch,
+):
+    job = _job(tmp_path, "document")
+    anchor = "Transformer 使用注意力机制。"
+    _smart(job, anchor, anchor=anchor)
+    cfg = make_step_config(
+        tmp_path, step_name="07_concepts", pool="ai", pipeline="document",
+    )
+    cfg["step"]["prompt_template"] = "05_concepts"
+    step = ConceptsStep("07_concepts", job, cfg)
+    partial = {
+        "summary": "保留有来源的概念",
+        "key_terms": [
+            {
+                "term": "Transformer", "definition": "bound",
+                "related": [{"term": "Parallelism", "rel": "related"}],
+            },
+            {"term": "Parallelism", "definition": "unbound"},
+        ],
+    }
+    responses = iter([
+        ({"summary": "", "key_terms": []}, False),
+        (partial, False),
+    ])
+    monkeypatch.setattr(step.ai, "call_json", lambda *args, **kwargs: next(responses))
+
+    result = step.execute()
+    output = json.loads((job / "output/concepts.json").read_text())
+
+    assert result["concepts"] == 1
+    assert [item["term"] for item in output["key_terms"]] == ["Transformer"]
+    assert output["key_terms"][0]["related"] == []
+    assert output["key_terms"][0]["evidence_source_segment_ids"] == [
+        "blk_concept-source.1",
+    ]
 
 
 def test_nonempty_provenance_retry_provider_failure_does_not_publish(

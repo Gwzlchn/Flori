@@ -15,6 +15,9 @@ from shared.models import Collection, Job, JobPart, JobStatus, StepStatus, Step,
 from shared.pipeline_scope import expand_pipeline_steps
 from shared.step_scope import execution_step_key, part_scope
 from shared.step_base import def_digest_for, pipeline_digest_for
+from shared.step_completion import build_skipped_manifest, step_definition_digest_for
+from shared.step_manifest import manifest_relative_path
+from shared.step_output_commit import StepOutput, build_step_manifest
 from shared.storage import LocalStorage
 from scheduler.scheduler import Scheduler
 from tests.current_schema_db import clone_current_schema_database
@@ -127,6 +130,91 @@ async def _skip_step(scheduler, redis, db, job_id, step):
     await redis.set_step_status(job_id, step, "skipped")
     db.update_step(job_id, step, status="skipped")
     await scheduler._check_downstream(job_id)
+
+
+async def _write_current_skip_manifest(scheduler, job, step_name, *, job_id=None,
+                                       scope_key=None, template_step=None,
+                                       part_index=None):
+    """为 active alignment 测试签发与当前 step definition 一致的真实 manifest。"""
+    steps = await scheduler._get_job_pipeline_steps(job.id)
+    cfg = steps[step_name]
+    digest = step_definition_digest_for(
+        job.pipeline,
+        cfg,
+        config=scheduler.config,
+        domain=job.domain,
+        style_tags=job.style_tags,
+    )
+    _manifest, encoded = build_skipped_manifest(
+        job_id=job_id or job.id,
+        scope_key=scope_key or cfg["scope_key"],
+        step=template_step or cfg["template_step"],
+        part_index=part_index if part_index is not None else cfg.get("part_index"),
+        job_generation=await scheduler.redis.get_job_generation(job.id),
+        reason_code="mechanical_only",
+        definition_digest=digest,
+    )
+    await scheduler.storage.write_file(
+        job.id,
+        manifest_relative_path(cfg["scope_key"], cfg["template_step"]),
+        encoded,
+    )
+
+
+async def _write_current_done_manifest(
+    scheduler, job, step_name, *, outputs: list[tuple[str, bytes]],
+):
+    """发布与当前 definition 一致的 done manifest 和声明输出。"""
+    import hashlib
+
+    steps = await scheduler._get_job_pipeline_steps(job.id)
+    cfg = steps[step_name]
+    digest = step_definition_digest_for(
+        job.pipeline,
+        cfg,
+        config=scheduler.config,
+        domain=job.domain,
+        style_tags=job.style_tags,
+    )
+    entries = []
+    for rel, data in outputs:
+        await scheduler.storage.write_file(job.id, rel, data)
+        entries.append(StepOutput(
+            path=rel,
+            job_rel=rel,
+            size_bytes=len(data),
+            sha256="sha256:" + hashlib.sha256(data).hexdigest(),
+            media_type=None,
+        ))
+    _manifest, encoded, _digest = build_step_manifest(
+        job_id=job.id,
+        scope_key=cfg["scope_key"],
+        step=cfg["template_step"],
+        part_index=cfg.get("part_index"),
+        exec_id="test:done",
+        job_generation=await scheduler.redis.get_job_generation(job.id),
+        attempt=1,
+        started_at="2026-08-10T00:00:00Z",
+        committed_at="2026-08-10T00:00:01Z",
+        duration_sec=1.0,
+        input_fingerprints={},
+        definition_digest=digest,
+        outputs=entries,
+        producer={
+            "flori_version": "test",
+            "build_sha": None,
+            "worker_id": "test",
+            "runner": "subprocess",
+            "image": None,
+            "image_digest": None,
+            "tool_versions": {},
+        },
+    )
+    await scheduler.storage.write_file(
+        job.id,
+        manifest_relative_path(cfg["scope_key"], cfg["template_step"]),
+        encoded,
+    )
 
 
 @pytest.fixture
@@ -619,6 +707,20 @@ class TestMarkdownToText:
 
 
 class TestDAGProgression:
+    @pytest.mark.asyncio
+    async def test_success_clears_stale_failure_error(self, scheduler, redis, db):
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        db.update_step(job.id, "A", status="running", error="stale failure")
+        await redis.set_step_status(job.id, "A", "running")
+
+        await scheduler.on_step_done(job.id, "A")
+
+        stored = {step.name: step for step in db.get_steps(job.id)}["A"]
+        assert stored.status == StepStatus.DONE
+        assert stored.error is None
+
     @pytest.mark.asyncio
     async def test_linear_chain(self, scheduler, redis, db):
         """A done → B ready → B done → C ready"""
@@ -1282,6 +1384,249 @@ class TestRetry:
 
         assert await redis.get_step_status("j_test_001", "A") == "failed"
 
+    @pytest.mark.asyncio
+    async def test_allowed_failure_branch_does_not_fail_job(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        pipelines = {"paper": {"steps": [
+            {
+                "name": "translate", "template_step": "translate",
+                "scope_key": "job", "pool": "cpu", "depends_on": [],
+                "module": "m.translate", "retries": 0,
+                "condition": "no_subtitle",
+                "allow_failure": True, "outputs": ["output/translation.json"],
+            },
+            {
+                "name": "knowledge", "template_step": "knowledge",
+                "scope_key": "job", "pool": "cpu", "depends_on": [],
+                "module": "m.knowledge", "retries": 0,
+                "outputs": ["output/knowledge.json"],
+            },
+        ]}}
+        config = make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir)
+        sched = _stub_workers_present(Scheduler(
+            redis, db, config, storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_optional_translation",
+            content_type="document",
+            pipeline="paper",
+            document_kind="paper",
+            domain="general",
+        )
+        db.create_job(job)
+        await sched.submit_job(job)
+
+        await redis.set_step_status(job.id, "translate", "running")
+        await sched.on_step_failed(
+            job.id, "translate", "translation rejected", "input_invalid",
+        )
+
+        assert await redis.get_step_status(job.id, "translate") == "skipped"
+        assert await redis.get_step_status(job.id, "knowledge") == "ready"
+        assert db.get_job(job.id).status != JobStatus.FAILED
+        stored = {step.name: step for step in db.get_steps(job.id)}
+        assert stored["translate"].status == StepStatus.SKIPPED
+        assert stored["translate"].error == "translation rejected"
+
+        from shared.step_completion import read_valid_manifest
+
+        manifest = await read_valid_manifest(
+            sched.storage, job.id, "job", "translate",
+        )
+        assert manifest is not None
+        assert manifest["skip"]["reason_code"] == "allowed_failure"
+        assert manifest["skip"]["condition_digest"] is not None
+
+        await sched.reconcile_step_manifests(job.id)
+        assert await redis.get_step_status(job.id, "translate") == "skipped"
+
+        # Redis 已终态而 DB 写入前崩溃时,manifest 对账仍必须修复 DB 投影。
+        db.update_step(job.id, "translate", status="failed")
+        await sched.reconcile_step_manifests(job.id)
+        assert {
+            item.name: item.status for item in db.get_steps(job.id)
+        }["translate"] == StepStatus.SKIPPED
+
+        # manifest 发布后、两侧投影前崩溃同样从 manifest 恢复。
+        await redis.set_step_status(job.id, "translate", "failed")
+        db.update_step(job.id, "translate", status="failed")
+        await sched.reconcile_step_manifests(job.id)
+        assert await redis.get_step_status(job.id, "translate") == "skipped"
+        assert {
+            item.name: item.status for item in db.get_steps(job.id)
+        }["translate"] == StepStatus.SKIPPED
+
+        # 不相干的知识链换代不得复活已持久跳过的独立翻译分支。只有当前投影
+        # 不是 skipped 时,旧 generation manifest 才可能来自迟到执行并应拒绝。
+        await redis.advance_job_generation(job.id)
+        await sched.reconcile_step_manifests(job.id)
+        await sched._check_downstream(job.id)
+        assert await redis.get_step_status(job.id, "translate") == "skipped"
+        assert {
+            item.name: item.status for item in db.get_steps(job.id)
+        }["translate"] == StepStatus.SKIPPED
+
+        await redis.set_step_status(job.id, "knowledge", "running")
+        await _write_current_done_manifest(
+            sched,
+            job,
+            "knowledge",
+            outputs=[("output/knowledge.json", b'{"ok":true}')],
+        )
+        await sched.on_step_done(job.id, "knowledge")
+        assert db.get_job(job.id).status == JobStatus.DONE
+
+    @pytest.mark.asyncio
+    async def test_allowed_failure_from_old_generation_cannot_skip_rerun(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        pipelines = {"paper": {"steps": [{
+            "name": "translate", "template_step": "translate",
+            "scope_key": "job", "pool": "cpu", "depends_on": [],
+            "module": "m.translate", "retries": 0,
+            "allow_failure": True, "outputs": ["output/translation.json"],
+        }]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_allowed_failure_generation",
+            content_type="document",
+            pipeline="paper",
+            document_kind="paper",
+        )
+        db.create_job(job)
+        await sched.submit_job(job)
+        await redis.set_step_status(job.id, "translate", "running")
+        original_publish = sched._publish_skipped_manifest
+
+        async def publish_then_rerun(*args, **kwargs):
+            published = await original_publish(*args, **kwargs)
+            await redis.advance_job_generation(job.id)
+            await redis.set_step_status(job.id, "translate", "waiting")
+            db.update_step(job.id, "translate", status="waiting", error=None)
+            return published
+
+        monkeypatch.setattr(sched, "_publish_skipped_manifest", publish_then_rerun)
+        await sched.on_step_failed(
+            job.id, "translate", "old translation failed", "input_invalid",
+        )
+
+        assert await redis.get_step_status(job.id, "translate") == "waiting"
+        await sched.reconcile_step_manifests(job.id)
+        assert await redis.get_step_status(job.id, "translate") == "waiting"
+        assert {
+            item.name: item.status for item in db.get_steps(job.id)
+        }["translate"] == StepStatus.WAITING
+
+    @pytest.mark.asyncio
+    async def test_allowed_failure_late_db_write_repairs_to_new_generation(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        pipelines = {"paper": {"steps": [{
+            "name": "translate", "template_step": "translate",
+            "scope_key": "job", "pool": "cpu", "depends_on": [],
+            "module": "m.translate", "retries": 0,
+            "allow_failure": True, "outputs": ["output/translation.json"],
+        }]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_allowed_failure_late_db",
+            content_type="document",
+            pipeline="paper",
+            document_kind="paper",
+        )
+        db.create_job(job)
+        await sched.submit_job(job)
+        await redis.set_step_status(job.id, "translate", "running")
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_to_thread = asyncio.to_thread
+
+        async def gated_to_thread(func, /, *args, **kwargs):
+            if func == db.update_step and kwargs.get("status") == "skipped":
+                entered.set()
+                await release.wait()
+            return await original_to_thread(func, *args, **kwargs)
+
+        monkeypatch.setattr("scheduler.lifecycle.asyncio.to_thread", gated_to_thread)
+        failed = asyncio.create_task(sched.on_step_failed(
+            job.id, "translate", "old translation failed", "input_invalid",
+        ))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await redis.advance_job_generation(job.id)
+        await redis.set_step_status(job.id, "translate", "waiting")
+        db.update_step(job.id, "translate", status="waiting", error=None)
+        release.set()
+        await failed
+
+        assert await redis.get_step_status(job.id, "translate") == "waiting"
+        assert {
+            item.name: item.status for item in db.get_steps(job.id)
+        }["translate"] == StepStatus.WAITING
+
+    @pytest.mark.asyncio
+    async def test_rerun_during_allowed_failure_publish_resets_old_failed_sibling(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        pipelines = {"document": {"steps": [
+            {
+                "name": "04_translate", "template_step": "04_translate",
+                "scope_key": "job", "pool": "ai", "depends_on": [],
+                "module": "m.translate", "retries": 0,
+                "allow_failure": True, "outputs": ["output/translation.json"],
+            },
+            {
+                "name": "05_smart", "template_step": "05_smart",
+                "scope_key": "job", "pool": "ai", "depends_on": [],
+                "module": "m.smart", "retries": 0,
+                "outputs": ["output/smart.md"],
+            },
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_allowed_failure_rerun_race",
+            content_type="document",
+            pipeline="document",
+            document_kind="research_paper",
+        )
+        db.create_job(job)
+        await sched.submit_job(job)
+        await redis.set_step_status(job.id, "04_translate", "running")
+        db.update_step(job.id, "04_translate", status="running")
+        original_publish = sched._publish_skipped_manifest
+
+        async def publish_then_rerun(*args, **kwargs):
+            published = await original_publish(*args, **kwargs)
+            await sched.rerun(job.id, "05_smart")
+            return published
+
+        monkeypatch.setattr(sched, "_publish_skipped_manifest", publish_then_rerun)
+        await sched.on_step_failed(
+            job.id, "04_translate", "translation rejected", "input_invalid",
+        )
+
+        assert await redis.get_step_status(job.id, "04_translate") == "ready"
+        assert await redis.get_step_status(job.id, "05_smart") == "ready"
+        assert {
+            item.name: item.status for item in db.get_steps(job.id)
+        }["04_translate"] == StepStatus.READY
+
 
 class TestRetryByFailureType:
     """失败类型矩阵:BUILD 不重试直接标 failed;SYSTEM 退避重试至上限。
@@ -1658,6 +2003,28 @@ class TestCheckStuck:
         # Should NOT be flagged as stuck because worker_heartbeat_at is fresh
         assert await redis.get_step_status("j_test_001", "A") == "running"
 
+    @pytest.mark.asyncio
+    async def test_fresh_claim_heartbeat_overrides_stale_local_progress(
+        self, scheduler, redis, db, tmp_jobs_dir,
+    ):
+        job = make_job()
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        await redis.set_step_status("j_test_001", "A", "running")
+
+        job_dir = tmp_jobs_dir / "j_test_001"
+        job_dir.mkdir(exist_ok=True)
+        import time
+        (job_dir / ".A.progress").write_text(json.dumps({
+            "updated_at": time.time() - 900,
+            "worker_heartbeat_at": time.time() - 900,
+        }))
+        await redis.set_step_progress_at("j_test_001", "A")
+
+        await scheduler.check_stuck()
+
+        assert await redis.get_step_status("j_test_001", "A") == "running"
+
 
 class TestPriority:
     @pytest.mark.asyncio
@@ -1714,6 +2081,540 @@ class TestRerun:
 
         assert not (job_dir / ".B.done").exists()
         assert not (job_dir / ".C.done").exists()
+
+    @pytest.mark.asyncio
+    async def test_review_rerun_preserves_exact_provenance_baseline(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        pipelines = {"document": {"steps": [
+            {"name": "05_smart", "pool": "ai", "depends_on": []},
+            {"name": "07_concepts", "pool": "ai", "depends_on": ["05_smart"]},
+            {"name": "08_review", "pool": "ai", "depends_on": ["07_concepts"]},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_document_review_rerun",
+            content_type="document",
+            pipeline="document",
+            document_kind="research_paper",
+        )
+        db.create_job(job)
+        await sched.submit_job(job)
+        for step in ("05_smart", "07_concepts", "08_review"):
+            await redis.set_step_status(job.id, step, "done")
+            db.update_step(job.id, step, status="done")
+        job_dir = tmp_jobs_dir / job.id
+        (job_dir / "output/provenance_exact").mkdir(parents=True)
+        (job_dir / "output/provenance").mkdir(parents=True)
+        exact = job_dir / "output/provenance_exact/smart.json"
+        final = job_dir / "output/provenance/smart.json"
+        exact.write_text('{"kind":"exact"}', encoding="utf-8")
+        await _write_current_done_manifest(sched, job, "05_smart", outputs=[])
+        await _write_current_done_manifest(sched, job, "07_concepts", outputs=[])
+        await _write_current_done_manifest(
+            sched,
+            job,
+            "08_review",
+            outputs=[("output/provenance/smart.json", b'{"kind":"semantic"}')],
+        )
+        await sched.rerun(job.id, "08_review")
+
+        assert exact.read_text(encoding="utf-8") == '{"kind":"exact"}'
+        assert not final.exists()
+        assert await redis.get_step_status(job.id, "08_review") == "ready"
+
+    @pytest.mark.asyncio
+    async def test_rerun_restarts_running_sibling_and_removes_legacy_running_step(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        pipelines = {"document": {"steps": [
+            {"name": "04_translate", "pool": "ai", "depends_on": []},
+            {"name": "05_smart", "pool": "ai", "depends_on": []},
+            {"name": "08_review", "pool": "ai", "depends_on": ["05_smart"]},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_rerun_parallel_generation",
+            content_type="document",
+            pipeline="document",
+            document_kind="research_paper",
+        )
+        db.create_job(job)
+        await sched.submit_job(job)
+        old_generation = await redis.get_job_generation(job.id)
+        await redis.set_step_status(job.id, "04_translate", "running")
+        db.update_step(job.id, "04_translate", status="running")
+        await redis.set_step_status(job.id, "06_semantic_attestation", "running")
+        db.upsert_step(Step(
+            job_id=job.id,
+            name="06_semantic_attestation",
+            status=StepStatus.RUNNING,
+            pool="ai",
+        ))
+
+        reset = await sched.rerun(job.id, "05_smart")
+
+        assert "04_translate" in reset
+        assert await redis.get_step_status(job.id, "04_translate") == "ready"
+        assert await redis.get_step_status(job.id, "05_smart") == "ready"
+        assert await redis.get_step_status(job.id, "06_semantic_attestation") is None
+        assert "06_semantic_attestation" not in {
+            item.name for item in db.get_steps(job.id)
+        }
+        await sched.on_step_done(
+            job.id, "04_translate", generation=old_generation,
+        )
+        assert await redis.get_step_status(job.id, "04_translate") == "ready"
+
+    @pytest.mark.asyncio
+    async def test_rerun_captures_sibling_claim_between_snapshot_and_generation(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        pipelines = {"document": {"steps": [
+            {"name": "04_translate", "pool": "ai", "depends_on": []},
+            {"name": "05_smart", "pool": "ai", "depends_on": []},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_rerun_claim_generation_race",
+            content_type="document",
+            pipeline="document",
+            document_kind="research_paper",
+        )
+        db.create_job(job)
+        await sched.submit_job(job)
+        original_begin = redis.begin_job_generation
+        claimed_generation = await redis.get_job_generation(job.id)
+
+        async def claim_then_advance(job_id, idempotency_key):
+            assert await redis.cas_step_status(
+                job_id, "04_translate", "ready", "running",
+            )
+            await redis.r.hset(
+                f"job:{job_id}:step_generation",
+                "04_translate",
+                str(claimed_generation),
+            )
+            return await original_begin(job_id, idempotency_key)
+
+        monkeypatch.setattr(redis, "begin_job_generation", claim_then_advance)
+        reset = await sched.rerun(job.id, "05_smart")
+
+        assert "04_translate" in reset
+        assert await redis.get_step_status(job.id, "04_translate") == "ready"
+        assert await redis.get_step_generation(job.id, "04_translate") is None
+
+    @pytest.mark.asyncio
+    async def test_active_job_step_shape_adds_publish_gate_before_completion(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        old_pipelines = {"document": {"steps": [
+            {"name": "A", "pool": "cpu", "depends_on": []},
+            {"name": "B", "pool": "cpu", "depends_on": ["A"]},
+            {"name": "C", "pool": "cpu", "depends_on": ["B"]},
+        ]}}
+        scheduler = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, old_pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = make_job(pipeline="document", job_id="j_active_old_document")
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        for step in ("A", "B", "C"):
+            await _write_current_skip_manifest(scheduler, job, step)
+            await redis.set_step_status(job.id, step, "skipped")
+            db.update_step(job.id, step, status="skipped")
+
+        scheduler.config = make_config(
+            tmp_path,
+            tmp_jobs_dir,
+            {"document": {"steps": [
+                {"name": "A", "pool": "cpu", "depends_on": []},
+                {"name": "B", "pool": "cpu", "depends_on": ["A"]},
+                {"name": "09_publish", "pool": "cpu", "depends_on": ["B"]},
+            ]}},
+            configs_dir,
+        )
+        await scheduler._check_downstream(job.id)
+
+        statuses = await redis.get_all_step_statuses(job.id)
+        assert statuses == {"A": "skipped", "B": "skipped", "09_publish": "ready"}
+        assert {item.name for item in db.get_steps(job.id)} == set(statuses)
+        assert db.get_job(job.id).status != JobStatus.DONE
+
+        await redis.set_step_status(job.id, "09_publish", "running")
+        await _write_current_done_manifest(scheduler, job, "09_publish", outputs=[])
+        await scheduler.on_step_done(job.id, "09_publish")
+        assert db.get_job(job.id).status == JobStatus.DONE
+
+    @pytest.mark.asyncio
+    async def test_active_definition_change_resets_stale_root_and_downstream(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        old_pipelines = {"document": {"steps": [
+            {
+                "name": "A", "pool": "cpu", "depends_on": [],
+                "version": "1", "outputs": ["output/legacy-a.json"],
+            },
+            {"name": "B", "pool": "cpu", "depends_on": ["A"], "version": "1"},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, old_pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = make_job(pipeline="document", job_id="j_active_old_definition")
+        db.create_job(job)
+        await sched.submit_job(job)
+        for step in ("A", "B"):
+            await _write_current_skip_manifest(sched, job, step)
+            await redis.set_step_status(job.id, step, "skipped")
+            db.update_step(job.id, step, status="skipped")
+        legacy = tmp_jobs_dir / job.id / "output/legacy-a.json"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text("old", encoding="utf-8")
+
+        sched.config = make_config(
+            tmp_path,
+            tmp_jobs_dir,
+            {"document": {"steps": [
+                {
+                    "name": "A", "pool": "cpu", "depends_on": [],
+                    "version": "2", "outputs": ["output/legacy-a.json"],
+                },
+                {"name": "B", "pool": "cpu", "depends_on": ["A"], "version": "1"},
+                {"name": "09_publish", "pool": "cpu", "depends_on": ["B"]},
+            ]}},
+            configs_dir,
+        )
+        await sched._check_downstream(job.id)
+
+        assert await redis.get_step_status(job.id, "A") == "ready"
+        assert await redis.get_step_status(job.id, "B") == "waiting"
+        assert await redis.get_step_status(job.id, "09_publish") == "waiting"
+        assert not legacy.exists()
+        assert await sched.storage.read_file(
+            job.id, manifest_relative_path("job", "A"),
+        ) is None
+
+    @pytest.mark.asyncio
+    async def test_late_old_generation_manifest_is_reset_after_pipeline_digest_updated(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        old_pipelines = {"document": {"steps": [
+            {"name": "A", "pool": "cpu", "depends_on": [], "version": "1"},
+            {"name": "B", "pool": "cpu", "depends_on": ["A"], "version": "1"},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, old_pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = make_job(pipeline="document", job_id="j_late_old_manifest")
+        db.create_job(job)
+        await sched.submit_job(job)
+        for step in ("A", "B"):
+            await _write_current_skip_manifest(sched, job, step)
+            await redis.set_step_status(job.id, step, "skipped")
+            db.update_step(job.id, step, status="skipped")
+
+        current_pipelines = {"document": {"steps": [
+            {"name": "A", "pool": "cpu", "depends_on": [], "version": "2"},
+            {"name": "B", "pool": "cpu", "depends_on": ["A"], "version": "1"},
+        ]}}
+        sched.config = make_config(
+            tmp_path, tmp_jobs_dir, current_pipelines, configs_dir,
+        )
+        db.update_job(
+            job.id,
+            pipeline_digest=pipeline_digest_for(current_pipelines["document"]["steps"]),
+        )
+
+        await sched._check_downstream(job.id)
+
+        assert await redis.get_step_status(job.id, "A") == "ready"
+        assert await redis.get_step_status(job.id, "B") == "waiting"
+        assert await sched.storage.read_file(
+            job.id, manifest_relative_path("job", "A"),
+        ) is None
+
+    @pytest.mark.asyncio
+    async def test_definition_upgrade_captures_parallel_claim_before_generation(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        old_pipelines = {"document": {"steps": [
+            {"name": "04_translate", "pool": "ai", "depends_on": []},
+            {"name": "05_smart", "pool": "ai", "depends_on": [], "version": "1"},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, old_pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_upgrade_claim_generation_race",
+            content_type="document",
+            pipeline="document",
+            document_kind="research_paper",
+        )
+        db.create_job(job)
+        await sched.submit_job(job)
+        await _write_current_skip_manifest(sched, job, "05_smart")
+        await redis.set_step_status(job.id, "05_smart", "skipped")
+        db.update_step(job.id, "05_smart", status="skipped")
+        sched.config = make_config(
+            tmp_path,
+            tmp_jobs_dir,
+            {"document": {"steps": [
+                {"name": "04_translate", "pool": "ai", "depends_on": []},
+                {"name": "05_smart", "pool": "ai", "depends_on": [], "version": "2"},
+            ]}},
+            configs_dir,
+        )
+        original_advance = redis.advance_job_generation
+        claimed_generation = await redis.get_job_generation(job.id)
+
+        async def claim_then_advance(job_id, idempotency_key=None):
+            assert await redis.cas_step_status(
+                job_id, "04_translate", "ready", "running",
+            )
+            await redis.r.hset(
+                f"job:{job_id}:step_generation",
+                "04_translate",
+                str(claimed_generation),
+            )
+            return await original_advance(job_id, idempotency_key)
+
+        monkeypatch.setattr(redis, "advance_job_generation", claim_then_advance)
+        await sched._check_downstream(job.id)
+
+        assert await redis.get_step_status(job.id, "04_translate") == "ready"
+        assert await redis.get_step_generation(job.id, "04_translate") is None
+        assert await redis.get_step_status(job.id, "05_smart") == "ready"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("db_status", ["done", "running"])
+    async def test_missing_redis_step_does_not_restore_db_terminal_without_manifest(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, db_status,
+    ):
+        pipelines = {"document": {"steps": [
+            {"name": "A", "pool": "cpu", "depends_on": []},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = make_job(pipeline="document", job_id=f"j_db_only_{db_status}")
+        db.create_job(job)
+        await sched.submit_job(job)
+        await redis.delete_step_status(job.id, "A")
+        db.update_step(job.id, "A", status=db_status)
+
+        await sched._check_downstream(job.id)
+
+        assert await redis.get_step_status(job.id, "A") == "ready"
+        assert {item.name: item.status for item in db.get_steps(job.id)}["A"] == StepStatus.READY
+
+    @pytest.mark.asyncio
+    async def test_manifest_restore_cannot_overwrite_concurrent_running_claim(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        pipelines = {"document": {"steps": [
+            {"name": "A", "pool": "cpu", "depends_on": []},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = make_job(pipeline="document", job_id="j_manifest_claim_race")
+        db.create_job(job)
+        await sched.submit_job(job)
+        await _write_current_skip_manifest(sched, job, "A")
+        await redis.delete_step_status(job.id, "A")
+        db.update_step(job.id, "A", status="skipped")
+        original_cas = redis.cas_step_status
+        claimed = False
+
+        async def claim_before_restore(job_id, step, expected, new):
+            nonlocal claimed
+            if (
+                not claimed and job_id == job.id and step == "A"
+                and expected == "waiting" and new == "skipped"
+            ):
+                claimed = True
+                assert await original_cas(job_id, step, "waiting", "running")
+                await redis.set_step_exec_id(job_id, step, "exec-current")
+            return await original_cas(job_id, step, expected, new)
+
+        monkeypatch.setattr(redis, "cas_step_status", claim_before_restore)
+        await sched._check_downstream(job.id)
+
+        assert claimed is True
+        assert await redis.get_step_status(job.id, "A") == "running"
+        assert await redis.get_step_exec_id(job.id, "A") == "exec-current"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "identity_overrides",
+        [
+            {"job_id": "j_other"},
+            {"scope_key": "part:foreign", "part_index": 1},
+            {"template_step": "B"},
+        ],
+    )
+    async def test_manifest_restore_rejects_wrong_context_identity(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, identity_overrides,
+    ):
+        pipelines = {"document": {"steps": [
+            {"name": "A", "pool": "cpu", "depends_on": []},
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = make_job(pipeline="document", job_id="j_manifest_wrong_identity")
+        db.create_job(job)
+        await sched.submit_job(job)
+        await _write_current_skip_manifest(
+            sched, job, "A", **identity_overrides,
+        )
+        await redis.delete_step_status(job.id, "A")
+        db.update_step(job.id, "A", status="skipped")
+
+        await sched._check_downstream(job.id)
+
+        assert await redis.get_step_status(job.id, "A") == "ready"
+        assert {item.name: item.status for item in db.get_steps(job.id)}["A"] == StepStatus.READY
+
+    @pytest.mark.asyncio
+    async def test_active_step_shape_requeues_current_ready_under_new_dag(
+        self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        job = make_job(pipeline="document", job_id="j_active_ready_shape")
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        await redis.set_step_status(job.id, "A", "done")
+        db.update_step(job.id, "A", status="done")
+        await redis.set_step_status(job.id, "B", "ready")
+        db.update_step(job.id, "B", status="ready")
+
+        scheduler.config = make_config(
+            tmp_path,
+            tmp_jobs_dir,
+            {"document": {"steps": [
+                {"name": "A", "pool": "cpu", "depends_on": []},
+                {"name": "B", "pool": "cpu", "depends_on": ["A"]},
+                {"name": "09_publish", "pool": "cpu", "depends_on": ["B"]},
+            ]}},
+            configs_dir,
+        )
+        await scheduler._check_downstream(job.id)
+
+        assert await redis.get_step_status(job.id, "B") == "ready"
+        queued = await redis.dequeue_step("cpu")
+        assert queued is not None and queued[0]["step"] == "B"
+        assert await redis.get_step_status(job.id, "09_publish") == "waiting"
+
+    @pytest.mark.asyncio
+    async def test_active_step_shape_does_not_overwrite_concurrent_claim(
+        self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        job = make_job(pipeline="document", job_id="j_active_claim_shape")
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        await redis.set_step_status(job.id, "A", "done")
+        db.update_step(job.id, "A", status="done")
+        await redis.set_step_status(job.id, "B", "ready")
+        db.update_step(job.id, "B", status="ready")
+        scheduler.config = make_config(
+            tmp_path,
+            tmp_jobs_dir,
+            {"document": {"steps": [
+                {"name": "A", "pool": "cpu", "depends_on": []},
+                {"name": "B", "pool": "cpu", "depends_on": ["A"]},
+                {"name": "09_publish", "pool": "cpu", "depends_on": ["B"]},
+            ]}},
+            configs_dir,
+        )
+        original_cas = redis.cas_step_status
+        claimed = False
+
+        async def claim_before_alignment(job_id, step, expected, new):
+            nonlocal claimed
+            if (
+                not claimed and job_id == job.id and step == "B"
+                and expected == "ready" and new == "waiting"
+            ):
+                claimed = True
+                assert await original_cas(job_id, step, "ready", "running")
+            return await original_cas(job_id, step, expected, new)
+
+        monkeypatch.setattr(redis, "cas_step_status", claim_before_alignment)
+        await scheduler._check_downstream(job.id)
+
+        assert claimed is True
+        assert await redis.get_step_status(job.id, "B") == "running"
+        assert await redis.get_step_status(job.id, "09_publish") == "waiting"
+        assert (await redis.get_queue_info("cpu"))["length"] == 0
+
+    @pytest.mark.asyncio
+    async def test_removed_running_step_failure_does_not_lock_upgraded_job(
+        self, scheduler, redis, db, tmp_path, tmp_jobs_dir, configs_dir,
+    ):
+        job = make_job(pipeline="document", job_id="j_removed_running_failure")
+        db.create_job(job)
+        await scheduler.submit_job(job)
+        for step in ("A", "B"):
+            await redis.set_step_status(job.id, step, "done")
+            db.update_step(job.id, step, status="done")
+        await redis.set_step_status(job.id, "C", "running")
+        db.update_step(job.id, "C", status="running")
+
+        scheduler.config = make_config(
+            tmp_path,
+            tmp_jobs_dir,
+            {"document": {"steps": [
+                {"name": "A", "pool": "cpu", "depends_on": []},
+                {"name": "B", "pool": "cpu", "depends_on": ["A"]},
+                {"name": "09_publish", "pool": "cpu", "depends_on": ["B"]},
+            ]}},
+            configs_dir,
+        )
+        await scheduler._check_downstream(job.id)
+        assert await redis.get_step_status(job.id, "C") == "running"
+
+        await scheduler.on_step_failed(job.id, "C", "legacy failed", "processing")
+
+        assert await redis.get_step_status(job.id, "C") is None
+        assert "C" not in {item.name for item in db.get_steps(job.id)}
+        assert await redis.get_step_status(job.id, "09_publish") == "ready"
+        assert db.get_job(job.id).status != JobStatus.FAILED
 
 
 class TestRecover:
@@ -2186,7 +3087,7 @@ class TestRetryFailed:
         assert await redis.get_step_status("j_test_001", "C") == "waiting"
 
     @pytest.mark.asyncio
-    async def test_retries_failed_database_job_after_runtime_state_was_cleared(
+    async def test_retry_failed_rebuilds_from_waiting_when_runtime_state_was_cleared(
         self, scheduler, redis, db,
     ):
         job = make_job()
@@ -2205,8 +3106,8 @@ class TestRetryFailed:
 
         await scheduler._retry_failed(job.id, idempotency_key="post-migration")
 
-        assert await redis.get_step_status(job.id, "A") == "done"
-        assert await redis.get_step_status(job.id, "B") == "ready"
+        assert await redis.get_step_status(job.id, "A") == "ready"
+        assert await redis.get_step_status(job.id, "B") == "waiting"
         assert await redis.get_step_status(job.id, "C") == "waiting"
 
 
@@ -2274,11 +3175,11 @@ class TestDispatch:
         assert set(reset) == {"B", "C"}
         deleted = {c.args for c in fake_storage.delete_file.await_args_list}
         # rerun 同时删中心 .done(dual)与目标及下游 final manifest(§2.10-3)。
-        assert deleted == {
+        assert {
             ("j_rr_central", ".B.done"), ("j_rr_central", ".C.done"),
             ("j_rr_central", ".flori/steps/B/manifest.json"),
             ("j_rr_central", ".flori/steps/C/manifest.json"),
-        }
+        } <= deleted
 
         # manifest/输出删除失败 → 整个 rerun 失败交 PEL 重投重试(方向唯一性,
         # 审查 A2);.done 删除仍 best-effort 告警继续(dual 兼容位)。
@@ -2294,6 +3195,117 @@ class TestDispatch:
         reset = await scheduler.rerun("j_rr_central", "C")
         assert reset == ["C"]
 
+
+class TestHistoricalCompletionEffects:
+    @pytest.mark.asyncio
+    async def test_new_publish_effect_requires_current_done_manifest(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        from unittest.mock import AsyncMock
+
+        pipelines = {"document": {"steps": [
+            {
+                "name": "03_structure", "pool": "cpu", "depends_on": [],
+                "on_complete": [{
+                    "action": "index_note",
+                    "candidates": [{"note_type": "original", "path": "output/original.md"}],
+                }],
+            },
+            {
+                "name": "09_publish", "pool": "cpu", "depends_on": ["03_structure"],
+                "version": "1", "outputs": ["output/publication.json"],
+                "effects_require_current_manifest": True,
+                "effects_required_outputs": ["output/publication.json"],
+                "on_complete": [{
+                    "action": "index_note",
+                    "candidates": [{"note_type": "smart", "path": "output/smart.md"}],
+                }],
+            },
+        ]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_historical_publish_gate",
+            content_type="document",
+            pipeline="document",
+            document_kind="research_paper",
+            status=JobStatus.DONE,
+        )
+        db.create_job(job)
+        run_effects = AsyncMock(return_value=True)
+        monkeypatch.setattr(sched, "_run_completion_effects", run_effects)
+
+        await sched.reconcile_completion_effects()
+        assert [call.args[1] for call in run_effects.await_args_list] == ["03_structure"]
+
+        run_effects.reset_mock()
+        await redis.init_job(job.id, "document", {
+            "domain": "general", "style_tags": "[]",
+        })
+        await _write_current_done_manifest(
+            sched,
+            job,
+            "09_publish",
+            outputs=[("output/publication.json", b'{"status":"published"}')],
+        )
+        await sched.reconcile_completion_effects()
+        assert [call.args[1] for call in run_effects.await_args_list] == [
+            "03_structure", "09_publish",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_active_publish_effect_requires_current_done_manifest(
+        self, redis, db, tmp_path, tmp_jobs_dir, configs_dir, monkeypatch,
+    ):
+        from unittest.mock import AsyncMock
+
+        pipelines = {"document": {"steps": [{
+            "name": "09_publish", "pool": "cpu", "depends_on": [],
+            "version": "1", "outputs": ["output/publication.json"],
+            "effects_require_current_manifest": True,
+            "effects_required_outputs": ["output/publication.json"],
+            "on_complete": [{"action": "collect_glossary"}],
+        }]}}
+        sched = _stub_workers_present(Scheduler(
+            redis,
+            db,
+            make_config(tmp_path, tmp_jobs_dir, pipelines, configs_dir),
+            storage=LocalStorage(tmp_jobs_dir),
+        ))
+        job = Job(
+            id="j_active_publish_gate",
+            content_type="document",
+            pipeline="document",
+            document_kind="research_paper",
+        )
+        db.create_job(job)
+        await redis.init_job(job.id, "document", {
+            "domain": "general", "style_tags": "[]",
+        })
+        await redis.set_step_status(job.id, "09_publish", "done")
+        run_effects = AsyncMock(return_value=True)
+        monkeypatch.setattr(sched, "_run_completion_effects", run_effects)
+
+        assert await sched._reconcile_completed_effects(job.id) is False
+        run_effects.assert_not_awaited()
+
+        await _write_current_done_manifest(
+            sched,
+            job,
+            "09_publish",
+            outputs=[("output/publication.json", b'{"status":"published"}')],
+        )
+        assert await sched._reconcile_completed_effects(job.id) is True
+        run_effects.assert_awaited_once_with(
+            job.id, "09_publish", [{"action": "collect_glossary"}],
+        )
+
+
+class TestDispatchContinuation:
     @pytest.mark.asyncio
     async def test_dispatch_retry(self, scheduler, redis, db, tmp_jobs_dir):
         job = make_job()

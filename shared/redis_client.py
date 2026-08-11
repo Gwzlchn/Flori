@@ -68,6 +68,29 @@ end
 return 0
 """
 
+_LUA_INIT_MISSING_STEP = """
+if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+    return 0
+end
+redis.call('HSET', KEYS[1], ARGV[1], 'waiting')
+for i = 2, 7 do
+    redis.call('HDEL', KEYS[i], ARGV[1])
+end
+redis.call('DEL', KEYS[8])
+return 1
+"""
+
+_LUA_CAS_STATUS_GENERATION = """
+if redis.call('HGET', KEYS[1], 'lifecycle_generation') ~= ARGV[4] then
+    return 0
+end
+if redis.call('HGET', KEYS[2], ARGV[1]) == ARGV[2] then
+    redis.call('HSET', KEYS[2], ARGV[1], ARGV[3])
+    return 1
+end
+return 0
+"""
+
 _LUA_FIXED_WINDOW_RATE_LIMIT = """
 local count = redis.call('INCR', KEYS[1])
 if count == 1 then
@@ -1669,6 +1692,23 @@ class RedisClient:
     async def set_step_status(self, job_id: str, step: str, status: str) -> None:
         await self.r.hset(f"job:{job_id}:steps", step, status)
 
+    async def init_missing_step_waiting(self, job_id: str, step: str) -> bool:
+        """只在字段缺失时初始化 waiting;并发 claim/另一调度器写入不得被覆盖。"""
+        result = await self.r.eval(
+            _LUA_INIT_MISSING_STEP,
+            8,
+            f"job:{job_id}:steps",
+            f"job:{job_id}:retries",
+            f"job:{job_id}:step_worker",
+            f"job:{job_id}:step_exec",
+            f"job:{job_id}:step_generation",
+            f"job:{job_id}:step_resources",
+            f"job:{job_id}:step_progress",
+            f"job:{job_id}:step_commit:{step}",
+            step,
+        )
+        return result == 1
+
     async def get_step_status(self, job_id: str, step: str) -> str | None:
         return await self.r.hget(f"job:{job_id}:steps", step)
 
@@ -1685,6 +1725,27 @@ class RedisClient:
             step,
             expected,
             new,
+        )
+        return result == 1
+
+    async def cas_step_status_generation(
+        self,
+        job_id: str,
+        step: str,
+        expected: str,
+        new: str,
+        generation: int,
+    ) -> bool:
+        """同一原子块校验 Job generation 与步骤状态,陈旧终态不得跨代落地。"""
+        result = await self.r.eval(
+            _LUA_CAS_STATUS_GENERATION,
+            2,
+            f"job:{job_id}",
+            f"job:{job_id}:steps",
+            step,
+            expected,
+            new,
+            str(generation),
         )
         return result == 1
 
@@ -1952,6 +2013,11 @@ class RedisClient:
 
     async def clear_step_resources(self, job_id: str, step: str) -> None:
         await self.r.hdel(f"job:{job_id}:step_resources", step)
+
+    async def clear_step_execution_identity(self, job_id: str, step: str) -> None:
+        """撤销后清 worker/exec/generation/progress;状态与重试由调用方决定。"""
+        for sub in ("step_worker", "step_exec", "step_generation", "step_progress"):
+            await self.r.hdel(f"job:{job_id}:{sub}", step)
 
     async def set_step_progress_at(self, job_id: str, step: str) -> None:
         # 步进度心跳:worker on_tick(每 10s,仅子进程存活时)刷新。供 check_stuck 对远程

@@ -78,11 +78,11 @@ _PROVIDER_RUNTIME_CAPABILITIES = {
     "qoder-cli": {READ_TOOL_TAG, WEBSEARCH_TOOL_TAG},
 }
 
-# rerun-smart 只消费这一份角色映射,避免 API 为 video 写死步骤名。
-PIPELINE_AI_ROLES: dict[str, tuple[str, str]] = {
-    "video": ("11_smart", "12_review"),
-    "document": ("05_smart", "08_review"),
-    "audio": ("04_smart_podcast", "05_review"),
+# rerun-smart 只消费这一份有序角色映射,避免 API 按内容链写死中间 AI 步。
+PIPELINE_AI_ROLES: dict[str, tuple[str, ...]] = {
+    "video": ("11_smart", "11_semantic_attestation", "12_concepts", "12_review"),
+    "document": ("05_smart", "07_concepts", "08_review"),
+    "audio": ("04_smart_podcast", "04_semantic_attestation", "05_concepts", "05_review"),
 }
 
 
@@ -704,9 +704,9 @@ async def step_required_capability_tags(
     return _required_capabilities(rules, nonempty)
 
 
-def pipeline_ai_roles(pipeline: str) -> tuple[str, str]:
-    """取内容链的智能笔记与评审步骤;未知 pipeline 不猜测。"""
+def pipeline_ai_roles(pipeline: str) -> tuple[str, ...]:
+    """取内容链从智能笔记到评审的全部 AI 步;未知 pipeline 不猜测。"""
     try:
         return PIPELINE_AI_ROLES[pipeline]
     except KeyError as exc:
-        raise ValueError(f"pipeline '{pipeline}' has no smart/review roles") from exc
+        raise ValueError(f"pipeline '{pipeline}' has no knowledge AI roles") from exc

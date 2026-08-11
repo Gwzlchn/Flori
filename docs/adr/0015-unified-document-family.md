@@ -13,7 +13,9 @@
 - 顶层 `content_type` 和 pipeline 只保留 `video / document / audio`。
 - `document_kind` 表达业务体裁，包括 `research_paper / article / whitepaper / report / book_chapter / documentation / standard / thesis / unknown`。
 - `source_profile` 和 `capabilities` 表达实际媒介能力。当前 profile 为 `scholarly_html / generic_html / digital_pdf / scanned_pdf`。
-- 所有 Document 共用 `01_download → 02_parse → 03_structure → 04_translate → 05_smart → 06_semantic_attestation → 07_concepts → 08_review`。条件步骤由 job flag 和实际产物门控，不能复制 pipeline。
+- 所有 Document 共用一个 DAG。`03_structure` 后的 `04_translate` 是独立阅读分支；知识分支为
+  `05_smart → 07_concepts → 08_review → 09_publish`。统一评审内核验 smart 证据,发布门通过后才产生
+  索引和概念副作用。条件步骤由 job flag 和实际产物门控，不能复制 pipeline。
 - `intermediate/document.json` 是结构化真相源；不可变 `input/source.html|source.pdf` 是原文真相源。系统不生成或兼容 `output/original.md`。
 - HTML 原文在安全副本中保持 DOM 结构；PDF 用 PDF.js 保持原始版式。两者都通过稳定 segment locator 与译文、概念、Figure/Table 和证据深链互跳。
 - 翻译发布 block 对齐的 `output/translation.json` 和可再生 `output/translated.html`，不把模型输出当原文替代品。

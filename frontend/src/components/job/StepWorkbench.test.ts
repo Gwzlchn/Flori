@@ -24,13 +24,13 @@ const steps = [
 
 const usage = [
   {
-    step: '04_translate', worker_id: 'ai-1', provider: 'claude-cli', model: 'opus',
+    step: '04_translate', worker_id: 'ai-1', provider: 'claude-cli', model: 'claude-opus-5',
     input_tokens: 1000, output_tokens: 200, cache_creation_tokens: 100,
     cache_read_tokens: 400, cost_usd: 0.25, credits: null, duration_sec: 20, num_turns: 1,
     cache_hit_rate_pct: 26.7,
   },
   {
-    step: '04_translate', worker_id: 'ai-1', provider: 'claude-cli', model: 'opus',
+    step: '04_translate', worker_id: 'ai-1', provider: 'claude-cli', model: 'claude-opus-5',
     input_tokens: 2000, output_tokens: 300, cache_creation_tokens: 0,
     cache_read_tokens: 500, cost_usd: 0.5, credits: null, duration_sec: 30, num_turns: 1,
     cache_hit_rate_pct: 20,

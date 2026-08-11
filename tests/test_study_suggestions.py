@@ -3246,7 +3246,7 @@ class TestStudySuggestionApi:
         assert created.status_code == 202
         batch = created.json()
         assert batch["provider"] == "claude-cli"
-        assert batch["model"] == "opus5"
+        assert batch["model"] == "claude-opus-5"
         db.mark_study_suggestion_batch_queued(
             batch["batch_id"], task_id=batch["task_id"], expected_revision=1
         )

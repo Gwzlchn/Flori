@@ -481,9 +481,11 @@ Flori 只支持三种 CLI provider,配置默认值固定为:
 
 | provider | type | model | reasoning_effort |
 |---|---|---|---|
-| `claude-cli` | `claude_cli` | `opus5` | `xhigh` |
+| `claude-cli` | `claude_cli` | `claude-opus-5` | `xhigh` |
 | `codex-cli` | `codex_cli` | `gpt-5.6-sol` | `xhigh` |
 | `qoder-cli` | `qoder_cli` | `ultimate` | `max` |
+
+Claude 配置使用 CLI 返回的 canonical 模型名。请求锚点、执行结果、usage 与审计因此保持同值,不依赖会随客户端版本漂移的别名解析。
 
 普通 AI 任务的 `allowed_providers` 可同时列出三者,但队列认领会原子选定一个具体 provider。
 执行、日志、usage 和审计从不保存集合或中间别名。
