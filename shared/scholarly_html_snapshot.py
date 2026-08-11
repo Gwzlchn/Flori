@@ -566,15 +566,24 @@ def _sanitize_declarations(
     budget: SnapshotCssBudget,
 ) -> str:
     result: list[str] = []
+    raw_content = tuple(content)
     declarations = tinycss2.parse_declaration_list(
-        content, skip_comments=True, skip_whitespace=True,
+        raw_content, skip_comments=True, skip_whitespace=True,
     )
+    if any(getattr(item, "type", "") == "error" for item in declarations):
+        # ParseError不保留精确原token区间。先审计整段保证被丢弃的
+        # nesting也消耗token与深度预算;后续有效值重复计数是有意的保守上界。
+        _consume_css_token_tree(raw_content, budget=budget)
     for declaration in declarations:
-        if getattr(declaration, "type", "") == "error":
-            raise ScholarlyHtmlSnapshotError("stylesheet declaration parse error")
-        if getattr(declaration, "type", "") != "declaration":
+        declaration_type = getattr(declaration, "type", "")
+        if declaration_type in {"declaration", "error"}:
+            budget.add_declaration()
+        # CSS nesting等上游扩展会被tinycss2投影为error。本地不解释该项;
+        # 安全降级为丢弃,同规则的其他声明仅能经下方安全门输出。
+        if declaration_type == "error":
             continue
-        budget.add_declaration()
+        if declaration_type != "declaration":
+            continue
         name = str(getattr(declaration, "lower_name", ""))
         if _SAFE_CSS_NAME_RE.fullmatch(name) is None or name in _DROP_PROPERTIES:
             continue

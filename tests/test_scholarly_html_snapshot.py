@@ -150,6 +150,42 @@ def test_css_sanitizer_rewrites_only_declared_resources_and_drops_active_edges()
     assert ".safe{position:relative;color:red;}" in rendered
 
 
+def test_css_sanitizer_drops_invalid_nested_declaration_and_keeps_safe_rules():
+    rendered = sanitize_snapshot_stylesheet(
+        b"""
+        .paper{display:block;&:has(>math){background-image:url(https://evil.example/x)}}
+        .caption{color:red}
+        """,
+        base_url="https://ar5iv.labs.arxiv.org/assets/ar5iv.css",
+        resolve_resource=lambda _: None,
+    )
+
+    assert rendered == ".paper{display:block;}.caption{color:red;}"
+    assert "evil.example" not in rendered
+
+
+def test_css_invalid_declarations_still_consume_aggregate_budget(monkeypatch):
+    monkeypatch.setattr(snapshot_service, "SCHOLARLY_HTML_CSS_MAX_DECLARATIONS", 1)
+
+    with pytest.raises(ScholarlyHtmlSnapshotLimitError, match="declaration count"):
+        sanitize_snapshot_stylesheet(
+            b".first{&{color:red}}.second{&{color:blue}}",
+            base_url="https://ar5iv.labs.arxiv.org/assets/ar5iv.css",
+            resolve_resource=lambda _: None,
+        )
+
+
+def test_css_invalid_declaration_content_still_consumes_token_budget(monkeypatch):
+    monkeypatch.setattr(snapshot_service, "SCHOLARLY_HTML_CSS_MAX_TOKENS", 2)
+
+    with pytest.raises(ScholarlyHtmlSnapshotLimitError, match="token count"):
+        sanitize_snapshot_stylesheet(
+            b".paper{&{color:red}}",
+            base_url="https://ar5iv.labs.arxiv.org/assets/ar5iv.css",
+            resolve_resource=lambda _: None,
+        )
+
+
 def test_css_sanitizer_localizes_image_set_strings_and_drops_unknown_same_origin_path():
     aliases = {
         "https://cdn.example/css/paper@2x.png": (

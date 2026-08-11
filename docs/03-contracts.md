@@ -650,7 +650,8 @@ MIME的字体和位图。旧Job没有快照时继续使用仓库内固定兼容C
 或SVG引用;CSP显式关闭script/connect/object/frame/worker/media并叠加response sandbox。前端iframe
 只开放 `allow-same-origin` 让同源字体/图片可加载,不开放脚本、表单、导航或弹窗能力。源HTML、CSS声明
 或资源值畸形时 fail-closed,不会修改持久化原文件或放宽
-为外联。证据锚点只由已验证Document Model的DOM
+为外联。声明列表中被tinycss2标记为error的局部项不做兼容解释,安全降级为丢弃且计入总预算;
+同规则其他声明仍逐项净化,样式表结构级parse error仍整表拒绝。证据锚点只由已验证Document Model的DOM
 locator生成;译文内嵌segment还必须属于同一Document Model且全篇唯一。源HTML自带的`flori-*` class、
 `source-*` ID和`data-source-segment`不能生成内部高亮。阅读器同时限制节点数、嵌套深度、属性总数与
 输出字节;越界返回413,身份冲突返回422,解析在线程中执行而不阻塞API事件循环。
