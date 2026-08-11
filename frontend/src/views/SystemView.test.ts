@@ -293,7 +293,7 @@ describe('SystemView', () => {
     await flushPromises()
     const t = w.text()
     expect(t).toContain('接入新 Worker')
-    expect(t).toContain('flori-worker:latest')   // 接入命令默认镜像 = flori-worker
+    expect(t).toContain('flori-worker-cpu:latest')
     expect(t).toContain('GATEWAY_URL')
     expect(t).toContain('WORKER_TOKEN_FILE')
     expect(t).toContain('选择能力')
@@ -510,7 +510,7 @@ describe('SystemView', () => {
     expect(cmd).not.toContain('MINIO_')
   })
 
-  it('接入命令随勾选能力多选生成 --pools + 各能力配置并集', async () => {
+  it('compute 能力可多选，切到 ai 后改用单 Provider 镜像并清掉其它池', async () => {
     const store = useWorkerStore()
     stubStoreData(store)
     const w = mountView({ workers: [] })
@@ -518,22 +518,28 @@ describe('SystemView', () => {
     // 默认只勾 cpu → --pools cpu,无 GPU/代理凭证
     expect(w.text()).toContain('--pools cpu')
     expect(w.find('pre').text()).not.toContain('gpus: all')
-    // 再勾 io + gpu + ai(cpu 仍勾):命令排序稳定 + 三套配置取并集,无主次
+    // compute 镜像允许 io/cpu/gpu 多选。
     await w.find('input[type="checkbox"][value="io"]').setValue(true)
     await w.find('input[type="checkbox"][value="gpu"]').setValue(true)
+    await flushPromises()
+    expect(w.text()).toContain('--pools cpu gpu io')
+    expect(w.find('pre').text()).toContain('gpus: all') // gpu → compose GPU 直通
+    expect(w.find('pre').text()).toContain('flori-worker-gpu:latest')
+    expect(w.text()).toContain('MODEL_CACHE_DIR')
+    expect(w.text()).not.toContain('BILI_' + 'SE' + 'SS' + 'DATA')
+    expect(w.text()).toContain('HF_ENDPOINT')
+    // AI 镜像只允许 ai pool,避免认领缺少媒体依赖的任务。
     await w.find('input[type="checkbox"][value="ai"]').setValue(true)
     await flushPromises()
-    const t = w.text()
-    expect(t).toContain('--pools ai cpu gpu io')   // 排序 join,不随勾选顺序抖
-    expect(w.find('pre').text()).toContain('gpus: all') // gpu → compose GPU 直通
-    expect(t).toContain('MODEL_CACHE_DIR')          // gpu → whisper 缓存卷
-    expect(t).not.toContain('BILI_' + 'SE' + 'SS' + 'DATA')  // io 凭证走中心分发,不进 worker env。
-    expect(t).toContain('HF_ENDPOINT')              // cpu/gpu → whisper HF 国内镜像
+    expect(w.text()).toContain('--pools ai')
+    expect(w.text()).not.toContain('--pools ai cpu')
+    expect(w.find('pre').text()).toContain('flori-worker-ai-claude:latest')
+    expect(w.find('pre').text()).not.toContain('gpus: all')
     expect(w.find('pre').text()).not.toContain('GATEWAY_TLS_INSECURE') // 命令默认严格校验(页面提示文案除外)
     // 受保护能力标签由 worker 启动自证,向导只绑定具体 CLI provider。
     expect(w.find('pre').text()).not.toContain('--tags')
     expect(w.find('pre').text()).toContain('FLORI_CLI_PROVIDER')
-    expect(t).toContain('.claude 放进状态目录')   // CLI 凭证在 worker 独立 HOME
+    expect(w.text()).toContain('.claude 放进状态目录')   // CLI 凭证在 worker 独立 HOME
     expect(w.find('pre').text()).not.toContain('${HOME}/.claude')
   })
 
@@ -551,12 +557,14 @@ describe('SystemView', () => {
     await select.setValue('qoder-cli')
     await flushPromises()
     expect(w.find('pre').text()).toContain('FLORI_CLI_PROVIDER: "qoder-cli"')
+    expect(w.find('pre').text()).toContain('flori-worker-ai-qoder:latest')
     expect(w.find('pre').text()).not.toContain('--tags')
     expect(w.text()).toContain('.qoder 放进状态目录')
 
     await select.setValue('codex-cli')
     await flushPromises()
     expect(w.find('pre').text()).toContain('FLORI_CLI_PROVIDER: "codex-cli"')
+    expect(w.find('pre').text()).toContain('flori-worker-ai-codex:latest')
     expect(w.text()).toContain('.codex 放进状态目录')
     expect(select.findAll('option').map(option => option.attributes('value'))).toEqual([
       'claude-cli', 'qoder-cli', 'codex-cli',

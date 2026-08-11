@@ -21,6 +21,22 @@ _CLI_VERSIONS = {
     "codex": "0.147.0",
 }
 _CLI_TOOLS_DIGEST = "sha256:" + "c" * 64
+_BACKEND_IMAGE_NAMES = (
+    "flori-scheduler",
+    "flori-api",
+    "flori-worker-cpu",
+    "flori-worker-gpu",
+    "flori-worker-ai-claude",
+    "flori-worker-ai-qoder",
+    "flori-worker-ai-codex",
+)
+
+
+def _candidate_digest_fixture() -> str:
+    return "".join(
+        f"{name}\tsha256:{index:x}" + "a" * 63 + "\n"
+        for index, name in enumerate(_BACKEND_IMAGE_NAMES, start=1)
+    )
 
 
 def _cli_tools_source_digest(repo: Path = REPO) -> str:
@@ -1066,8 +1082,8 @@ exit 0
     assert completed.returncode == 1
     calls = log.read_text(encoding="utf-8").splitlines()
     product_calls = [call for call in calls if call.startswith("buildx build ")]
-    assert len(product_calls) == 4
-    assert sum("--file docker/base.Dockerfile" in call for call in product_calls) == 3
+    assert len(product_calls) == 8
+    assert sum("--file docker/base.Dockerfile" in call for call in product_calls) == 7
     assert sum("--file frontend/Dockerfile" in call for call in product_calls) == 1
     assert all(
         "--push" in call
@@ -1091,7 +1107,7 @@ for argument in "$@"; do
   previous="$argument"
 done
 case " $* " in
-  *" --target worker "*)
+  *" --target worker-ai-"*)
     printf '%s\n' 'FLORI_CLI_VERSION claude=2.1.220' \
       'FLORI_CLI_VERSION qoder=1.1.17' 'FLORI_CLI_VERSION codex=0.147.0'
     ;;
@@ -1124,9 +1140,9 @@ printf '{"containerimage.digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
     assert completed.returncode == 0, completed.stderr
     lines = digest_file.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 3
+    assert len(lines) == 7
     assert {line.split("\t", 1)[0] for line in lines} == {
-        "flori-scheduler", "flori-api", "flori-worker",
+        *_BACKEND_IMAGE_NAMES,
     }
     assert all(line.endswith("sha256:" + "b" * 64) for line in lines)
     cli_evidence = (digest_file.parent / "cli-tools.tsv").read_text(
@@ -1191,7 +1207,7 @@ def test_ci_image_check_builds_products_without_push(tmp_path: Path) -> None:
         "#!/bin/sh\n" + _cli_tools_inspect_fake() + """
 printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 case " $* " in
-  *" --target worker "*)
+  *" --target worker-ai-"*)
     printf '%s\n' 'FLORI_CLI_VERSION claude=2.1.220' \
       'FLORI_CLI_VERSION qoder=1.1.17' 'FLORI_CLI_VERSION codex=0.147.0'
     ;;
@@ -1223,9 +1239,11 @@ esac
     assert completed.returncode == 0, completed.stderr
     calls = log.read_text(encoding="utf-8").splitlines()
     product_calls = [call for call in calls if call.startswith("buildx build ")]
-    assert len(product_calls) == 4
+    assert len(product_calls) == 8
     assert all("--cache-from" in call for call in product_calls)
-    worker_call = next(call for call in calls if "flori-worker:buildcache" in call)
+    ai_calls = [call for call in calls if "flori-worker-ai-" in call]
+    assert len(ai_calls) == 3
+    worker_call = next(call for call in ai_calls if "flori-worker-ai-qoder" in call)
     key = hashlib.sha256(
         (
             "claude=2.1.220\nqoder=1.1.17\ncodex=0.147.0\n"
@@ -1242,10 +1260,11 @@ esac
     assert "--build-arg CODEX_CLI_VERSION=0.147.0" in worker_call
     assert f"CLI_TOOLS_IMAGE=ghcr.io/{environment['OWNER_LC']}/flori-cli-tools:" in worker_call
     assert f"@{_CLI_TOOLS_DIGEST}" in worker_call
+    assert all("CLI_INSTALL_REFRESH" in call for call in ai_calls)
     assert all(
         "CLI_INSTALL_REFRESH" not in call
         for call in product_calls
-        if "flori-worker:buildcache" not in call
+        if call not in ai_calls
     )
     assert not any("--push" in call or "--cache-to" in call for call in product_calls)
     assert not any("--metadata-file" in call or "--tag" in call for call in product_calls)
@@ -1290,7 +1309,7 @@ printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
         assert completed.returncode == 0, completed.stderr
         return next(
             call for call in log.read_text(encoding="utf-8").splitlines()
-            if "flori-worker:buildcache" in call
+            if "flori-worker-ai-qoder:buildcache" in call
         )
 
     first = worker_call("1.1.17", "100")
@@ -1360,7 +1379,7 @@ def test_ci_image_cli_cache_key_tracks_installer_and_docker_stage_only(
         assert completed.returncode == 0, completed.stderr
         worker_call = next(
             call for call in log.read_text(encoding="utf-8").splitlines()
-            if "flori-worker:buildcache" in call
+            if "flori-worker-ai-qoder:buildcache" in call
         )
         return next(
             part.removeprefix("CLI_INSTALL_REFRESH=")
@@ -1600,13 +1619,7 @@ exit 0
     )
     fake_docker.chmod(0o755)
     digest_file = tmp_path / "candidate-digests.tsv"
-    digest_file.write_text(
-        """flori-scheduler\tsha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-flori-api\tsha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-flori-worker\tsha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-""",
-        encoding="utf-8",
-    )
+    digest_file.write_text(_candidate_digest_fixture(), encoding="utf-8")
     environment = os.environ.copy()
     environment.update({
         "PATH": f"{tmp_path}:{environment['PATH']}",
@@ -1630,7 +1643,7 @@ flori-worker\tsha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 
     assert completed.returncode == 0, completed.stderr
     calls = log.read_text(encoding="utf-8").splitlines()
-    assert len(calls) == 3
+    assert len(calls) == 7
     assert all(call.startswith("buildx imagetools create ") for call in calls)
     assert all(":latest" in call and ":sha-1234567" in call for call in calls)
     assert all("@sha256:" in call for call in calls)
@@ -1651,13 +1664,7 @@ esac
     )
     fake_docker.chmod(0o755)
     digest_file = tmp_path / "candidate-digests.tsv"
-    digest_file.write_text(
-        """flori-scheduler\tsha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-flori-api\tsha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-flori-worker\tsha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-""",
-        encoding="utf-8",
-    )
+    digest_file.write_text(_candidate_digest_fixture(), encoding="utf-8")
     environment = os.environ.copy()
     environment.update({
         "PATH": f"{tmp_path}:{environment['PATH']}",

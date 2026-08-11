@@ -274,10 +274,11 @@ async function removeWorker(w: Worker) {
   catch { showToast('移除失败', 'error') } finally { rowBusy.value = null }
 }
 
-// 接入新 Worker(mintToken + Gateway-only 命令;折叠 <details>)
-// worker 镜像 = flori-worker,接入命令默认用它。
-const DEFAULT_WORKER_IMAGE = `ghcr.io/${'gwzl' + 'chn'}/flori-worker:latest`
-const IMAGE = import.meta.env.VITE_WORKER_IMAGE || DEFAULT_WORKER_IMAGE
+// 接入新 Worker(mintToken + Gateway-only 命令;折叠 <details>)。
+// compute 与 concrete CLI 镜像互斥,避免 Worker 认领镜像内缺依赖的任务。
+const WORKER_IMAGE_PREFIX = String(
+  import.meta.env.VITE_WORKER_IMAGE_PREFIX || `ghcr.io/${'gwzl' + 'chn'}`,
+).replace(/\/$/, '')
 const WORKER_TYPES = ['ai', 'cpu', 'gpu', 'io']
 const OUTPUT_MODES = [
   { id: 'compose', label: 'compose(推荐)' },
@@ -322,6 +323,15 @@ const AI_ACCESS_METHODS = [
   { id: 'codex-cli', label: 'Codex CLI' },
 ] as const
 const aiAccessMethod = ref<(typeof AI_ACCESS_METHODS)[number]['id']>('claude-cli')
+const workerImage = computed(() => {
+  if (selectedPools.value.includes('ai')) {
+    const provider = aiAccessMethod.value.replace('-cli', '')
+    return `${WORKER_IMAGE_PREFIX}/flori-worker-ai-${provider}:latest`
+  }
+  return selectedPools.value.includes('gpu')
+    ? `${WORKER_IMAGE_PREFIX}/flori-worker-gpu:latest`
+    : `${WORKER_IMAGE_PREFIX}/flori-worker-cpu:latest`
+})
 
 const gatewayUrl = computed(() => {
   const o = typeof window !== 'undefined' ? window.location?.origin : ''
@@ -415,7 +425,7 @@ const composeCommand = computed(() => {
   const topVolumes = needsCache.value ? '\nvolumes:\n  whisper-cache:\n' : ''
   return `services:
   ${serviceName.value}:
-    image: ${IMAGE}
+    image: ${workerImage.value}
     container_name: ${serviceName.value}
     restart: unless-stopped
     command: ${yamlString(runCmd.value)}
@@ -433,7 +443,7 @@ ${dockerWatchtowerLabels.value}  -e GATEWAY_URL=${gatewayUrl.value} \\
   -e WORKER_TOKEN_FILE=/home/worker/worker.token \\
   -e HOME=/home/worker \\
 ${dockerCredLines.value}${dockerCacheLines.value}  -v "${stateDir.value}:/home/worker" \\
-  ${IMAGE} \\
+  ${workerImage.value} \\
   ${runCmd.value}${watchtowerEnabled.value ? `
 
 docker run -d --name watchtower-${serviceName.value} --restart unless-stopped \\

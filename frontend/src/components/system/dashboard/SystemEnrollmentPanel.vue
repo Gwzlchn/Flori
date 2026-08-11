@@ -18,6 +18,16 @@ const watchtowerEnabled = defineModel<boolean>('watchtowerEnabled', { required: 
 const watchtowerInterval = defineModel<number>('watchtowerInterval', { required: true })
 const aiAccessMethod = defineModel<string>('aiAccessMethod', { required: true })
 defineEmits<{ toggle: [event: Event]; mint: []; copy: [text: string, target: 'token' | 'cmd'] }>()
+
+function togglePool(type: string, checked: boolean) {
+  if (checked) {
+    selectedPools.value = type === 'ai'
+      ? ['ai']
+      : [...new Set(selectedPools.value.filter(pool => pool !== 'ai').concat(type))]
+  } else {
+    selectedPools.value = selectedPools.value.filter(pool => pool !== type)
+  }
+}
 </script>
 
 <template>
@@ -36,9 +46,9 @@ defineEmits<{ toggle: [event: Event]; mint: []; copy: [text: string, target: 'to
           </div>
           <p class="note-tip">Watchtower 会挂载 Docker socket。自签证书部署时可加 <code>GATEWAY_TLS_INSECURE=1</code> 或 <code>GATEWAY_CA_BUNDLE</code>。</p>
         </details>
-        <div class="pool-picker"><label v-for="type in workerTypes" :key="type" :class="{ on: selectedPools.includes(type) }"><input v-model="selectedPools" type="checkbox" :value="type" /><span>{{ type }}</span></label></div>
+        <div class="pool-picker"><label v-for="type in workerTypes" :key="type" :class="{ on: selectedPools.includes(type) }"><input type="checkbox" :value="type" :checked="selectedPools.includes(type)" @change="togglePool(type, ($event.target as HTMLInputElement).checked)" /><span>{{ type }}</span></label></div>
         <div v-if="selectedPools.includes('ai')" class="inline-field"><span>CLI provider</span><select v-model="aiAccessMethod" class="input" data-testid="ai-access-method"><option v-for="method in aiAccessMethods" :key="method.id" :value="method.id">{{ method.label }}</option></select></div>
-        <p v-if="selectedPools.includes('ai')" class="note-tip"><template v-if="aiAccessMethod === 'claude-cli'">把已登录的 .claude 放进状态目录(容器内 /home/worker/.claude);该 worker 只会绑定 Claude CLI。</template><template v-else-if="aiAccessMethod === 'qoder-cli'">把已登录的 .qoder 放进状态目录(容器内 /home/worker/.qoder);该 worker 只会绑定 Qoder CLI。</template><template v-else>把已登录的 .codex 放进状态目录(容器内 /home/worker/.codex);该 worker 只会绑定 Codex CLI。</template></p>
+        <p v-if="selectedPools.includes('ai')" class="note-tip"><template v-if="aiAccessMethod === 'claude-cli'">AI 镜像只允许 ai 池。把已登录的 .claude 放进状态目录(容器内 /home/worker/.claude);该 worker 只会绑定 Claude CLI。</template><template v-else-if="aiAccessMethod === 'qoder-cli'">AI 镜像只允许 ai 池。把已登录的 .qoder 放进状态目录(容器内 /home/worker/.qoder);该 worker 只会绑定 Qoder CLI。</template><template v-else>AI 镜像只允许 ai 池。把已登录的 .codex 放进状态目录(容器内 /home/worker/.codex);该 worker 只会绑定 Codex CLI。</template></p>
       </section>
       <section class="enroll-step-card token-step"><div class="token-strip"><div class="step-head-main"><span class="step-title"><span class="step-dot">2</span>生成 token</span><span class="enroll-hint">{{ registrationCode ? `有效期 ${tokenTtlText || '已生成'}` : '首次注册用' }}</span></div><div v-if="registrationCode" class="token-row"><code class="mono">{{ registrationCode }}</code><button class="iconbtn" @click="$emit('copy', registrationCode, 'token')"><component :is="copiedRegistrationCode ? Check : Copy" :size="15" /></button></div><button class="btn pri enroll-main-action" :class="{ compact: registrationCode }" :disabled="minting" @click="$emit('mint')"><Key :size="14" />{{ registrationCode ? '重生成' : '生成 token' }}</button></div></section>
       <section class="enroll-step-card deploy-box"><details class="deploy-details"><summary class="step-head deploy-head"><div class="step-head-main"><span class="step-title"><span class="step-dot">3</span>复制部署文件</span><span class="enroll-hint">{{ selectedPools.length ? `能力 ${[...selectedPools].sort().join(' + ')}` : '未选择能力' }} · {{ commandTitle }} · Gateway {{ gatewayUrl }}</span></div><div class="deploy-actions"><button class="btn sm" @click.stop.prevent="$emit('copy', command, 'cmd')"><component :is="copiedCommand ? Check : Copy" :size="13" />{{ copiedCommand ? '已复制' : commandCopyLabel }}</button><ChevronRight class="summary-chevron" :size="16" /></div></summary><pre>{{ command }}</pre></details></section>

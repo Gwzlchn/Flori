@@ -28,7 +28,7 @@ x-worker-env: &worker-env
 
 services:
   worker-cpu:
-    image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker-cpu:${IMAGE_TAG:-latest}
     init: true
     container_name: flori-worker-cpu
     restart: unless-stopped
@@ -47,7 +47,7 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
 
   worker-ai:
-    image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:?IMAGE_OWNER is required}/flori-worker-ai-${WORKER_AI_VARIANT:-claude}:${IMAGE_TAG:-latest}
     init: true
     container_name: flori-worker-ai
     restart: unless-stopped
@@ -56,6 +56,7 @@ services:
     environment:
       <<: *worker-env
       WORKER_NAME: ${WORKER_NAME_AI:-edge-ai}
+      FLORI_CLI_PROVIDER: ${WORKER_AI_VARIANT:-claude}-cli
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       KIMI_API_KEY: ${KIMI_API_KEY:-}

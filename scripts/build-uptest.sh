@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 本地构建拆分镜像并打 :uptest 标签,供 .local 活栈(IMAGE_TAG=uptest)使用 —— 不依赖 ghcr。
+# 本地构建拆分镜像并打 :uptest 标签,供 .local 活栈(IMAGE_TAG=uptest)使用。
 #
-# 后端是三个 target(base.Dockerfile 的 scheduler/api/worker)+ 前端,各出一镜像:
-#   flori-scheduler / flori-api / flori-worker / flori-frontend。
+# Worker 按运行能力拆成 compute(cpu/gpu)和三个 concrete CLI AI 镜像。普通源码热构建
+# 只重算末尾 COPY/ENV,不会重新安装三套 CLI。
 #
 # 为什么用 `docker compose build` 而非裸 `docker build`:
 #   base.Dockerfile 用 BuildKit `--mount=type=cache`(治 pip 重装)。NAS 未装 buildx CLI 插件,
@@ -18,8 +18,9 @@
 # 进而拖垮 worker 的 apt/CLI/pip 依赖缓存。
 #
 # 用法:
-#   scripts/build-uptest.sh                 # 建全部 4 个
-#   scripts/build-uptest.sh worker frontend # 只建指定(service 名:scheduler/api/worker/frontend)
+#   scripts/build-uptest.sh                         # 建全部产品镜像
+#   scripts/build-uptest.sh worker-ai-qoder         # 只建 Qoder AI Worker
+#   scripts/build-uptest.sh worker frontend         # worker=全部五种 Worker 的兼容别名
 # 环境:
 #   IMAGE_OWNER      ghcr 归属(默认从 remote.origin.url 推断);TAG 固定 uptest(活栈约定)
 #   USE_USTC_MIRROR  1=用 USTC 源(默认),CI/海外置 0
@@ -42,9 +43,30 @@ OWNER="${OWNER,,}"
 # 真实语义版本,注入镜像 ENV FLORI_VERSION。构建上下文用临时副本,不改宿主 pyproject。
 VER="$(sed -n 's/^version = "\(.*\)"/\1/p' "${REPO}/pyproject.toml" | head -1)"
 SHA="$(git -C "$REPO" rev-parse --short=12 HEAD 2>/dev/null || echo local)"
-# 每次本地 worker build 都刷新官方 latest CLI 安装层。该值只破 Docker cache,
-# 不进入运行时版本契约;需要复现旧镜像时应直接使用其 immutable digest。
-CLI_REFRESH="${CLI_INSTALL_REFRESH:-$(date -u '+%Y%m%dT%H%M%SZ')-$$}"
+# 本地默认复用稳定 CLI source。只有显式 REFRESH_CLI=1 或传入 CLI_INSTALL_REFRESH 才打穿安装缓存;
+# 正式发布仍由 CI 每次解析官方 channel 并按实际版本选择 immutable 工具镜像。
+if [ "${REFRESH_CLI:-0}" = "1" ]; then
+  CLI_REFRESH="${CLI_INSTALL_REFRESH:-$(date -u '+%Y%m%dT%H%M%SZ')-$$}"
+else
+  CLI_REFRESH="${CLI_INSTALL_REFRESH:-stable-local}"
+fi
+
+# 优先复用专用工具镜像;迁移首轮允许从旧通用 Worker 提取三套 CLI,避免一次无意义冷下载。
+CLI_SOURCE_IMAGE="${CLI_TOOLS_IMAGE:-}"
+if [ -z "$CLI_SOURCE_IMAGE" ]; then
+  for candidate in \
+      "ghcr.io/${OWNER}/flori-cli-tools:uptest" \
+      "ghcr.io/${OWNER}/flori-worker:uptest"; do
+    if docker image inspect "$candidate" >/dev/null 2>&1; then
+      CLI_SOURCE_IMAGE="$candidate"
+      break
+    fi
+  done
+fi
+CLI_SOURCE_ARG=""
+if [ -n "$CLI_SOURCE_IMAGE" ]; then
+  CLI_SOURCE_ARG=", CLI_TOOLS_IMAGE: \"${CLI_SOURCE_IMAGE}\""
+fi
 PROXY_HOST="${FLORI_BUILD_PROXY_HOST:-}"
 if [ -z "$PROXY_HOST" ]; then
   PROXY_HOST="$(ip -4 addr show docker0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1 || true)"
@@ -85,7 +107,7 @@ services:
       context: ${ctx}
       dockerfile: docker/base.Dockerfile
       target: scheduler
-      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}" }
+      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", FLORI_BUILD_SHA: "${SHA}" }
       cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-scheduler:buildcache" ]
     image: ghcr.io/${OWNER}/flori-scheduler:${TAG}
   api:
@@ -93,17 +115,49 @@ services:
       context: ${ctx}
       dockerfile: docker/base.Dockerfile
       target: api
-      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}" }
+      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", FLORI_BUILD_SHA: "${SHA}" }
       cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-api:buildcache" ]
     image: ghcr.io/${OWNER}/flori-api:${TAG}
-  worker:
+  worker-cpu:
     build:
       context: ${ctx}
       dockerfile: docker/base.Dockerfile
-      target: worker
-      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", CLI_INSTALL_REFRESH: "${CLI_REFRESH}" }
-      cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-worker:buildcache" ]
-    image: ghcr.io/${OWNER}/flori-worker:${TAG}
+      target: worker-cpu
+      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", FLORI_BUILD_SHA: "${SHA}" }
+      cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-worker-cpu:buildcache", "type=registry,ref=ghcr.io/${OWNER}/flori-worker:buildcache" ]
+    image: ghcr.io/${OWNER}/flori-worker-cpu:${TAG}
+  worker-gpu:
+    build:
+      context: ${ctx}
+      dockerfile: docker/base.Dockerfile
+      target: worker-gpu
+      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", FLORI_BUILD_SHA: "${SHA}" }
+      cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-worker-gpu:buildcache", "type=registry,ref=ghcr.io/${OWNER}/flori-worker:buildcache" ]
+    image: ghcr.io/${OWNER}/flori-worker-gpu:${TAG}
+  worker-ai-claude:
+    build:
+      context: ${ctx}
+      dockerfile: docker/base.Dockerfile
+      target: worker-ai-claude
+      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", FLORI_BUILD_SHA: "${SHA}", CLI_INSTALL_REFRESH: "${CLI_REFRESH}"${CLI_SOURCE_ARG} }
+      cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-worker-ai-claude:buildcache", "type=registry,ref=ghcr.io/${OWNER}/flori-worker:buildcache" ]
+    image: ghcr.io/${OWNER}/flori-worker-ai-claude:${TAG}
+  worker-ai-qoder:
+    build:
+      context: ${ctx}
+      dockerfile: docker/base.Dockerfile
+      target: worker-ai-qoder
+      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", FLORI_BUILD_SHA: "${SHA}", CLI_INSTALL_REFRESH: "${CLI_REFRESH}"${CLI_SOURCE_ARG} }
+      cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-worker-ai-qoder:buildcache", "type=registry,ref=ghcr.io/${OWNER}/flori-worker:buildcache" ]
+    image: ghcr.io/${OWNER}/flori-worker-ai-qoder:${TAG}
+  worker-ai-codex:
+    build:
+      context: ${ctx}
+      dockerfile: docker/base.Dockerfile
+      target: worker-ai-codex
+      args: { USE_USTC_MIRROR: "${USTC}", FLORI_VERSION: "${VER}", FLORI_BUILD_SHA: "${SHA}", CLI_INSTALL_REFRESH: "${CLI_REFRESH}"${CLI_SOURCE_ARG} }
+      cache_from: [ "type=registry,ref=ghcr.io/${OWNER}/flori-worker-ai-codex:buildcache", "type=registry,ref=ghcr.io/${OWNER}/flori-worker:buildcache" ]
+    image: ghcr.io/${OWNER}/flori-worker-ai-codex:${TAG}
   frontend:
     build:
       context: ${REPO}/frontend
@@ -113,12 +167,25 @@ services:
     image: ghcr.io/${OWNER}/flori-frontend:${TAG}
 YAML
 
-echo ">> 构建拆分镜像 → :${TAG}(${*:-scheduler api worker frontend})"
-docker compose -f "$work/build.yml" build "${build_args[@]}" "$@"
+requested=("$@")
+if [ "${#requested[@]}" -eq 0 ]; then
+  requested=(scheduler api worker-cpu worker-gpu worker-ai-claude worker-ai-qoder worker-ai-codex frontend)
+fi
+expanded=()
+for service in "${requested[@]}"; do
+  case "$service" in
+    worker) expanded+=(worker-cpu worker-gpu worker-ai-claude worker-ai-qoder worker-ai-codex) ;;
+    worker-ai) expanded+=(worker-ai-claude worker-ai-qoder worker-ai-codex) ;;
+    *) expanded+=("$service") ;;
+  esac
+done
+echo ">> 构建拆分镜像 → :${TAG}(${expanded[*]})"
+[ -z "$CLI_SOURCE_IMAGE" ] || echo ">> 复用 CLI source: ${CLI_SOURCE_IMAGE}"
+docker compose -f "$work/build.yml" build "${build_args[@]}" "${expanded[@]}"
 
 echo ">> 完成,本地镜像:"
 docker images --format '  {{.Repository}}:{{.Tag}}\t{{.Size}}' \
-  | grep -E "flori-(scheduler|api|worker|frontend):${TAG}" || true
+  | grep -E "flori-(scheduler|api|worker-(cpu|gpu|ai-(claude|qoder|codex))|frontend):${TAG}" || true
 cat <<'TIP'
 >> 起/重建活栈(NAS):
    docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-file .env \

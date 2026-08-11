@@ -55,11 +55,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
-      target: worker
-      args:
-        INSTALL_CLAUDE_CODE: "0"
-        INSTALL_QODER_CLI: "0"
-        INSTALL_CODEX_CLI: "0"
+      target: worker-cpu
     command: python -m worker.main --pools cpu
     volumes:
       - ./shared:/app/shared
@@ -81,11 +77,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
-      target: worker
-      args:
-        INSTALL_CLAUDE_CODE: "0"
-        INSTALL_QODER_CLI: "0"
-        INSTALL_CODEX_CLI: "0"
+      target: worker-cpu
     command: python -m worker.main --pools io
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -111,11 +103,7 @@ services:
     build:
       context: .
       dockerfile: docker/base.Dockerfile
-      target: worker
-      args:
-        INSTALL_CLAUDE_CODE: "0"
-        INSTALL_QODER_CLI: "0"
-        INSTALL_CODEX_CLI: "0"
+      target: worker-ai-base
     # DRY_RUN 不调用 Claude CLI,但入口能力门仍需覆盖生产路由标签。受保护标签不可手填
     # (worker 会拒绝启动),合成栈按生产同一探测路径自证:落 claude 存根二进制 + 非空凭证,
     # FLORI_CLI_PROVIDER 显式绑定 claude-cli,auto_discover_tags 据此打出

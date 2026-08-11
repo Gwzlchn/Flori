@@ -179,9 +179,9 @@ FLORI_SOURCE_LIBRARY_DIR=<absolute NAS video library path>
 docker compose --profile distributed --profile source-library up -d
 ```
 
-Compose把该目录以`:ro`挂到API和`worker-source`的`/sources/library`。API负责准入时full hash;
-`worker-source` 以`--pools io cpu ai`运行,且只在真实能打开root时自报`source-root:<id>`。
-08需要读取原字节生成来源清单,因此source Worker必须像普通AI Worker一样配置可用provider凭证;
+Compose把该目录以`:ro`挂到API、`worker-source`和`worker-source-ai`的`/sources/library`。API负责准入时full hash;
+compute source Worker以`--pools io cpu`运行,Provider source Worker以`--pools ai`运行,两者都只在真实能打开root时自报`source-root:<id>`。
+08需要读取原字节生成来源清单,因此`worker-source-ai`必须通过`WORKER_AI_VARIANT`选择可用provider并配置其凭证;
 没有匹配AI能力时该步会等待,不会绕过root约束投递到看不到原片的Worker。
 使用`docker-compose.executor.yml`时还会把`FLORI_SOURCE_LIBRARY_DIR`作为DooD宿主路径,
 把同一root以ro挂给嵌套step容器;因此该值不得用相对路径。
@@ -285,7 +285,7 @@ docker run -d --restart unless-stopped \
   -e WORKER_REGISTRATION_TOKEN=<管理页铸造的 flw- token> \
   -e WORKER_NAME=cpu-1 \                       # 确定性 id;同机多 worker 各给唯一名,不撞
   -e CONFIG_DIR=/app/configs \
-  ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:latest \
+  ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker-cpu:latest \
   python -m worker.main --pools cpu
 ```
 
@@ -293,7 +293,7 @@ docker run -d --restart unless-stopped \
 - `ai`：`-e ANTHROPIC_API_KEY=<KEY>`（及 `DEEPSEEK_API_KEY` 等)。
 - `io`(下载)：**零凭证预置**——B站/YouTube cookies 由中心在认领下载步时经 runner API
   下发(docs/03 §1.7.1),在管理页扫码/上传一次即全部 worker 生效。
-- GPU 加速 Whisper：`--gpus all` + `--pools gpu cpu`；发布的 worker 镜像已包含 `[gpu]` extra；
+- GPU 加速 Whisper：使用 `flori-worker-gpu` 镜像,加 `--gpus all` + `--pools gpu cpu`；发布镜像包含 `[gpu]` extra；
   可选模型 warm 缓存(免每次重下)`-v whisper-cache:/cache -e MODEL_CACHE_DIR=/cache`。完全离线运行时先校验
   snapshot,再用 `WHISPER_MODEL_NAME=base` 和
   `WHISPER_MODEL_PATH=/cache/models--<owner>--<repo>/snapshots/<commit>` 绑定逻辑模型与绝对目录；
@@ -301,6 +301,10 @@ docker run -d --restart unless-stopped \
 
 一条命令接入，纯出站 HTTPS；删除 worker 即吊销其 token。除 GPU 模型缓存(可选)外,worker 本地无任何状态。
 (可选只读文件)外，worker 不需任何持久化卷。
+
+AI Worker 必须选择与 `FLORI_CLI_PROVIDER` 对应的镜像:`claude-cli` → `flori-worker-ai-claude`,
+`qoder-cli` → `flori-worker-ai-qoder`,`codex-cli` → `flori-worker-ai-codex`。三者可以独立构建、发布和滚动;
+镜像入口会拒绝 provider 与内置 CLI 不一致,也会拒绝 AI 镜像声明 compute pool。
 
 > 旧的「中转 Redis(TLS)+MinIO」直连模型见上方 compose，已被网关模型取代，仅在需要 worker 直连内部组件时保留。
 
@@ -494,17 +498,21 @@ Claude 配置使用 CLI 返回的 canonical 模型名。请求锚点、执行结
 探测生成，未随本次滚动重建的 worker 保留旧标签，而新 pipeline 要求的标签它没有，于是
 不再认领任何 AI 步，且不会报错。按下列顺序执行，中间任何一步失败都不要继续：
 
-1. **构建三件套** `scripts/build-uptest.sh scheduler api worker`。worker 镜像通过三个项目的官方
-   latest 安装方式取得 CLI,不在仓库钉版本或 SHA;构建必须实际执行三条 `--version`,任一失败即
-   fail-closed。同一 Git 提交在不同时刻重建可能得到不同二进制,发布证据必须保存构建日志中的
-   实际版本与最终镜像摘要,不能只用 commit SHA 声称二进制相同。
+1. **构建受影响镜像**。后端共享代码变更仍用
+   `scripts/build-uptest.sh scheduler api worker`;其中`worker`展开为CPU、GPU和三个Provider AI镜像。
+   只改某个CLI封装时可单独构建`worker-ai-claude|worker-ai-qoder|worker-ai-codex`。脚本默认复用按
+   CLI实际版本和安装定义固定的本地`flori-cli-tools`基座,不会重新下载三套CLI;显式设置
+   `REFRESH_CLI=1`才刷新官方latest。刷新必须实际执行三条`--version`,任一失败即fail-closed。
+   发布证据必须保存实际版本与最终镜像摘要,不能只用commit SHA声称二进制相同。
 2. **准备 worker home**。每个 CLI worker 一份独立凭证目录。Claude 可直接运行
    `scripts/seed-worker-home.sh <name>`;Qoder/Codex 分别运行
    `SEED_TOOLS=qoder scripts/seed-worker-home.sh <name>` 与
    `SEED_TOOLS=codex scripts/seed-worker-home.sh <name>`。脚本只复制认证必需文件;Codex 只复制
    `.codex/auth.json`,不会把宿主 `config.toml` 的沙箱或审批策略带进 worker。
-   每个 CLI worker 必须设置 `FLORI_CLI_PROVIDER=claude-cli|codex-cli|qoder-cli` 并只绑定一种
-   concrete CLI。同机多份凭证应启动多个独立 Worker,不能由一个进程自动选择。
+   默认Compose的普通AI与source-library AI分别使用worker名`ai`和`source-library-ai`,因此凭证
+   应seed到这两个独立home。每个CLI worker必须设置
+   `FLORI_CLI_PROVIDER=claude-cli|codex-cli|qoder-cli`并只绑定一种concrete CLI。同机多份凭证应
+   启动多个独立Worker,不能由一个进程自动选择。
 3. **重建全部受影响 worker**，不能只滚一部分。包括远程和裸金属节点：它们不随 NAS 栈滚动，
    必须单独重启才会重新探测能力。
 4. **验证能力注册**：`GET /api/workers` 逐个确认新标签已出现，`GET /api/providers` 确认

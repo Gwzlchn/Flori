@@ -395,14 +395,15 @@ docker run --gpus all \
   -e GATEWAY_URL=https://${API_HOST} \
   -e WORKER_REGISTRATION_TOKEN=${TOKEN} \
   -e IDLE_TIMEOUT=600 \
-  flori-worker:latest python -m worker.main --pools gpu cpu
+  flori-worker-gpu:latest python -m worker.main --pools gpu cpu
 ```
 
 空闲 10 分钟无任务自动退出，下次有任务时手动启动。
 
 ## 5. AI Worker 特殊行为
 
-claude 二进制烤在 worker 镜像里(base.Dockerfile worker stage);订阅凭证放【该 worker 自己的家目录】
+三种 concrete CLI 分别烤在 `flori-worker-ai-claude`、`flori-worker-ai-qoder`、
+`flori-worker-ai-codex` 镜像里,每个镜像只携带自己的 CLI。订阅凭证放该 worker 自己的家目录
 `${FLORI_DATA_DIR}/workers/<worker名>/`,容器把它挂为 HOME。每 worker 独立凭证副本(各自 refreshToken
 续期,无并发写冲突);claude CLI 的会话 transcript(`$HOME/.claude/projects/…`)随之落数据卷 = 纳管,
 审计层按 session_id 回收 agentic 全轨迹(见 shared/ai_gateway.py ClaudeCLIProvider._find_transcript)。
@@ -424,34 +425,15 @@ worker-ai:
 
 ## 6. Docker 镜像
 
-### CPU Worker
+`docker/base.Dockerfile` 产出五种 Worker 产品镜像:
 
-```dockerfile
-FROM python:3.11-slim
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir \
-    scenedetect[opencv] imagehash pillow scikit-image \
-    opencv-python-headless rapidocr-onnxruntime \
-    pysrt pyyaml redis structlog
-WORKDIR /app
-COPY steps/ steps/
-COPY shared/ shared/
-```
+- `flori-worker-cpu`:完整 compute 文件系统,承载 `io/cpu`。
+- `flori-worker-gpu`:当前复用 compute 文件系统层,独立 repository 和 target;用 `--gpus all --pools gpu cpu` 接入。以后加入 CUDA runtime 时不改变 CPU 镜像。
+- `flori-worker-ai-claude`:core、Worker 运行时与 Claude CLI。
+- `flori-worker-ai-qoder`:core、Worker 运行时与 Qoder CLI。
+- `flori-worker-ai-codex`:core、Worker 运行时与 Codex CLI。
 
-### GPU Worker
-
-```dockerfile
-FROM nvidia/cuda:12.2-runtime-ubuntu22.04
-RUN apt-get update && apt-get install -y python3 python3-pip ffmpeg && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir \
-    scenedetect[opencv] imagehash pillow scikit-image \
-    opencv-python-headless paddlepaddle-gpu paddleocr \
-    faster-whisper minio \
-    pysrt pyyaml redis structlog
-WORKDIR /app
-COPY steps/ steps/
-COPY shared/ shared/
-```
+compute 镜像不携带任何 CLI。AI 镜像不安装 ffmpeg、Poppler、Deno、布局模型和媒体/论文计算 extras。源码位于各 target 的末层,COPY 前的 apt、pip、模型与 CLI 层可跨普通源码修改复用。
 
 
 ## manifest-v1 提交协议(九步;契约见 docs/03-contracts.md §7.5)

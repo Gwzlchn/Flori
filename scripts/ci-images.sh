@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在一个 runner 内并行构建候选或提升四个产品镜像.
+# 在一个 runner 内并行构建候选或提升 scheduler/api、五种 Worker 与 frontend 产品镜像。
 set -euo pipefail
 
 MODE="${1:-}"
@@ -203,6 +203,7 @@ build_cli_tools() {
       --build-arg "CLAUDE_CLI_VERSION=${CLI_VERSIONS[claude]}" \
       --build-arg "QODER_CLI_VERSION=${CLI_VERSIONS[qoder]}" \
       --build-arg "CODEX_CLI_VERSION=${CLI_VERSIONS[codex]}" \
+      --cache-from "type=registry,ref=ghcr.io/$OWNER_LC/flori-worker-ai-qoder:buildcache" \
       --cache-from "type=registry,ref=ghcr.io/$OWNER_LC/flori-worker:buildcache" \
       --cache-to type=inline \
       --metadata-file "$metadata" \
@@ -280,7 +281,7 @@ start_build() {
       --build-arg "FLORI_VERSION=$FLORI_VERSION"
       --cache-from "type=registry,ref=ghcr.io/$OWNER_LC/$image:buildcache"
     )
-    if [ "$image" = "flori-worker" ]; then
+    if [[ "$image" == flori-worker-ai-* ]]; then
       command+=(
         --build-arg "CLI_INSTALL_REFRESH=$CLI_TOOLS_KEY"
         --build-arg "CLI_TOOLS_SOURCE_DIGEST=$CLI_TOOLS_SOURCE_DIGEST"
@@ -291,6 +292,9 @@ start_build() {
       if [ "$CLI_TOOLS_AVAILABLE" = "true" ]; then
         command+=(--build-arg "CLI_TOOLS_IMAGE=$CLI_TOOLS_REF@$CLI_TOOLS_DIGEST")
       fi
+    fi
+    if [[ "$image" == flori-worker-* ]]; then
+      command+=(--cache-from "type=registry,ref=ghcr.io/$OWNER_LC/flori-worker:buildcache")
     fi
     if [ "$MODE" = "candidate" ]; then
       command+=(
@@ -335,21 +339,28 @@ start_build() {
 prepare_cli_tools
 start_build flori-scheduler docker/base.Dockerfile . scheduler "$BACKEND"
 start_build flori-api docker/base.Dockerfile . api "$BACKEND"
-start_build flori-worker docker/base.Dockerfile . worker "$BACKEND"
+start_build flori-worker-cpu docker/base.Dockerfile . worker-cpu "$BACKEND"
+start_build flori-worker-gpu docker/base.Dockerfile . worker-gpu "$BACKEND"
+start_build flori-worker-ai-claude docker/base.Dockerfile . worker-ai-claude "$BACKEND"
+start_build flori-worker-ai-qoder docker/base.Dockerfile . worker-ai-qoder "$BACKEND"
+start_build flori-worker-ai-codex docker/base.Dockerfile . worker-ai-codex "$BACKEND"
 start_build flori-frontend frontend/Dockerfile ./frontend "" "$FRONTEND"
 
 failed=0
+cli_log_validated=false
 for index in "${!PIDS[@]}"; do
   pid="${PIDS[$index]}"
   image="${NAMES[$index]}"
   if wait "$pid"; then
     echo "== $image $MODE success =="
-    if [ "$image" = "flori-worker" ] \
+    if [[ "$image" == flori-worker-ai-* ]] \
         && { [ "$MODE" = "candidate" ] || [ "$MODE" = "check" ]; }; then
       marker_count=$(grep -Fc "FLORI_CLI_VERSION " "$RUN_TMP/$image.log" || true)
-      if [ "$CLI_TOOLS_AVAILABLE" != "true" ] || [ "$marker_count" != "0" ]; then
+      if [ "$marker_count" != "0" ]; then
         if ! validate_cli_build_log "$RUN_TMP/$image.log"; then
           failed=1
+        else
+          cli_log_validated=true
         fi
       fi
     fi
@@ -359,6 +370,15 @@ for index in "${!PIDS[@]}"; do
   fi
   tail -n 240 "$RUN_TMP/$image.log"
 done
+
+if [ "$BACKEND" = "true" ] \
+    && { [ "$MODE" = "candidate" ] || [ "$MODE" = "check" ]; } \
+    && [ "$CLI_TOOLS_AVAILABLE" != "true" ] \
+    && [ "$cli_log_validated" != "true" ]; then
+  validate_cli_build_log /dev/null || true
+  echo "内部 cli-tools 构建未提供三种 CLI 的实装版本证据" >&2
+  failed=1
+fi
 
 if [ "$MODE" = "candidate" ] && [ "$failed" -eq 0 ]; then
   manifest="$RUN_TMP/candidate-digests.tsv"

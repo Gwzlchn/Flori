@@ -2,8 +2,8 @@
 # 回滚后端镜像到指定标签,重建服务。
 # CI 为受影响镜像的发布构建打 :latest + :<git-sha>;跟 :latest 的自动滚动出问题时,固定到一个
 # 已知良好的 sha 即可。
-# api/scheduler/worker 是三个独立镜像(flori-api / flori-scheduler / flori-worker),
-# 本脚本按 service 映射到对应镜像、去重拉取,再以 IMAGE_TAG 重建(compose 各 service 已指向自己的镜像)。
+# API、Scheduler、compute Worker 与三个 Provider AI Worker 是独立镜像。
+# 本脚本让Compose解析service的最终镜像,去重拉取后再以IMAGE_TAG重建。
 #
 # 用法:
 #   scripts/rollback.sh <image-tag|git-sha> [service ...]
@@ -20,26 +20,37 @@ usage() { sed -n '2,17p' "$0"; exit "${1:-0}"; }
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then usage 0; fi
 
 TAG="${1:?需要镜像标签/sha;见 --help}"; shift || true
-OWNER="${IMAGE_OWNER:-gwzlchn}"
 read -r -a CF <<< "${COMPOSE_FILES:--f docker-compose.yml}"
 SERVICES=("$@")
 if [ "${#SERVICES[@]}" -eq 0 ]; then SERVICES=(api scheduler worker-cpu worker-ai); fi
 
-# service → 拆分镜像名(与 docker-compose.yml 的 image 映射一致)
-img_for() {
-  case "$1" in
-    api|mcp-http)           echo "flori-api" ;;
-    scheduler|tunnel-stats) echo "flori-scheduler" ;;
-    worker-*)               echo "flori-worker" ;;
-    frontend)               echo "flori-frontend" ;;
-    *) echo "未知 service: $1(无法映射镜像)" >&2; return 1 ;;
-  esac
+# IMAGE_TAG只覆盖版本;Compose仍负责读取.env、variant和所有override。
+image_ref_for() {
+  local service="$1"
+  local refs=()
+  mapfile -t refs < <(
+    IMAGE_TAG="${TAG}" docker compose "${CF[@]}" config "${service}" |
+      awk -v name="${service}" '
+        $0 == "  " name ":" { in_service = 1; next }
+        in_service && /^  [^ ]/ { exit }
+        in_service && /^    image: / {
+          sub(/^    image: /, "")
+          print
+          exit
+        }
+      '
+  )
+  if [ "${#refs[@]}" -ne 1 ] || [ -z "${refs[0]}" ]; then
+    echo "service ${service} 未解析到唯一镜像" >&2
+    return 1
+  fi
+  echo "${refs[0]}"
 }
 
 # 去重拉取本次涉及的镜像
 declare -A pulled
 for s in "${SERVICES[@]}"; do
-  img="ghcr.io/${OWNER}/$(img_for "$s"):${TAG}"
+  img="$(image_ref_for "$s")"
   if [ -z "${pulled[$img]:-}" ]; then
     pulled[$img]=1
     echo ">> 拉取 ${img}"

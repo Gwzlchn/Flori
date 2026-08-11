@@ -2,7 +2,8 @@
 #   common  : python + curl + pip 镜像源 + core 依赖(不含源码)——所有 stage 共享底座
 #   scheduler: core + scheduler惰性服务边界——无 routes/ffmpeg/CLI/重 extras
 #   api     : +[api,mcp](api/ + mcp_server)—— api 不调 claude,无 ffmpeg/claude
-#   worker  : +ffmpeg+claude-code binary + [steps,gpu,worker] —— 唯一跑 claude、唯一重镜像
+#   worker-compute: +ffmpeg/poppler/Deno/布局模型 + [steps,gpu,worker],供 cpu/gpu
+#   worker-ai-* : core + [worker] + 单个 concrete CLI,不携带媒体与论文计算依赖
 #   test    : 全 pip extras + [test] 依赖,无 ffmpeg/claude 二进制、无 cn bake —— 仅给测试。
 #             pytest 全程 mock subprocess;opencv/whisper/PyAV 是自带 .so 的 wheel,import 不需系统 ffmpeg。
 #             用例对 ffmpeg/claude 天然安全,故省去 apt ffmpeg + claude-code binary,镜像更快更小。
@@ -138,22 +139,16 @@ ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
 
-# worker:重镜像 —— ffmpeg(steps 调 ffmpeg/ffprobe + PyAV 解码)+ 三个 CLI agent 二进制
-#    + [steps,gpu,worker] + cn_domains bake(net-zone CN 表)+ /data/prompts seed(AI 步读 profiles)
-FROM deno AS worker
+# compute worker:io/cpu/gpu 共用的媒体与论文计算运行时,不携带任何 CLI agent。
+# cpu 池当前同时承载 Document/Video/Audio,先保留完整 [steps,gpu,worker] 依赖以守住认领契约。
+FROM deno AS worker-compute
 ARG USE_USTC_MIRROR=1
-# poppler-utils:Document PDF adapter 用 pdfinfo、pdftohtml XML 和 pdftotext bbox 建立文本层;
-#               PyMuPDF 负责扫描 PDF 页渲染和视觉区域,不把逆向 Markdown 当真相源。
+# poppler-utils:Document PDF adapter 用 pdfinfo、pdftohtml XML 和 pdftotext bbox 建立文本层。
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get -o Acquire::Retries=10 update \
     && apt-get -o Acquire::Retries=10 -o APT::Keep-Downloaded-Packages=true \
         install -y --no-install-recommends ffmpeg poppler-utils
-# 稳定 cli-tools stage 的文件层在应用发布之间保持 digest 不变;业务源码不会进入该 stage。
-COPY --from=cli-tools-source /usr/local/bin/ /usr/local/bin/
-COPY --from=cli-tools-source /usr/local/lib/flori-cli/ /usr/local/lib/flori-cli/
-COPY --from=cli-tools-source /usr/local/lib/codex/ /usr/local/lib/codex/
-COPY --from=cli-tools-source /etc/flori/ /etc/flori/
 RUN --mount=type=cache,target=/root/.cache/pip pip install ".[steps,gpu,worker]" \
     && python -c "import yt_dlp_ejs"
 # Document布局模型只在02_parse懒加载;统一worker镜像让所有CPU worker具备同一能力。
@@ -192,7 +187,51 @@ ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
 ARG FLORI_VERSION=
 ENV FLORI_VERSION=${FLORI_VERSION}
 ENV DISABLE_AUTOUPDATER=1 \
+    DISABLE_UPDATES=1 \
+    FLORI_WORKER_IMAGE_PROFILE=compute
+
+# cpu 与 gpu 先共享同一文件系统层。独立 target/repository 允许只滚动一种能力,
+# 后续增加 CUDA runtime 时不会再次改变 cpu 镜像。
+FROM worker-compute AS worker-cpu
+
+FROM worker-compute AS worker-gpu
+
+# AI Worker 不安装 ffmpeg/poppler/OCR/Whisper/Deno/布局模型。AI 步只依赖 core + worker,
+# 三种 concrete provider 在末层各取一套 CLI,避免一个容器携带其它 Provider 工具。
+FROM common AS worker-ai-base
+RUN --mount=type=cache,target=/root/.cache/pip pip install ".[worker,ai-runtime]" \
+    && python -c "from PIL import Image; assert Image is not None"
+COPY shared/ shared/
+COPY configs/ configs/
+COPY steps/ steps/
+COPY worker/ worker/
+COPY configs/prompts/ /data/prompts/
+ARG FLORI_BUILD_SHA=
+ENV FLORI_BUILD_SHA=${FLORI_BUILD_SHA}
+ARG FLORI_VERSION=
+ENV FLORI_VERSION=${FLORI_VERSION}
+ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_UPDATES=1
+
+FROM worker-ai-base AS worker-ai-claude
+COPY --from=cli-tools-source /usr/local/bin/claude /usr/local/bin/claude
+COPY --from=cli-tools-source /usr/local/lib/flori-cli/claude /usr/local/lib/flori-cli/claude
+ENV FLORI_WORKER_IMAGE_PROFILE=ai \
+    FLORI_IMAGE_CLI_PROVIDER=claude-cli
+
+FROM worker-ai-base AS worker-ai-qoder
+COPY --from=cli-tools-source /usr/local/bin/qodercli /usr/local/bin/qodercli
+COPY --from=cli-tools-source /usr/local/lib/flori-cli/qodercli /usr/local/lib/flori-cli/qodercli
+COPY --from=cli-tools-source /etc/flori/qoder-settings.json /etc/flori/qoder-settings.json
+ENV FLORI_WORKER_IMAGE_PROFILE=ai \
+    FLORI_IMAGE_CLI_PROVIDER=qoder-cli
+
+FROM worker-ai-base AS worker-ai-codex
+COPY --from=cli-tools-source /usr/local/lib/codex/ /usr/local/lib/codex/
+RUN ln -s /usr/local/lib/codex/packages/standalone/current/bin/codex /usr/local/bin/codex \
+    && codex --version
+ENV FLORI_WORKER_IMAGE_PROFILE=ai \
+    FLORI_IMAGE_CLI_PROVIDER=codex-cli
 
 # test-runtime 不含源码,供 CI 构建一次后由各 runner 拉取;测试源码通过 Compose bind mount 注入.
 FROM common AS test-runtime

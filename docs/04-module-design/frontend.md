@@ -158,7 +158,7 @@
 │  │ docker run -d --restart unless-stopped \         │    │
 │  │   -e GATEWAY_URL=https://<host> \                │    │
 │  │   -e WORKER_REGISTRATION_TOKEN=flw-xxxxxxxx \    │    │
-│  │   ghcr.io/<owner>/flori-worker --pools gpu cpu   │    │
+│  │   ghcr.io/<owner>/flori-worker-gpu --pools gpu cpu │  │
 │  └──────────────────────────────────────────────────┘    │
 │  [复制命令]  类型: [GPU ▼]                               │
 └──────────────────────────────────────────────────────────┘

@@ -25,6 +25,34 @@ from .worker import Worker, auto_discover_tags, validate_manual_tags
 logger = structlog.get_logger(component="worker")
 
 
+def validate_image_profile(pools: list[str], cli_provider: str | None) -> None:
+    """校验镜像能力与启动声明一致;裸机和旧自定义镜像不设 profile 时保持兼容。"""
+    # profile 由受控产品镜像写入,不能用 Worker 自报能力替代这一供应链边界。
+    profile = os.environ.get("FLORI_WORKER_IMAGE_PROFILE", "").strip()
+    if not profile:
+        return
+    pool_set = set(pools)
+    if profile == "compute":
+        if "ai" in pool_set or cli_provider is not None:
+            raise WorkerFatalError(
+                "compute worker image cannot subscribe ai or bind a CLI provider",
+                reason="worker_image_profile_mismatch",
+            )
+        return
+    if profile == "ai":
+        expected = os.environ.get("FLORI_IMAGE_CLI_PROVIDER", "").strip()
+        if pool_set != {"ai"} or not expected or cli_provider != expected:
+            raise WorkerFatalError(
+                "AI worker image requires pool=ai and its embedded CLI provider",
+                reason="worker_image_profile_mismatch",
+            )
+        return
+    raise WorkerFatalError(
+        f"unknown worker image profile: {profile}",
+        reason="worker_image_profile_mismatch",
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Worker process")
     # 能力用 --pools 显式表达,路由按 pool 走。一台机器会几种活就 --pools 几个,
@@ -117,6 +145,7 @@ async def main() -> None:
             "cli_provider_bound",
             provider=cli_provider,
         )
+    validate_image_profile(args.pools, cli_provider)
 
     gateway_url = os.environ.get("GATEWAY_URL")
     redis_url = os.environ.get("REDIS_URL")

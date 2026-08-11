@@ -435,7 +435,7 @@ docker run -d --restart unless-stopped --gpus all \
   -e GATEWAY_URL=https://<主机域名> \
   -e WORKER_REGISTRATION_TOKEN=<flw- 接入 token> \
   -e WORKER_NAME=gpu-1 \
-  ghcr.io/<owner>/flori-worker:latest \
+  ghcr.io/<owner>/flori-worker-gpu:latest \
   python -m worker.main --pools cpu gpu
 ```
 
@@ -451,8 +451,13 @@ whisper 等转写步排在 cpu 池（刻意不进 gpu 池，避免无 GPU worker
 # CLI Worker 显式绑定一个 concrete provider,provider 标签与 read/websearch 由运行时探测自证
 FLORI_CLI_PROVIDER=claude-cli python -m worker.main --pools ai
 python -m worker.main --pools cpu gpu    # 强机：cpu、gpu 池都消费
-# 需要额外依赖（如 whisper）时基于 worker 镜像加装 [gpu] extra，再照常 --pools 启动
+# 官方产品镜像分别使用 flori-worker-ai-claude 与 flori-worker-gpu
 ```
+
+本地镜像构建可精确选择产品:`scripts/build-uptest.sh worker-ai-qoder` 只构建 Qoder,
+`scripts/build-uptest.sh worker-cpu` 只构建 CPU,`scripts/build-uptest.sh worker` 才构建全部五种 Worker。
+本地默认使用稳定 `CLI_INSTALL_REFRESH` 并优先复用专用 cli-tools 或迁移前旧 Worker 的 CLI 文件层;
+只有显式 `REFRESH_CLI=1` 才重新执行官方安装通道。普通源码修改位于依赖层之后,不会重装 CLI、系统包或模型。
 
 Worker 只需一条通路（本机直连 Redis，或远程经网关出站 HTTPS）+ 用 `--pools` 声明消费哪些池。
 CLI Worker 另需 `FLORI_CLI_PROVIDER=claude-cli|codex-cli|qoder-cli`,一个进程只绑定一种。AI 任务先按

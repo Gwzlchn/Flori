@@ -188,7 +188,7 @@ services:
 
   worker-cpu:
     container_name: flori-worker-cpu
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker-cpu:${IMAGE_TAG:-latest}
     init: true
     restart: unless-stopped
     command: python -m worker.main --pools cpu
@@ -221,9 +221,39 @@ services:
     depends_on:
       - redis
 
+  worker-gpu:
+    container_name: flori-worker-gpu
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker-gpu:${IMAGE_TAG:-latest}
+    init: true
+    restart: unless-stopped
+    profiles: ["gpu"]
+    command: python -m worker.main --pools gpu cpu
+    gpus: all
+    logging: *default-logging
+    volumes:
+      - ${FLORI_DATA_DIR:-flori-data}:/data
+      - ${HOST_WORK_DIR:-flori-work}:/tmp/flori-work
+      - ${FLORI_TEMPLATES_DIR:-./configs/prompts/templates}:/data/prompts/templates:ro
+      - flori-model-cache:/cache
+    environment:
+      <<: *common-env
+      STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
+      WORK_DIR: /tmp/flori-work
+      WORKER_NAME: gpu
+      HOST_WORK_DIR: ${HOST_WORK_DIR:-}
+      MODEL_CACHE_DIR: /cache
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HUB_DISABLE_XET: "1"
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    depends_on:
+      - redis
+
   worker-ai:
     container_name: flori-worker-ai
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker-ai-${WORKER_AI_VARIANT:-claude}:${IMAGE_TAG:-latest}
     init: true
     restart: unless-stopped
     command: python -m worker.main --pools ai
@@ -240,6 +270,8 @@ services:
       STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
       WORK_DIR: /tmp/flori-work
       WORKER_NAME: ai
+      HOME: /data/workers/ai
+      FLORI_CLI_PROVIDER: ${WORKER_AI_VARIANT:-claude}-cli
       HOST_WORK_DIR: ${HOST_WORK_DIR:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -252,15 +284,15 @@ services:
     depends_on:
       - redis
 
-  # 受控NAS原片执行节点:领取01-04及08的source-root硬标签任务。
+  # 受控NAS原片计算节点:领取需本地原片的 io/cpu source-root 任务。
   # 用`--profile source-library`显式启动;未启用时不改变普通部署。
   worker-source:
     container_name: flori-worker-source
-    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker:${IMAGE_TAG:-latest}
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker-cpu:${IMAGE_TAG:-latest}
     init: true
     restart: unless-stopped
     profiles: ["source-library"]
-    command: python -m worker.main --pools io cpu ai
+    command: python -m worker.main --pools io cpu
     logging: *default-logging
     volumes:
       - ${FLORI_DATA_DIR:-flori-data}:/data
@@ -273,6 +305,42 @@ services:
       WORK_DIR: /tmp/flori-work
       WORKER_NAME: source-library
       HOST_WORK_DIR: ${HOST_WORK_DIR:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      DRY_RUN: ${DRY_RUN:-0}
+      FLORI_SOURCE_LIBRARY_ENABLED: ${FLORI_SOURCE_LIBRARY_ENABLED:-0}
+      FLORI_SOURCE_LIBRARY_ROOT_ID: ${FLORI_SOURCE_LIBRARY_ROOT_ID:-library}
+      FLORI_SOURCE_LIBRARY_CONTAINER_DIR: /sources/library
+      # 只供DooD DockerStepRunner把同一宿主源根继续以ro挂载给step容器。
+      FLORI_SOURCE_LIBRARY_HOST_DIR: ${FLORI_SOURCE_LIBRARY_DIR:-}
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    depends_on:
+      - redis
+
+  # 08_punctuate 等 AI 步也直接读原片,Provider Worker 必须单独挂同一 source root。
+  worker-source-ai:
+    container_name: flori-worker-source-ai
+    image: ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker-ai-${WORKER_AI_VARIANT:-claude}:${IMAGE_TAG:-latest}
+    init: true
+    restart: unless-stopped
+    profiles: ["source-library"]
+    command: python -m worker.main --pools ai
+    logging: *default-logging
+    volumes:
+      - ${FLORI_DATA_DIR:-flori-data}:/data
+      - ${HOST_WORK_DIR:-flori-work}:/tmp/flori-work
+      - ${FLORI_SOURCE_LIBRARY_DIR:-.local/source-library}:/sources/library:ro
+      - ${FLORI_TEMPLATES_DIR:-./configs/prompts/templates}:/data/prompts/templates:ro
+    environment:
+      <<: *common-env
+      STEP_RUNTIME: ${STEP_RUNTIME:-subprocess}
+      WORK_DIR: /tmp/flori-work
+      WORKER_NAME: source-library-ai
+      HOME: /data/workers/source-library-ai
+      FLORI_CLI_PROVIDER: ${WORKER_AI_VARIANT:-claude}-cli
+      HOST_WORK_DIR: ${HOST_WORK_DIR:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
@@ -280,7 +348,6 @@ services:
       FLORI_SOURCE_LIBRARY_ENABLED: ${FLORI_SOURCE_LIBRARY_ENABLED:-0}
       FLORI_SOURCE_LIBRARY_ROOT_ID: ${FLORI_SOURCE_LIBRARY_ROOT_ID:-library}
       FLORI_SOURCE_LIBRARY_CONTAINER_DIR: /sources/library
-      # 只供DooD DockerStepRunner把同一宿主源根继续以ro挂载给step容器。
       FLORI_SOURCE_LIBRARY_HOST_DIR: ${FLORI_SOURCE_LIBRARY_DIR:-}
     security_opt:
       - no-new-privileges:true
@@ -353,3 +420,4 @@ volumes:
   minio-data:
   # docker 执行器的步容器共享工作区;HOST_WORK_DIR 留空时退化为命名卷。
   flori-work:
+  flori-model-cache:

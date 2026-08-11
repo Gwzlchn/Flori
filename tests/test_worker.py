@@ -875,6 +875,52 @@ class TestConcreteCliStartupValidation:
         assert _worker_spec("claude-cli")["cli_provider"] == "claude-cli"
         assert _worker_spec()["cli_provider"] is None
 
+    @pytest.mark.parametrize("pools", [["ai"], ["cpu", "ai"]])
+    def test_compute_image_rejects_ai_pool(self, monkeypatch, pools):
+        from worker.main import validate_image_profile
+        from shared.errors import WorkerFatalError
+
+        monkeypatch.setenv("FLORI_WORKER_IMAGE_PROFILE", "compute")
+        with pytest.raises(WorkerFatalError) as exc_info:
+            validate_image_profile(pools, "qoder-cli" if "ai" in pools else None)
+        assert exc_info.value.reason == "worker_image_profile_mismatch"
+
+    @pytest.mark.parametrize("pools", [["cpu"], ["ai", "cpu"]])
+    def test_ai_image_rejects_non_ai_or_mixed_pools(self, monkeypatch, pools):
+        from worker.main import validate_image_profile
+        from shared.errors import WorkerFatalError
+
+        monkeypatch.setenv("FLORI_WORKER_IMAGE_PROFILE", "ai")
+        monkeypatch.setenv("FLORI_IMAGE_CLI_PROVIDER", "qoder-cli")
+        with pytest.raises(WorkerFatalError) as exc_info:
+            validate_image_profile(pools, "qoder-cli")
+        assert exc_info.value.reason == "worker_image_profile_mismatch"
+
+    def test_ai_image_requires_its_embedded_provider(self, monkeypatch):
+        from worker.main import validate_image_profile
+        from shared.errors import WorkerFatalError
+
+        monkeypatch.setenv("FLORI_WORKER_IMAGE_PROFILE", "ai")
+        monkeypatch.setenv("FLORI_IMAGE_CLI_PROVIDER", "qoder-cli")
+        with pytest.raises(WorkerFatalError) as exc_info:
+            validate_image_profile(["ai"], "claude-cli")
+        assert exc_info.value.reason == "worker_image_profile_mismatch"
+
+    def test_matching_compute_and_ai_profiles_pass(self, monkeypatch):
+        from worker.main import validate_image_profile
+
+        monkeypatch.setenv("FLORI_WORKER_IMAGE_PROFILE", "compute")
+        validate_image_profile(["io", "cpu", "gpu"], None)
+        monkeypatch.setenv("FLORI_WORKER_IMAGE_PROFILE", "ai")
+        monkeypatch.setenv("FLORI_IMAGE_CLI_PROVIDER", "codex-cli")
+        validate_image_profile(["ai"], "codex-cli")
+
+    def test_unprofiled_custom_image_remains_supported(self, monkeypatch):
+        from worker.main import validate_image_profile
+
+        monkeypatch.delenv("FLORI_WORKER_IMAGE_PROFILE", raising=False)
+        validate_image_profile(["cpu", "ai"], "claude-cli")
+
 
 class TestNetZoneProbe:
     """net-zone 自动探测:env 强制覆盖 / 按探针可达性判 / 不联网(_probe_reachable mock)。"""

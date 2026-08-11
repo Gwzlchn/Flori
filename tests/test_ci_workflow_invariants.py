@@ -30,7 +30,48 @@ def test_all_worker_main_compose_services_use_docker_init() -> None:
                 continue
             matched.append(f"{path.name}:{service_name}")
             assert service.get("init") is True, matched[-1]
-    assert len(matched) == 11
+    assert len(matched) == 14
+
+
+def test_source_library_and_ai_variant_images_keep_routes_and_tags_closed() -> None:
+    compose_path = ROOT / "docker-compose.yml"
+    compose_text = compose_path.read_text()
+    services = yaml.safe_load(compose_text)["services"]
+    compute = services["worker-source"]
+    ai = services["worker-source-ai"]
+
+    assert compute["command"] == "python -m worker.main --pools io cpu"
+    assert ai["command"] == "python -m worker.main --pools ai"
+    assert compute["profiles"] == ["source-library"]
+    assert ai["profiles"] == ["source-library"]
+    assert any(str(volume).endswith(":/sources/library:ro") for volume in compute["volumes"])
+    assert any(str(volume).endswith(":/sources/library:ro") for volume in ai["volumes"])
+    assert ai["environment"]["FLORI_SOURCE_LIBRARY_ENABLED"] == "${FLORI_SOURCE_LIBRARY_ENABLED:-0}"
+    assert ai["environment"]["FLORI_CLI_PROVIDER"] == "${WORKER_AI_VARIANT:-claude}-cli"
+    assert ai["environment"]["HOME"] == "/data/workers/source-library-ai"
+    assert services["worker-ai"]["environment"]["HOME"] == "/data/workers/ai"
+
+    expected_image = (
+        "ghcr.io/${IMAGE_OWNER:-gwzlchn}/"
+        "flori-worker-ai-${WORKER_AI_VARIANT:-claude}:${IMAGE_TAG:-latest}"
+    )
+    assert services["worker-ai"]["image"] == expected_image
+    assert ai["image"] == expected_image
+    assert "WORKER_AI_IMAGE" not in compose_text
+
+    executor_services = yaml.safe_load(
+        (ROOT / "docker-compose.executor.yml").read_text()
+    )["services"]
+    for service_name in ("worker-source", "worker-source-ai"):
+        service = executor_services[service_name]
+        assert "/var/run/docker.sock:/var/run/docker.sock" in service["volumes"]
+        assert "STEP_RUNTIME=docker" in service["environment"]
+
+    rollback = (ROOT / "scripts/rollback.sh").read_text()
+    assert 'IMAGE_TAG="${TAG}" docker compose' in rollback
+    assert 'config "${service}"' in rollback
+    assert 'awk -v name="${service}"' in rollback
+    assert "img_for" not in rollback
 
 
 def test_cancelable_jobs_use_scoped_job_concurrency() -> None:
@@ -467,7 +508,7 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     )["run"]
     promote = next(
         step for step in jobs["push-images"]["steps"]
-        if step.get("name") == "Promote 四镜像候选"
+        if step.get("name") == "Promote 产品镜像候选"
     )["run"]
     assert "if" not in jobs["build-images"]
     assert "mode=check" in product_gate
@@ -495,7 +536,7 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     )
 
     image_script = (WORKFLOW.parents[2] / "scripts" / "ci-images.sh").read_text()
-    assert image_script.count("start_build flori-") == 4
+    assert image_script.count("start_build flori-") == 8
     assert 'candidate="ghcr.io/$OWNER_LC/$image:candidate-$GITHUB_SHA"' in image_script
     assert '--metadata-file "$metadata"' in image_script
     assert '"ghcr.io/$OWNER_LC/$image@$digest"' in image_script
@@ -602,3 +643,59 @@ def test_worker_cli_installers_follow_official_latest_channels_and_refresh_cache
     assert "printf 'source\\t%s\\n'" in ci_images
     for command in ("claude --version", "qodercli --version", "codex --version"):
         assert command in installer
+
+
+def test_worker_product_images_keep_compute_and_cli_filesystems_separate() -> None:
+    dockerfile = (WORKFLOW.parents[2] / "docker/base.Dockerfile").read_text()
+    compute = dockerfile.split("FROM deno AS worker-compute", 1)[1].split(
+        "\nFROM worker-compute AS worker-cpu", 1,
+    )[0]
+    ai_base = dockerfile.split("FROM common AS worker-ai-base", 1)[1].split(
+        "\nFROM worker-ai-base AS worker-ai-claude", 1,
+    )[0]
+    claude = dockerfile.split("FROM worker-ai-base AS worker-ai-claude", 1)[1].split(
+        "\nFROM worker-ai-base AS worker-ai-qoder", 1,
+    )[0]
+    qoder = dockerfile.split("FROM worker-ai-base AS worker-ai-qoder", 1)[1].split(
+        "\nFROM worker-ai-base AS worker-ai-codex", 1,
+    )[0]
+    codex = dockerfile.split("FROM worker-ai-base AS worker-ai-codex", 1)[1].split(
+        "\n# test-runtime", 1,
+    )[0]
+
+    assert "ffmpeg poppler-utils" in compute
+    assert 'pip install ".[steps,gpu,worker]"' in compute
+    assert "cli-tools-source" not in compute
+    assert "FLORI_WORKER_IMAGE_PROFILE=compute" in compute
+
+    assert 'pip install ".[worker,ai-runtime]"' in ai_base
+    assert 'from PIL import Image' in ai_base
+    assert "ffmpeg" not in ai_base
+    assert "poppler" not in ai_base
+    assert "DOCUMENT_LAYOUT_MODEL" not in ai_base
+    assert "FROM deno" not in ai_base
+
+    assert "/usr/local/bin/claude" in claude
+    assert "qodercli" not in claude and "/usr/local/bin/codex" not in claude
+    assert "/usr/local/bin/qodercli" in qoder
+    assert "/usr/local/bin/claude" not in qoder and "/usr/local/bin/codex" not in qoder
+    assert "/usr/local/lib/codex/" in codex
+    assert "ln -s /usr/local/lib/codex/packages/standalone/current/bin/codex" in codex
+    assert "/usr/local/bin/claude" not in codex and "qodercli" not in codex
+    for stage, provider in (
+        (claude, "claude-cli"),
+        (qoder, "qoder-cli"),
+        (codex, "codex-cli"),
+    ):
+        assert "FLORI_WORKER_IMAGE_PROFILE=ai" in stage
+        assert f"FLORI_IMAGE_CLI_PROVIDER={provider}" in stage
+
+    local_build = (WORKFLOW.parents[2] / "scripts/build-uptest.sh").read_text()
+    assert 'CLI_REFRESH="${CLI_INSTALL_REFRESH:-stable-local}"' in local_build
+    assert 'if [ "${REFRESH_CLI:-0}" = "1" ]' in local_build
+    assert "worker-ai-qoder         # 只建 Qoder AI Worker" in local_build
+    assert "worker) expanded+=(worker-cpu worker-gpu" in local_build
+
+    frontend = (WORKFLOW.parents[2] / "frontend/src/views/SystemView.vue").read_text()
+    assert "VITE_WORKER_IMAGE_PREFIX" in frontend
+    assert "VITE_WORKER_IMAGE)" not in frontend
