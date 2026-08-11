@@ -633,10 +633,16 @@ GET /api/jobs/{id}/document/translation?segment=&exact= → text/html
 ```
 
 `source` 对 `generic_html` 从已校验的 `intermediate/document.json` 生成规范正文投影；不可变
-`input/source.html` 仍是原始证据与 HTML locator 真源，但不会把站点导航、页脚和依赖原站 CSS/脚本的
-完整 DOM 重放进阅读面。`scholarly_html` 继续从不可变HTML生成安全副本,保留MathML/SVG等论文语义结构。
-`translation` 从 `output/translated.html` 二次净化后返回。两者都拒绝活动脚本和外部资源，重写受控本地
-assets，设置 CSP，并由前端空权限 sandbox iframe 承载；不会修改持久化原文件。
+`input/source.html` 仍是原始证据与 HTML locator 真源,但不会把站点导航、页脚和原站脚本重放进阅读面。
+`scholarly_html` 从不可变HTML生成安全副本,保留MathML、受控SVG、LaTeXML/ar5iv语义class和有界布局属性;
+阅读器用仓库内固定兼容CSS恢复标题、作者、摘要、Figure/Table、公式、定理和参考文献版式,不执行上游
+`style/link`。`translation` 从 `output/translated.html` 二次净化后返回。两者都拒绝活动脚本、远程CSS、
+远程图片/SVG引用和CSS资源函数,只把同Job相对资源重写到受控artifact端点;CSP显式关闭script/connect/
+object/frame/worker/media并叠加response sandbox,前端仍以空权限sandbox iframe承载。源HTML、CSS声明或
+资源值畸形时只丢弃对应不可信结构,不会修改持久化原文件。证据锚点只由已验证Document Model的DOM
+locator生成;译文内嵌segment还必须属于同一Document Model且全篇唯一。源HTML自带的`flori-*` class、
+`source-*` ID和`data-source-segment`不能生成内部高亮。阅读器同时限制节点数、嵌套深度、属性总数与
+输出字节;越界返回413,身份冲突返回422,解析在线程中执行而不阻塞API事件循环。
 `segment` 是最大 128 字符的稳定 segment ID，`exact` 最大 512 字符；命中时滚动并高亮对应 segment/词组。
 未找到 segment 时仍安全渲染文档但不猜位置。PDF 原文走 `media`，前端 PDF.js 使用应用内深链的
 `page+bbox` 绘制 overlay。Document 不提供 `notes/mechanical`，也不生成、读取或回退到

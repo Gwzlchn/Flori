@@ -4,12 +4,51 @@ from __future__ import annotations
 
 import html
 import posixpath
+import re
 from html.parser import HTMLParser
 from typing import Any, Mapping
 from urllib.parse import quote, urlparse
 
 
 DOCUMENT_HTML_MAX_BYTES = 32 * 1024 * 1024
+DOCUMENT_HTML_MAX_OUTPUT_BYTES = 48 * 1024 * 1024
+DOCUMENT_HTML_MAX_NODES = 50_000
+DOCUMENT_HTML_MAX_DEPTH = 128
+DOCUMENT_HTML_MAX_ATTRIBUTES = 200_000
+DOCUMENT_HTML_MAX_TAG_ATTRIBUTE_BYTES = 256 * 1024
+_ESCAPE_CHUNK_CHARS = 16 * 1024
+
+
+class DocumentReaderError(ValueError):
+    """表示不可信HTML无法形成唯一、安全的阅读投影。"""
+
+
+class DocumentReaderLimitError(DocumentReaderError):
+    """表示输入在解析或输出阶段越过确定性资源预算。"""
+
+
+class _BoundedHtmlBuilder:
+    """分块构造完整阅读页，避免先分配越界转义结果再拒绝。"""
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self._output_bytes = 0
+
+    def append(self, fragment: str) -> None:
+        size = len(fragment.encode("utf-8"))
+        if self._output_bytes + size > DOCUMENT_HTML_MAX_OUTPUT_BYTES:
+            raise DocumentReaderLimitError("document HTML output exceeds reader limit")
+        self._output_bytes += size
+        self._parts.append(fragment)
+
+    def append_escaped(self, value: object, *, quote: bool = False) -> None:
+        text = str(value or "")
+        for offset in range(0, len(text), _ESCAPE_CHUNK_CHARS):
+            self.append(html.escape(text[offset:offset + _ESCAPE_CHUNK_CHARS], quote=quote))
+
+    def build(self) -> bytes:
+        return "".join(self._parts).encode("utf-8")
+
 
 _VOID_TAGS = frozenset({
     "area", "base", "br", "col", "hr", "img", "input", "link", "meta",
@@ -18,7 +57,7 @@ _VOID_TAGS = frozenset({
 _DROP_WITH_CONTENT = frozenset({
     "script", "style", "noscript", "template", "iframe", "object", "embed",
     "canvas", "audio", "video", "form", "button", "input", "select", "textarea",
-    "dialog",
+    "dialog", "foreignobject",
 })
 _DROP_HEAD = frozenset({"html", "head", "body", "base", "link", "meta", "title"})
 _CHROME_MARKERS = frozenset({
@@ -41,6 +80,57 @@ _SAFE_SCIENCE_ATTRS = frozenset({
     "stroke-width", "stroke-linecap", "stroke-linejoin", "opacity", "marker-start",
     "marker-mid", "marker-end",
 })
+_SAFE_HTML_TAGS = frozenset({
+    "a", "abbr", "address", "article", "b", "blockquote", "br", "caption",
+    "cite", "code", "col", "colgroup", "dd", "details", "dfn", "div", "dl",
+    "dt", "em", "figcaption", "figure", "h1", "h2", "h3", "h4", "h5",
+    "h6", "hr", "i", "img", "kbd", "li", "main", "mark", "ol", "p",
+    "pre", "q", "rp", "rt", "ruby", "s", "samp", "section", "small",
+    "span", "strong", "sub", "summary", "sup", "table", "tbody", "td",
+    "tfoot", "th", "thead", "time", "tr", "u", "ul", "var", "wbr",
+})
+_SAFE_MATHML_TAGS = frozenset({
+    "annotation", "annotation-xml", "maligngroup", "malignmark", "math",
+    "menclose", "merror", "mfenced", "mfrac", "mglyph", "mi", "mlabeledtr",
+    "mmultiscripts", "mn", "mo", "mover", "mpadded", "mphantom",
+    "mprescripts", "mroot", "mrow", "ms", "mspace", "msqrt", "mstyle",
+    "msub", "msubsup", "msup", "mtable", "mtd", "mtext", "mtr", "munder",
+    "munderover", "none", "semantics",
+})
+_SAFE_SVG_TAGS = frozenset({
+    "circle", "clippath", "defs", "desc", "ellipse", "g", "image", "line",
+    "lineargradient", "marker", "mask", "path", "polygon", "polyline",
+    "radialgradient", "rect", "stop", "svg", "symbol", "text", "title",
+    "tspan", "use",
+})
+_SAFE_RENDER_TAGS = _SAFE_HTML_TAGS | _SAFE_MATHML_TAGS | _SAFE_SVG_TAGS
+_SAFE_STYLE_TAGS = frozenset({
+    "article", "div", "figcaption", "figure", "img", "li", "math", "p",
+    "section", "span", "table", "tbody", "td", "tfoot", "th", "thead",
+    "tr",
+})
+_SAFE_DATA_IMAGE = re.compile(
+    r"data:image/(?:avif|gif|jpeg|png|webp);base64,[A-Za-z0-9+/=]+\Z", re.I,
+)
+_CSS_LENGTH = re.compile(r"(?P<number>\d{1,4}(?:\.\d{1,3})?)(?P<unit>px|pt|em|rem|ex|ch|%)\Z")
+_SAFE_ATTR_NAME = re.compile(r"[a-z][a-z0-9_.:-]{0,63}\Z")
+_CSS_ASPECT_RATIO = re.compile(
+    r"(?P<left>[1-9]\d{0,3}(?:\.\d{1,3})?)\s*/\s*"
+    r"(?P<right>[1-9]\d{0,3}(?:\.\d{1,3})?)\Z"
+)
+_SAFE_STYLE_KEYWORDS = {
+    "clear": frozenset({"both", "left", "none", "right"}),
+    "display": frozenset({"block", "flex", "grid", "inline", "inline-block", "table", "table-cell", "table-row"}),
+    "float": frozenset({"left", "none", "right"}),
+    "object-fit": frozenset({"contain", "cover", "fill", "scale-down"}),
+    "text-align": frozenset({"center", "end", "justify", "left", "right", "start"}),
+    "vertical-align": frozenset({"baseline", "bottom", "middle", "sub", "super", "text-bottom", "text-top", "top"}),
+    "white-space": frozenset({"normal", "nowrap", "pre", "pre-wrap"}),
+}
+_SAFE_STYLE_LENGTHS = frozenset({
+    "height", "margin-bottom", "margin-left", "margin-right", "margin-top",
+    "max-height", "max-width", "width",
+})
 _DOCUMENT_STYLE = """
 :root{color-scheme:light;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#243142;background:#fff}
 *{box-sizing:border-box}body{margin:0}.flori-document{max-width:980px;margin:0 auto;padding:30px 34px 72px;font-size:17px;line-height:1.78}
@@ -53,12 +143,123 @@ math{font-family:"STIX Two Math","Cambria Math",serif}.flori-source-anchor{displ
 .flori-source-target{outline:3px solid #f4b942;outline-offset:5px;background:#fff7d6;scroll-margin-top:18px}.flori-exact-target{border-radius:3px;background:#ffe47a;color:inherit}
 .flori-document-header{padding-bottom:1.25rem;border-bottom:1px solid #e4e9f0}.flori-document-meta{display:flex;flex-wrap:wrap;gap:.4rem 1rem;color:#5a6778;font-size:.92rem}
 .flori-abstract{margin:1.35rem 0;padding:1rem 1.15rem;border-left:4px solid #8aa9c7;background:#f7f9fc}.flori-abstract-label{display:block;margin-bottom:.35rem;color:#526174;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+.ltx_page_main,.ltx_document{display:block;max-width:100%;margin:0 auto}.ltx_title_document{text-align:center;font-size:2rem}.ltx_authors{text-align:center;margin:1rem auto 1.4rem}.ltx_creator{display:inline-block;max-width:100%;margin:.25rem .8rem;vertical-align:top}.ltx_personname{font-weight:650}.ltx_affiliation,.ltx_contact,.ltx_author_notes{display:block;color:#5a6778;font-size:.9em}.ltx_abstract{max-width:860px;margin:1.5rem auto;padding:1rem 1.2rem;border-left:4px solid #8aa9c7;background:#f7f9fc}.ltx_abstract>h6:first-child{margin-top:0;text-transform:uppercase;letter-spacing:.04em}.ltx_section,.ltx_subsection,.ltx_subsubsection{clear:both}.ltx_para{margin:.9em 0}.ltx_float,.ltx_figure,.ltx_table{display:block;clear:both;max-width:100%;margin:1.6rem auto;padding:0;border:0;background:transparent;text-align:center}.ltx_figure>img,.ltx_figure_panel>img,.ltx_graphics{display:block;max-width:100%;height:auto;margin:.5rem auto}.ltx_figure_panel{display:inline-block;max-width:100%;margin:.4rem .7rem;vertical-align:top}.ltx_figure_panel figcaption{max-width:34rem}.ltx_caption,.ltx_figure figcaption,.ltx_table figcaption{display:block;max-width:60rem;margin:.65rem auto 0;color:#526174;text-align:left}.ltx_equation,.ltx_equationgroup,.ltx_math{max-width:100%;overflow-x:auto;overflow-y:hidden;text-align:center}.ltx_equation table,.ltx_equationgroup table{display:table;width:auto;margin:.8rem auto;border:0}.ltx_equation td,.ltx_equationgroup td{border:0;background:transparent}.ltx_eqn_table{display:table;width:auto;margin:0 auto}.ltx_eqn_cell{border:0}.ltx_tag_equation{padding-left:1rem;white-space:nowrap;text-align:right}.ltx_tabular{display:table;width:auto;max-width:100%;margin:.8rem auto;overflow:visible}.ltx_tabular th,.ltx_tabular td{padding:.35em .55em}.ltx_biblist{padding-left:1.7rem}.ltx_bibitem{margin:.55rem 0}.ltx_theorem,.ltx_proof,.ltx_definition,.ltx_lemma{margin:1rem 0;padding:.8rem 1rem;border-left:3px solid #a9b9ca;background:#fafbfd}.ltx_theorem .ltx_title,.ltx_proof .ltx_title{font-weight:700}.ltx_note,.ltx_role_footnote{font-size:.9em;color:#526174}.ltx_ref{white-space:nowrap}.ltx_ERROR{color:#8a3b12;background:#fff2e8}
 @media(max-width:640px){.flori-document{padding:18px 16px 48px;font-size:16px}h1{font-size:1.65rem}h2{font-size:1.3rem}}
 """.strip()
 
 
+def _safe_inline_style(value: str) -> str | None:
+    """保留有限布局声明;任何资源、函数或解析歧义都丢弃整条声明。"""
+    raw = value.strip()
+    if (
+        not raw or len(raw) > 1024 or raw.count(";") > 16
+        or any(token in raw.casefold() for token in ("/*", "*/"))
+        or any(char in raw for char in "{}\\\x00\r\n")
+    ):
+        return None
+    result: list[str] = []
+    for declaration in raw.split(";"):
+        if not declaration.strip():
+            continue
+        if ":" not in declaration:
+            continue
+        name, candidate = declaration.split(":", 1)
+        name = name.strip().casefold()
+        candidate = candidate.strip().casefold()
+        if any(token in candidate for token in ("url(", "expression", "var(", "@import", "behavior")):
+            continue
+        if name in _SAFE_STYLE_LENGTHS:
+            if candidate == "auto":
+                pass
+            elif not _safe_css_length(candidate):
+                continue
+        elif name == "vertical-align" and _safe_css_length(candidate, signed=True):
+            pass
+        elif name == "aspect-ratio":
+            ratio = _CSS_ASPECT_RATIO.fullmatch(candidate)
+            if ratio is None:
+                continue
+            value = float(ratio.group("left")) / float(ratio.group("right"))
+            if not 0.01 <= value <= 100:
+                continue
+        elif candidate not in _SAFE_STYLE_KEYWORDS.get(name, frozenset()):
+            continue
+        result.append(f"{name}:{candidate}")
+    return ";".join(result) or None
+
+
+def _safe_css_length(value: str, *, signed: bool = False) -> bool:
+    raw = value
+    if raw == "0":
+        return True
+    if raw.startswith("-"):
+        if not signed:
+            return False
+        raw = raw[1:]
+    match = _CSS_LENGTH.fullmatch(raw)
+    if match is None:
+        return False
+    number = float(match.group("number"))
+    unit = match.group("unit")
+    if unit == "%":
+        return number <= 100
+    if unit in {"em", "rem", "ex", "ch"}:
+        return number <= 100
+    return number <= 4096
+
+
+def _safe_dimension_attr(value: str) -> str | None:
+    raw = value.strip()
+    if raw.endswith("%") and raw[:-1].isdigit():
+        number = int(raw[:-1])
+        return raw if 0 < number <= 100 else None
+    if raw.isdigit():
+        number = int(raw)
+        return raw if 0 < number <= 4096 else None
+    return None
+
+
+def _safe_science_attr(name: str, value: str) -> str | None:
+    raw = value.strip()
+    lowered = raw.casefold()
+    if (
+        len(raw) > 65536
+        or any(char in raw for char in "\\\x00\r\n")
+        or "/*" in lowered
+        or "*/" in lowered
+    ):
+        return None
+    local_paint = re.fullmatch(r"url\(#[A-Za-z][A-Za-z0-9_.:-]{0,127}\)", raw)
+    if name in {"marker-start", "marker-mid", "marker-end"}:
+        return raw if lowered == "none" or local_paint is not None else None
+    if name in {"fill", "stroke"}:
+        if local_paint is not None:
+            return raw
+        if lowered in {
+            "none", "currentcolor", "context-fill", "context-stroke", "transparent",
+        }:
+            return raw
+        if re.fullmatch(r"#[0-9A-Fa-f]{3,8}", raw):
+            return raw
+        if re.fullmatch(r"[A-Za-z]{1,32}", raw):
+            return raw
+        if re.fullmatch(
+            r"rgba?\(\s*\d{1,3}(?:\.\d+)?%?\s*,\s*\d{1,3}(?:\.\d+)?%?"
+            r"\s*,\s*\d{1,3}(?:\.\d+)?%?(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)",
+            raw,
+            re.I,
+        ):
+            return raw
+        return None
+    if name == "transform" and re.fullmatch(r"[A-Za-z0-9 .,+()%-]{0,512}", raw) is None:
+        return None
+    return raw
+
+
 def _safe_local_path(value: str) -> str | None:
     raw = value.strip().replace("\\", "/")
+    if len(raw) > 4096 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in raw):
+        return None
     parsed = urlparse(raw)
     if parsed.scheme or parsed.netloc or raw.startswith(("/", "//")):
         return None
@@ -70,16 +271,21 @@ def _safe_local_path(value: str) -> str | None:
 
 def _asset_url(job_id: str, value: str) -> str | None:
     raw = value.strip()
-    if raw.startswith("data:image/"):
-        return raw
+    lowered = raw.casefold()
+    if lowered.startswith("data:image/"):
+        if len(raw) <= 8 * 1024 * 1024 and _SAFE_DATA_IMAGE.fullmatch(raw):
+            return raw
+        return None
     local = _safe_local_path(raw)
-    if local is None:
+    if local is None or not local.startswith("assets/"):
         return None
     return f"/api/jobs/{quote(job_id, safe='')}/artifact?path={quote(local, safe='')}"
 
 
 def _safe_link(value: str) -> str | None:
     raw = value.strip()
+    if len(raw) > 4096 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in raw):
+        return None
     if raw.startswith("#"):
         return raw
     parsed = urlparse(raw)
@@ -106,21 +312,23 @@ def source_anchor_map(document: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
-def _model_text(
+def _append_model_text(
+    builder: _BoundedHtmlBuilder,
     value: object,
     *,
     target: bool = False,
     target_exact: str | None = None,
-) -> str:
+) -> None:
     text = str(value or "")
     if target and target_exact and target_exact in text:
         before, matched, after = text.partition(target_exact)
-        return (
-            html.escape(before)
-            + f'<mark class="flori-exact-target">{html.escape(matched)}</mark>'
-            + html.escape(after)
-        )
-    return html.escape(text)
+        builder.append_escaped(before)
+        builder.append('<mark class="flori-exact-target">')
+        builder.append_escaped(matched)
+        builder.append("</mark>")
+        builder.append_escaped(after)
+        return
+    builder.append_escaped(text)
 
 
 def _model_block_attrs(block: Mapping[str, Any], target_segment: str | None) -> str:
@@ -168,14 +376,15 @@ def _abstract_wrapper(block: Mapping[str, Any], abstract: str) -> bool:
     )
 
 
-def _model_figure_html(
+def _append_model_figure(
+    builder: _BoundedHtmlBuilder,
     figure: Mapping[str, Any],
     assets: Mapping[str, Mapping[str, Any]],
     *,
     job_id: str,
     attrs: str,
-) -> str:
-    images: list[str] = []
+) -> None:
+    images: list[tuple[str, str]] = []
     rendered_paths: set[str] = set()
 
     def add_image(path: object, *, mime: object = "", alt: object = "") -> None:
@@ -191,10 +400,7 @@ def _model_figure_html(
         if source is None:
             return
         rendered_paths.add(normalized_path)
-        images.append(
-            f'<img src="{html.escape(source, quote=True)}" '
-            f'alt="{html.escape(str(alt or ""), quote=True)}">'
-        )
+        images.append((source, str(alt or "")))
 
     fallback_alt = figure.get("caption") or figure.get("label") or ""
     asset_ids: list[str] = []
@@ -232,13 +438,25 @@ def _model_figure_html(
             alt=asset.get("alt") or fallback_alt,
         )
     caption = str(figure.get("caption") or figure.get("label") or "").strip()
-    body = "".join(images)
+    if not images and not caption:
+        return
+    builder.append(f"<figure{attrs}>")
+    for source, alt in images:
+        builder.append('<img src="')
+        builder.append_escaped(source, quote=True)
+        builder.append('" alt="')
+        builder.append_escaped(alt, quote=True)
+        builder.append('">')
     if caption:
-        body += f"<figcaption>{html.escape(caption)}</figcaption>"
-    return f"<figure{attrs}>{body}</figure>" if body else ""
+        builder.append("<figcaption>")
+        builder.append_escaped(caption)
+        builder.append("</figcaption>")
+    builder.append("</figure>")
 
 
-def _model_table_html(table: Mapping[str, Any], *, attrs: str) -> str:
+def _append_model_table(
+    builder: _BoundedHtmlBuilder, table: Mapping[str, Any], *, attrs: str,
+) -> None:
     rows: list[list[Mapping[str, Any]]] = []
     cells = table.get("cells")
     if isinstance(cells, list) and cells:
@@ -261,23 +479,25 @@ def _model_table_html(table: Mapping[str, Any], *, attrs: str) -> str:
             if isinstance(row, Mapping) and isinstance(row.get("cells"), list):
                 rows.append([cell for cell in row["cells"] if isinstance(cell, Mapping)])
     caption = str(table.get("caption") or table.get("label") or "").strip()
-    parts = [f"<table{attrs}>"]
+    builder.append(f"<table{attrs}>")
     if caption:
-        parts.append(f"<caption>{html.escape(caption)}</caption>")
+        builder.append("<caption>")
+        builder.append_escaped(caption)
+        builder.append("</caption>")
     for row in rows:
-        parts.append("<tr>")
+        builder.append("<tr>")
         for cell in row:
             role = str(cell.get("role") or cell.get("kind") or "")
             tag = "th" if role in {"column_header", "row_header", "header"} else "td"
             rowspan = max(1, int(cell.get("rowspan") or 1))
             colspan = max(1, int(cell.get("colspan") or 1))
-            parts.append(
+            builder.append(
                 f'<{tag} rowspan="{rowspan}" colspan="{colspan}">'
-                f'{html.escape(str(cell.get("text") or ""))}</{tag}>'
             )
-        parts.append("</tr>")
-    parts.append("</table>")
-    return "".join(parts)
+            builder.append_escaped(cell.get("text"))
+            builder.append(f"</{tag}>")
+        builder.append("</tr>")
+    builder.append("</table>")
 
 
 def render_document_model_html(
@@ -288,6 +508,7 @@ def render_document_model_html(
     target_exact: str | None = None,
 ) -> bytes:
     """把已校验Document Model投影成正文阅读面,不重放站点DOM。"""
+    builder = _BoundedHtmlBuilder()
     metadata = document.get("metadata")
     metadata = metadata if isinstance(metadata, Mapping) else {}
     title = _metadata_title(metadata)
@@ -296,24 +517,42 @@ def render_document_model_html(
     publisher = str(metadata.get("publisher") or metadata.get("venue") or "").strip()
     abstract = str(metadata.get("abstract") or "").strip()
 
-    parts = ['<header class="flori-document-header">']
+    page_title = title or "文档原文"
+    builder.append(
+        '<!doctype html><html lang="und"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>"
+    )
+    builder.append_escaped(page_title)
+    builder.append(f"</title><style>{_DOCUMENT_STYLE}</style></head>")
+    builder.append('<body><main class="flori-document">')
+    builder.append('<header class="flori-document-header">')
     if title:
-        parts.append(f"<h1>{html.escape(title)}</h1>")
-    meta_items = []
+        builder.append("<h1>")
+        builder.append_escaped(title)
+        builder.append("</h1>")
+    meta_items: list[tuple[str, str]] = []
     if authors:
-        meta_items.append(f"<span>{html.escape(', '.join(authors))}</span>")
+        meta_items.append(("span", ", ".join(authors)))
     if published:
-        meta_items.append(f"<time>{html.escape(published)}</time>")
+        meta_items.append(("time", published))
     if publisher:
-        meta_items.append(f"<span>{html.escape(publisher)}</span>")
+        meta_items.append(("span", publisher))
     if meta_items:
-        parts.append('<div class="flori-document-meta">' + "".join(meta_items) + "</div>")
-    parts.append("</header>")
+        builder.append('<div class="flori-document-meta">')
+        for tag, value in meta_items:
+            builder.append(f"<{tag}>")
+            builder.append_escaped(value)
+            builder.append(f"</{tag}>")
+        builder.append("</div>")
+    builder.append("</header>")
     if abstract:
-        parts.append(
-            '<section class="flori-abstract"><span class="flori-abstract-label">Abstract</span>'
-            f"<p>{html.escape(abstract)}</p></section>"
+        builder.append(
+            '<section class="flori-abstract">'
+            '<span class="flori-abstract-label">Abstract</span><p>'
         )
+        builder.append_escaped(abstract)
+        builder.append("</p></section>")
 
     blocks = [item for item in document.get("blocks") or [] if isinstance(item, Mapping)]
     assets = {
@@ -349,46 +588,66 @@ def render_document_model_html(
             continue
         attrs = _model_block_attrs(block, target_segment)
         target = block_id == target_segment
-        rendered_text = _model_text(text, target=target, target_exact=target_exact)
         if kind == "title":
-            parts.append(f"<h1{attrs}>{rendered_text}</h1>")
+            builder.append(f"<h1{attrs}>")
+            _append_model_text(
+                builder, text, target=target, target_exact=target_exact,
+            )
+            builder.append("</h1>")
         elif kind == "heading":
             level = min(6, max(2, int(block.get("level") or 2)))
-            parts.append(f"<h{level}{attrs}>{rendered_text}</h{level}>")
+            builder.append(f"<h{level}{attrs}>")
+            _append_model_text(
+                builder, text, target=target, target_exact=target_exact,
+            )
+            builder.append(f"</h{level}>")
         elif kind == "quote":
-            parts.append(f"<blockquote{attrs}>{rendered_text}</blockquote>")
+            builder.append(f"<blockquote{attrs}>")
+            _append_model_text(
+                builder, text, target=target, target_exact=target_exact,
+            )
+            builder.append("</blockquote>")
         elif kind == "code":
-            parts.append(f"<pre{attrs}><code>{rendered_text}</code></pre>")
+            builder.append(f"<pre{attrs}><code>")
+            _append_model_text(
+                builder, text, target=target, target_exact=target_exact,
+            )
+            builder.append("</code></pre>")
         elif kind == "list":
             tag = "ol" if block.get("ordered") else "ul"
             items = list_children.get(block_id, [])
-            parts.append(f"<{tag}{attrs}>")
+            builder.append(f"<{tag}{attrs}>")
             for item in sorted(items, key=lambda value: int(value.get("order") or 0)):
                 item_target = str(item.get("block_id") or "") == target_segment
                 item_attrs = _model_block_attrs(item, target_segment)
-                parts.append(
-                    f"<li{item_attrs}>{_model_text(item.get('text'), target=item_target, target_exact=target_exact)}</li>"
+                builder.append(f"<li{item_attrs}>")
+                _append_model_text(
+                    builder, item.get("text"), target=item_target,
+                    target_exact=target_exact,
                 )
-            parts.append(f"</{tag}>")
+                builder.append("</li>")
+            builder.append(f"</{tag}>")
         elif kind == "figure" and block_id in figures:
-            parts.append(_model_figure_html(
-                figures[block_id], assets, job_id=job_id, attrs=attrs,
-            ))
+            _append_model_figure(
+                builder, figures[block_id], assets, job_id=job_id, attrs=attrs,
+            )
         elif kind == "table" and block_id in tables:
-            parts.append(_model_table_html(tables[block_id], attrs=attrs))
+            _append_model_table(builder, tables[block_id], attrs=attrs)
         elif kind == "footnote":
-            parts.append(f"<p{attrs}><small>{rendered_text}</small></p>")
+            builder.append(f"<p{attrs}><small>")
+            _append_model_text(
+                builder, text, target=target, target_exact=target_exact,
+            )
+            builder.append("</small></p>")
         elif text:
-            parts.append(f"<p{attrs}>{rendered_text}</p>")
+            builder.append(f"<p{attrs}>")
+            _append_model_text(
+                builder, text, target=target, target_exact=target_exact,
+            )
+            builder.append("</p>")
 
-    page_title = title or "文档原文"
-    page = (
-        '<!doctype html><html lang="und"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{html.escape(page_title)}</title><style>{_DOCUMENT_STYLE}</style></head>"
-        f'<body><main class="flori-document">{"".join(parts)}</main></body></html>'
-    )
-    return page.encode("utf-8")
+    builder.append("</main></body></html>")
+    return builder.build()
 
 
 class _SafeDocumentParser(HTMLParser):
@@ -399,21 +658,58 @@ class _SafeDocumentParser(HTMLParser):
         job_id: str,
         anchors: Mapping[str, str],
         *,
+        builder: _BoundedHtmlBuilder,
+        embedded_anchor_ids: frozenset[str] | None = None,
         target_segment: str | None = None,
         target_exact: str | None = None,
     ) -> None:
         super().__init__(convert_charrefs=True)
         self.job_id = job_id
         self.anchors = anchors
-        self.output: list[str] = []
+        self._builder = builder
+        self._node_count = 0
+        self._attribute_count = 0
         self._stack: list[dict[str, Any]] = [{
             "tag": "#document", "path": "", "counts": {}, "drop": False,
             "rendered": False,
         }]
+        self._open_by_tag: dict[str, list[dict[str, Any]]] = {}
+        self._target_depth = 0
+        self._seen_anchor_ids: set[str] = set()
+        self.embedded_anchor_ids = embedded_anchor_ids
         self._body_seen = False
         self.target_segment = target_segment
         self.target_exact = target_exact
         self._target_marked = False
+
+    def _append(self, fragment: str) -> None:
+        self._builder.append(fragment)
+
+    def _append_escaped(self, value: object, *, quote: bool = False) -> None:
+        self._builder.append_escaped(value, quote=quote)
+
+    def _count_start_tag(self, attrs: list[tuple[str, str | None]]) -> None:
+        self._node_count += 1
+        self._attribute_count += len(attrs)
+        if self._node_count > DOCUMENT_HTML_MAX_NODES:
+            raise DocumentReaderLimitError("document HTML node count exceeds reader limit")
+        if self._attribute_count > DOCUMENT_HTML_MAX_ATTRIBUTES:
+            raise DocumentReaderLimitError("document HTML attribute count exceeds reader limit")
+        if len(attrs) > 256:
+            raise DocumentReaderLimitError("document HTML tag has too many attributes")
+        attribute_bytes = 0
+        for name, value in attrs:
+            for item in (name, value or ""):
+                remaining = DOCUMENT_HTML_MAX_TAG_ATTRIBUTE_BYTES - attribute_bytes
+                if len(item) > remaining:
+                    raise DocumentReaderLimitError(
+                        "document HTML tag attributes exceed reader limit"
+                    )
+                attribute_bytes += len(item.encode("utf-8"))
+                if attribute_bytes > DOCUMENT_HTML_MAX_TAG_ATTRIBUTE_BYTES:
+                    raise DocumentReaderLimitError(
+                        "document HTML tag attributes exceed reader limit"
+                    )
 
     def _next_path(self, tag: str) -> str:
         parent = self._stack[-1]
@@ -426,36 +722,81 @@ class _SafeDocumentParser(HTMLParser):
     ) -> str:
         safe: list[str] = []
         attr_map = {key.lower(): value or "" for key, value in attrs}
-        if target:
-            attr_map["class"] = " ".join(
-                value for value in (attr_map.get("class"), "flori-source-target") if value
-            )
         if tag == "img" and not attr_map.get("src") and attr_map.get("data-artifact"):
             source = _asset_url(self.job_id, attr_map["data-artifact"])
             if source is not None:
                 safe.append(f'src="{html.escape(source, quote=True)}"')
-        source_attrs = list(attrs)
-        if target:
-            source_attrs = [(key, value) for key, value in source_attrs if key.lower() != "class"]
-            source_attrs.append(("class", attr_map["class"]))
-        for key, value in source_attrs:
+        class_seen = False
+        seen_attributes: set[str] = set()
+        for key, value in attrs:
             name = key.lower()
             raw = value or ""
-            if name.startswith("on") or name in {"style", "srcdoc", "formaction"}:
+            if _SAFE_ATTR_NAME.fullmatch(name) is None:
+                continue
+            if name in seen_attributes:
+                continue
+            seen_attributes.add(name)
+            if name.startswith("on") or name in {"srcdoc", "formaction"}:
+                continue
+            if name == "class":
+                if len(raw) > 65536:
+                    continue
+                class_seen = True
+                tokens = [
+                    token for token in raw.split()
+                    if not token.casefold().startswith("flori-")
+                ]
+                if target:
+                    tokens.append("flori-source-target")
+                if tokens:
+                    rendered_class = " ".join(dict.fromkeys(tokens))
+                    safe.append(f'class="{html.escape(rendered_class, quote=True)}"')
+                continue
+            if name == "id" and raw.casefold().startswith(("source-", "flori-")):
+                continue
+            if name == "data-source-segment":
+                continue
+            if name == "style":
+                rendered_style = _safe_inline_style(raw) if tag in _SAFE_STYLE_TAGS else None
+                if rendered_style is not None:
+                    safe.append(f'style="{html.escape(rendered_style, quote=True)}"')
                 continue
             if name in _URL_ATTRS:
-                resolved = _asset_url(self.job_id, raw) if name in {"src", "poster"} else _safe_link(raw)
+                if name in {"src", "poster"} or tag == "image":
+                    resolved = _asset_url(self.job_id, raw)
+                elif tag == "a" and name == "href":
+                    resolved = _safe_link(raw)
+                else:
+                    resolved = raw if raw.startswith("#") else None
                 if resolved is None:
                     continue
                 safe.append(f'{name}="{html.escape(resolved, quote=True)}"')
-                if name == "href" and not resolved.startswith("#"):
+                if tag == "a" and name == "href" and not resolved.startswith("#"):
                     safe.extend(['target="_blank"', 'rel="noopener noreferrer"'])
                 continue
+            if name in {"width", "height"}:
+                dimension = _safe_dimension_attr(raw)
+                if dimension is not None:
+                    safe.append(f'{name}="{dimension}"')
+                continue
+            if name in {"colspan", "rowspan"}:
+                if raw.isdigit() and 0 < int(raw) <= 100:
+                    safe.append(f'{name}="{raw}"')
+                continue
+            if name in _SAFE_SCIENCE_ATTRS:
+                science_value = _safe_science_attr(name, raw)
+                if science_value is not None:
+                    safe.append(f'{name}="{html.escape(science_value, quote=True)}"')
+                continue
             if (
-                name in _SAFE_GLOBAL_ATTRS or name in _SAFE_SCIENCE_ATTRS
+                name in _SAFE_GLOBAL_ATTRS
                 or name.startswith("aria-") or name.startswith("data-")
             ):
+                if len(raw) > 65536:
+                    continue
                 safe.append(f'{name}="{html.escape(raw, quote=True)}"')
+        if target and not class_seen:
+            safe.append('class="flori-source-target"')
         return (" " + " ".join(safe)) if safe else ""
 
     @staticmethod
@@ -472,6 +813,7 @@ class _SafeDocumentParser(HTMLParser):
         return bool(tokens & _CHROME_MARKERS)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._count_start_tag(attrs)
         normalized = tag.lower()
         path = self._next_path(normalized)
         parent_drop = bool(self._stack[-1]["drop"])
@@ -482,73 +824,114 @@ class _SafeDocumentParser(HTMLParser):
         )
         if normalized == "body":
             self._body_seen = True
-        rendered = not drop and normalized not in _DROP_HEAD
+        svg_title = normalized == "title" and any(
+            entry["tag"] == "svg" for entry in self._stack
+        )
+        rendered = (
+            not drop
+            and (normalized not in _DROP_HEAD or svg_title)
+            and normalized in _SAFE_RENDER_TAGS
+        )
         if rendered:
             block_id = self.anchors.get(path)
-            attr_map = {key.lower(): value or "" for key, value in attrs}
-            target = bool(
-                self.target_segment
-                and (
-                    block_id == self.target_segment
-                    or attr_map.get("data-source-segment") == self.target_segment
-                )
-            )
+            embedded_values = [
+                value or "" for key, value in attrs
+                if key.lower() == "data-source-segment"
+            ]
+            if self.embedded_anchor_ids is not None and len(embedded_values) > 1:
+                raise DocumentReaderError("duplicate embedded source segment attribute")
+            embedded = embedded_values[0] if embedded_values else None
+            if embedded and self.embedded_anchor_ids is not None:
+                if embedded in self.embedded_anchor_ids:
+                    if embedded in self._seen_anchor_ids:
+                        raise DocumentReaderError("duplicate embedded source segment")
+                    if block_id is not None and block_id != embedded:
+                        raise DocumentReaderError("embedded source segment conflicts with document locator")
+                    block_id = embedded
+            if block_id is not None:
+                if block_id in self._seen_anchor_ids:
+                    raise DocumentReaderError("duplicate document source segment")
+                self._seen_anchor_ids.add(block_id)
+            target = bool(self.target_segment and block_id == self.target_segment)
             if block_id:
                 anchor = html.escape(f"source-{block_id}", quote=True)
-                self.output.append(f'<span id="{anchor}" class="flori-source-anchor"></span>')
-            if target and not block_id:
-                anchor = html.escape(f"source-{self.target_segment}", quote=True)
-                self.output.append(f'<span id="{anchor}" class="flori-source-anchor"></span>')
-            self.output.append(
+                self._append(f'<span id="{anchor}" class="flori-source-anchor"></span>')
+            self._append(
                 f"<{normalized}{self._attrs(normalized, attrs, target=target)}>"
             )
         else:
             target = False
-        self._stack.append({
+        entry = {
             "tag": normalized, "path": path, "counts": {}, "drop": drop,
             "rendered": rendered, "target": target,
-        })
-        if normalized in _VOID_TAGS:
-            self._stack.pop()
+        }
+        if normalized not in _VOID_TAGS:
+            if len(self._stack) > DOCUMENT_HTML_MAX_DEPTH:
+                raise DocumentReaderLimitError("document HTML nesting exceeds reader limit")
+            self._stack.append(entry)
+            self._open_by_tag.setdefault(normalized, []).append(entry)
+            if target:
+                self._target_depth += 1
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
+        normalized = tag.lower()
+        if normalized not in _VOID_TAGS and self._stack[-1]["tag"] == normalized:
+            self._close_through(self._stack[-1])
 
     def handle_endtag(self, tag: str) -> None:
         normalized = tag.lower()
-        for index in range(len(self._stack) - 1, 0, -1):
-            entry = self._stack[index]
-            if entry["tag"] != normalized:
-                continue
-            for closing in reversed(self._stack[index:]):
-                if closing["rendered"] and closing["tag"] not in _VOID_TAGS:
-                    self.output.append(f"</{closing['tag']}>")
-            del self._stack[index:]
-            return
+        matches = self._open_by_tag.get(normalized)
+        if matches:
+            self._close_through(matches[-1])
+
+    def _close_through(self, target: dict[str, Any]) -> None:
+        while len(self._stack) > 1:
+            closing = self._stack.pop()
+            matches = self._open_by_tag[closing["tag"]]
+            matches.pop()
+            if not matches:
+                self._open_by_tag.pop(closing["tag"], None)
+            if closing.get("target"):
+                self._target_depth -= 1
+            if closing["rendered"]:
+                self._append(f"</{closing['tag']}>")
+            if closing is target:
+                return
+
+    def finish(self) -> None:
+        while len(self._stack) > 1:
+            self._close_through(self._stack[-1])
 
     def handle_data(self, data: str) -> None:
         if self._stack[-1]["drop"]:
             return
-        target_active = any(bool(item.get("target")) for item in self._stack)
+        target_active = self._target_depth > 0
         exact = self.target_exact
         if target_active and exact and not self._target_marked and exact in data:
             before, matched, after = data.partition(exact)
-            self.output.append(html.escape(before))
-            self.output.append(
-                f'<mark class="flori-exact-target">{html.escape(matched)}</mark>'
+            self._append_escaped(before)
+            self._append(
+                '<mark class="flori-exact-target">'
             )
-            self.output.append(html.escape(after))
+            self._append_escaped(matched)
+            self._append("</mark>")
+            self._append_escaped(after)
             self._target_marked = True
             return
-        self.output.append(html.escape(data))
+        self._append_escaped(data)
 
     def handle_entityref(self, name: str) -> None:
         if not self._stack[-1]["drop"]:
-            self.output.append(f"&amp;{html.escape(name)};")
+            self._append("&amp;")
+            self._append_escaped(name)
+            self._append(";")
 
     def handle_charref(self, name: str) -> None:
         if not self._stack[-1]["drop"]:
-            self.output.append(f"&amp;#{html.escape(name)};")
+            self._append("&amp;#")
+            self._append_escaped(name)
+            self._append(";")
 
 
 def render_document_html(
@@ -556,6 +939,7 @@ def render_document_html(
     *,
     job_id: str,
     document: Mapping[str, Any] | None = None,
+    embedded_anchor_ids: frozenset[str] | None = None,
     target_segment: str | None = None,
     target_exact: str | None = None,
 ) -> bytes:
@@ -564,36 +948,40 @@ def render_document_html(
         decoded = source.decode("utf-8-sig")
     except UnicodeDecodeError:
         decoded = source.decode("gb18030")
+    builder = _BoundedHtmlBuilder()
+    builder.append(
+        '<!doctype html><html lang="und"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"<title>文档原文</title><style>{_DOCUMENT_STYLE}</style></head>"
+        '<body><main class="flori-document">'
+    )
     parser = _SafeDocumentParser(
         job_id,
         source_anchor_map(document or {}),
+        builder=builder,
+        embedded_anchor_ids=embedded_anchor_ids,
         target_segment=target_segment,
         target_exact=target_exact,
     )
     parser.feed(decoded)
     parser.close()
-    while len(parser._stack) > 1:
-        entry = parser._stack.pop()
-        if entry["rendered"] and entry["tag"] not in _VOID_TAGS:
-            parser.output.append(f"</{entry['tag']}>")
-    title = "文档原文"
-    rendered = "".join(parser.output)
-    page = (
-        '<!doctype html><html lang="und"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{title}</title><style>{_DOCUMENT_STYLE}</style></head>"
-        f'<body><main class="flori-document">{rendered}</main></body></html>'
-    )
-    return page.encode("utf-8")
+    parser.finish()
+    builder.append("</main></body></html>")
+    return builder.build()
 
 
 def document_html_headers() -> dict[str, str]:
     return {
         "Content-Security-Policy": (
-            "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; "
-            "font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+            "default-src 'none'; script-src 'none'; connect-src 'none'; "
+            "object-src 'none'; frame-src 'none'; worker-src 'none'; media-src 'none'; "
+            "img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self' data:; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'self'; "
+            "sandbox allow-same-origin allow-popups allow-popups-to-escape-sandbox"
         ),
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+        "Cross-Origin-Resource-Policy": "same-origin",
         "Cache-Control": "private, no-store",
     }

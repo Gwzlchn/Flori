@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import json
 import mimetypes
 
@@ -33,6 +34,8 @@ from shared.step_scope import JOB_SCOPE, part_scope
 from api.deps import get_config, get_db, get_storage, validate_path_segment, verify_token
 from api.services.document_reader import (
     DOCUMENT_HTML_MAX_BYTES,
+    DocumentReaderError,
+    DocumentReaderLimitError,
     document_html_headers,
     render_document_html,
     render_document_model_html,
@@ -399,6 +402,42 @@ async def _bounded_document_artifact(
     return data
 
 
+async def _validated_document_model(
+    storage: StorageBackend, job_id: str,
+) -> dict:
+    model_data = await read_file_bounded(
+        storage, job_id, "intermediate/document.json", DOCUMENT_HTML_MAX_BYTES,
+    )
+    if model_data is None:
+        raise HTTPException(404, "document model not ready")
+    if len(model_data) > DOCUMENT_HTML_MAX_BYTES:
+        raise HTTPException(413, "document model exceeds reader limit")
+    try:
+        return validate_document(json.loads(model_data), expected_job_id=job_id)
+    except (DocumentContractError, json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(422, "document model is invalid")
+
+
+async def _render_document_reader(function, /, *args, **kwargs) -> bytes:
+    try:
+        return await asyncio.to_thread(function, *args, **kwargs)
+    except DocumentReaderLimitError as exc:
+        raise HTTPException(413, str(exc)) from exc
+    except DocumentReaderError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+def _verify_document_html_identity(model: dict, source: bytes) -> None:
+    expected = "sha256:" + hashlib.sha256(source).hexdigest()
+    for record in model.get("sources") or []:
+        if not isinstance(record, dict) or record.get("path") != "input/source.html":
+            continue
+        if record.get("fingerprint") == expected:
+            return
+        break
+    raise HTTPException(422, "document HTML does not match document model")
+
+
 @router.get(
     "/{job_id}/document/source", response_class=Response, responses=_HTML_RESPONSE,
 )
@@ -413,24 +452,17 @@ async def get_document_source(
     source = await _bounded_document_artifact(
         storage, job_id, "input/source.html", "document HTML source not found",
     )
-    model_data = await read_file_bounded(
-        storage, job_id, "intermediate/document.json", DOCUMENT_HTML_MAX_BYTES,
-    )
-    if model_data is None:
-        raise HTTPException(404, "document model not ready")
-    if len(model_data) > DOCUMENT_HTML_MAX_BYTES:
-        raise HTTPException(413, "document model exceeds reader limit")
-    try:
-        model = validate_document(json.loads(model_data), expected_job_id=job_id)
-    except (DocumentContractError, json.JSONDecodeError, UnicodeDecodeError):
-        raise HTTPException(422, "document model is invalid")
+    model = await _validated_document_model(storage, job_id)
+    _verify_document_html_identity(model, source)
     if model.get("source_profile") == "generic_html":
-        content = render_document_model_html(
+        content = await _render_document_reader(
+            render_document_model_html,
             model, job_id=job_id,
             target_segment=segment, target_exact=exact,
         )
     else:
-        content = render_document_html(
+        content = await _render_document_reader(
+            render_document_html,
             source, job_id=job_id, document=model,
             target_segment=segment, target_exact=exact,
         )
@@ -455,9 +487,17 @@ async def get_document_translation(
     source = await _bounded_document_artifact(
         storage, job_id, "output/translated.html", "document translation not ready",
     )
+    model = await _validated_document_model(storage, job_id)
+    embedded_anchor_ids = frozenset(
+        str(block["block_id"])
+        for block in model.get("blocks") or []
+        if isinstance(block, dict) and isinstance(block.get("block_id"), str)
+    )
     return Response(
-        content=render_document_html(
+        content=await _render_document_reader(
+            render_document_html,
             source, job_id=job_id,
+            embedded_anchor_ids=embedded_anchor_ids,
             target_segment=segment, target_exact=exact,
         ),
         media_type="text/html; charset=utf-8",
