@@ -276,12 +276,13 @@ document:
       label: "下载"
       run: steps.common.step_01_download
       pool: io
-      timeout: 600   # PDF + HTML 源 + 页内图片(arxiv 慢时单 PDF 可近 120s)
+      timeout: 600   # PDF + HTML/CSS/字体/图片闭包(arxiv 慢时单 PDF 可近 120s)
       retry: 3
-      version: "5"   # 图 urljoin 去手拼尾斜杠(RFC3986 末段丢弃=浏览器语义;修双段404图全外链),失效旧指纹
+      version: "6"
       on_complete:
         - action: sync_metadata
-      outputs: ["input/source.pdf", "input/source.html", "input/metadata.json", "assets/*"]
+      outputs: ["input/source.pdf", "input/source.html", "input/html_snapshot.json",
+                "input/html_assets/*", "input/metadata.json"]
 
     "02_parse":
       label: "结构化解析"

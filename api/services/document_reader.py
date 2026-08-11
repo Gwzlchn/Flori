@@ -9,6 +9,13 @@ from html.parser import HTMLParser
 from typing import Any, Mapping
 from urllib.parse import quote, urlparse
 
+from shared.scholarly_html_snapshot import (
+    SCHOLARLY_HTML_SANITIZED_CSS_MAX_BYTES,
+    ScholarlyHtmlSnapshotLimitError,
+    SnapshotCssBudget,
+    sanitize_snapshot_stylesheet,
+)
+
 
 DOCUMENT_HTML_MAX_BYTES = 32 * 1024 * 1024
 DOCUMENT_HTML_MAX_OUTPUT_BYTES = 48 * 1024 * 1024
@@ -147,6 +154,16 @@ math{font-family:"STIX Two Math","Cambria Math",serif}.flori-source-anchor{displ
 @media(max-width:640px){.flori-document{padding:18px 16px 48px;font-size:16px}h1{font-size:1.65rem}h2{font-size:1.3rem}}
 """.strip()
 
+_DOCUMENT_SNAPSHOT_FRAME_STYLE = """
+:root{color-scheme:light;background:#fff}
+html,body{margin:0;min-height:100%;background:#fff;color:#111}
+.flori-document{min-height:100vh}
+img,svg{max-width:100%;height:auto}
+.flori-source-anchor{display:block;position:relative;top:-12px;visibility:hidden}
+.flori-source-target{outline:3px solid #f4b942;outline-offset:5px;background:#fff7d6;scroll-margin-top:18px}
+.flori-exact-target{border-radius:3px;background:#ffe47a;color:inherit}
+""".strip()
+
 
 def _safe_inline_style(value: str) -> str | None:
     """保留有限布局声明;任何资源、函数或解析歧义都丢弃整条声明。"""
@@ -269,7 +286,18 @@ def _safe_local_path(value: str) -> str | None:
     return normalized
 
 
-def _asset_url(job_id: str, value: str) -> str | None:
+def _snapshot_resource_url(job_id: str, path: str) -> str:
+    return (
+        f"/api/jobs/{quote(job_id, safe='')}/document/resource"
+        f"?path={quote(path, safe='')}"
+    )
+
+
+def _asset_url(
+    job_id: str,
+    value: str,
+    snapshot_resource_digests: Mapping[str, str] | None = None,
+) -> str | None:
     raw = value.strip()
     lowered = raw.casefold()
     if lowered.startswith("data:image/"):
@@ -277,9 +305,51 @@ def _asset_url(job_id: str, value: str) -> str | None:
             return raw
         return None
     local = _safe_local_path(raw)
-    if local is None or not local.startswith("assets/"):
+    if local is None:
+        return None
+    if snapshot_resource_digests is not None and local in snapshot_resource_digests:
+        return _snapshot_resource_url(job_id, local)
+    if not local.startswith("assets/"):
         return None
     return f"/api/jobs/{quote(job_id, safe='')}/artifact?path={quote(local, safe='')}"
+
+
+def build_snapshot_css(
+    stylesheets: list[tuple[Mapping[str, object], bytes]],
+    *,
+    job_id: str,
+    resources: Mapping[str, Mapping[str, object]],
+) -> str:
+    """按快照顺序净化CSS;URL只可解析到同一快照声明的本地资源。"""
+    aliases: dict[str, str] = {}
+    for record in resources.values():
+        path = str(record.get("path") or "")
+        if not path or record.get("kind") == "stylesheet":
+            continue
+        endpoint = _snapshot_resource_url(job_id, path)
+        for key in ("request_url", "source_url"):
+            source = record.get(key)
+            if isinstance(source, str):
+                aliases[source] = endpoint
+
+    rendered: list[str] = []
+    rendered_bytes = 0
+    budget = SnapshotCssBudget()
+    for record, body in stylesheets:
+        base_url = str(record.get("source_url") or record.get("request_url") or "")
+        sanitized = sanitize_snapshot_stylesheet(
+            body,
+            base_url=base_url,
+            resolve_resource=aliases.get,
+            budget=budget,
+        )
+        rendered_bytes += len(sanitized.encode("utf-8"))
+        if rendered_bytes > SCHOLARLY_HTML_SANITIZED_CSS_MAX_BYTES:
+            raise ScholarlyHtmlSnapshotLimitError(
+                "combined sanitized stylesheets exceed limit"
+            )
+        rendered.append(sanitized)
+    return "".join(rendered)
 
 
 def _safe_link(value: str) -> str | None:
@@ -662,6 +732,7 @@ class _SafeDocumentParser(HTMLParser):
         embedded_anchor_ids: frozenset[str] | None = None,
         target_segment: str | None = None,
         target_exact: str | None = None,
+        snapshot_resource_digests: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(convert_charrefs=True)
         self.job_id = job_id
@@ -681,6 +752,7 @@ class _SafeDocumentParser(HTMLParser):
         self.target_segment = target_segment
         self.target_exact = target_exact
         self._target_marked = False
+        self.snapshot_resource_digests = snapshot_resource_digests
 
     def _append(self, fragment: str) -> None:
         self._builder.append(fragment)
@@ -723,7 +795,9 @@ class _SafeDocumentParser(HTMLParser):
         safe: list[str] = []
         attr_map = {key.lower(): value or "" for key, value in attrs}
         if tag == "img" and not attr_map.get("src") and attr_map.get("data-artifact"):
-            source = _asset_url(self.job_id, attr_map["data-artifact"])
+            source = _asset_url(
+                self.job_id, attr_map["data-artifact"], self.snapshot_resource_digests,
+            )
             if source is not None:
                 safe.append(f'src="{html.escape(source, quote=True)}"')
         class_seen = False
@@ -763,7 +837,9 @@ class _SafeDocumentParser(HTMLParser):
                 continue
             if name in _URL_ATTRS:
                 if name in {"src", "poster"} or tag == "image":
-                    resolved = _asset_url(self.job_id, raw)
+                    resolved = _asset_url(
+                        self.job_id, raw, self.snapshot_resource_digests,
+                    )
                 elif tag == "a" and name == "href":
                     resolved = _safe_link(raw)
                 else:
@@ -942,6 +1018,8 @@ def render_document_html(
     embedded_anchor_ids: frozenset[str] | None = None,
     target_segment: str | None = None,
     target_exact: str | None = None,
+    snapshot_css: str | None = None,
+    snapshot_resource_digests: Mapping[str, str] | None = None,
 ) -> bytes:
     """生成隔离阅读副本；调用方持有的 source bytes 不会被修改。"""
     try:
@@ -949,10 +1027,15 @@ def render_document_html(
     except UnicodeDecodeError:
         decoded = source.decode("gb18030")
     builder = _BoundedHtmlBuilder()
+    style = (
+        _DOCUMENT_SNAPSHOT_FRAME_STYLE + (snapshot_css or "")
+        if snapshot_css is not None
+        else _DOCUMENT_STYLE
+    )
     builder.append(
         '<!doctype html><html lang="und"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>文档原文</title><style>{_DOCUMENT_STYLE}</style></head>"
+        f"<title>文档原文</title><style>{style}</style></head>"
         '<body><main class="flori-document">'
     )
     parser = _SafeDocumentParser(
@@ -962,6 +1045,7 @@ def render_document_html(
         embedded_anchor_ids=embedded_anchor_ids,
         target_segment=target_segment,
         target_exact=target_exact,
+        snapshot_resource_digests=snapshot_resource_digests,
     )
     parser.feed(decoded)
     parser.close()

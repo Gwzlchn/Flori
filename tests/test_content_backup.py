@@ -373,6 +373,29 @@ class TestFullBackup:
         assert len(body["records"]["step_results"]) == 2
         assert sorted(body["blob_refs"]) == sorted([sha(MEDIA_ONE), sha(MEDIA_TWO)])
 
+    async def test_scholarly_html_snapshot_closure_is_portable_manifest_output(self, env):
+        job_id = "job_scholarly_portable"
+        insert_job(
+            env, job_id, content_type="document",
+            document_kind="research_paper", pipeline="document",
+        )
+        insert_step(env, job_id, "job", "01_download", "done")
+        outputs = {
+            "input/source.html": b"<html><body>paper</body></html>",
+            "input/html_snapshot.json": b'{"format":"test-snapshot"}',
+            "input/html_assets/paper.css": b".paper{color:#123}",
+            "input/html_assets/paper.woff2": b"wOF2font",
+            "input/html_assets/figure.png": b"\x89PNG\r\n\x1a\nfigure",
+        }
+        await commit_step(env, job_id, "job", "01_download", outputs)
+
+        result = await do_backup(env, "run_scholarly")
+        snapshot = env.repo.get_snapshot(result.snapshot_digest)
+
+        assert result.stats["unknown_paths"] == 0
+        assert result.stats["step_results"] == 1
+        assert set(snapshot["blob_refs"]) >= {sha(body) for body in outputs.values()}
+
 
 class TestPartialSuccess:
     async def test_failed_part_media_not_collected(self, env):

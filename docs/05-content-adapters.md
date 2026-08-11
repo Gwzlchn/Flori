@@ -102,6 +102,8 @@ watch URL。列表本身不进入 video 下载链，每个条目继续复用现�
 
 ```
 input/source.html|source.pdf       不可变来源，可同时存在
+input/html_snapshot.json           学术HTML的离线资源闭包清单(成功时)
+input/html_assets/*                快照绑定的CSS、字体与位图(成功时)
 intermediate/document.json        身份、元数据、文档树、资源、引用、locator
 intermediate/quality.json         complete/degraded/rejected 与完整度指标
 output/translation.json           翻译对齐真相源
@@ -114,6 +116,15 @@ arXiv 尽可能同时保存官方/ar5iv HTML 和 PDF。HTML 由 `scholarly_html`
 bibliography、作者-机构-邮箱关系、作者说明、许可、Figure/Table 与内部引用；原文 Tab 显示 CSP+sandbox
 隔离副本，不再转成 Markdown。若 PDF 同时存在，按规范化文本建立唯一 HTML↔PDF crosswalk；重复或无
 匹配只记录 ambiguous/unmatched，不能猜页码。
+
+HTML来源按官方 arXiv、ar5iv 依次尝试。下载步递归冻结页面声明的CSS、`@import`、字体和图片，写入
+`input/html_snapshot.json` 与 `input/html_assets/*`；只有依赖闭包完整、类型与摘要校验通过时才连同
+`input/source.html` 一起发布。资源失败不保留远程URL作为浏览器兜底，也不发布半快照：当前来源整体
+失败后换下一来源，最终仍失败则按PDF-only继续。根HTML与依赖都逐跳固定已验证公网IP并保持原域名TLS校验；
+本地存储的arXiv下载也强制在独立attempt内完成。下载阶段不覆盖旧成功闭包；提交窗口若中断，
+旧manifest会使半快照校验失败，后续幂等重试负责收敛。阅读器不直接重放上游HTML：脚本和站点交互结构被
+剥离，上游CSS经过有界解析和URL本地化后注入sandbox副本，字体/位图只从同Job摘要绑定端点返回。
+旧任务没有快照时继续使用固定兼容CSS；要获得上游版式必须显式重跑下载及其下游，不能在线回填。
 
 ### 通用网页
 

@@ -858,6 +858,17 @@ class Worker:
                             work_dir, pipeline, raw, definition_digest,
                             start, duration, source_exclude_paths,
                         )
+                        requires_manifest = getattr(
+                            self.storage, "requires_manifest_commit", None,
+                        )
+                        if (
+                            commit_token is None
+                            and callable(requires_manifest)
+                            and requires_manifest(storage_dir)
+                        ):
+                            raise RuntimeError(
+                                "isolated download requires a committed manifest"
+                            )
                     except WorkerAuthRejected:
                         raise
                     except (StaleCommitError, StepCommitFenceRejected) as fence_err:
@@ -1052,6 +1063,12 @@ class Worker:
             )
             return None
         fingerprints = dict(candidate["input_fingerprints"])
+        requires_manifest = getattr(
+            self.storage, "requires_manifest_commit", None,
+        )
+        manifest_required = bool(
+            callable(requires_manifest) and requires_manifest(work_dir)
+        )
         source_ref = claim.get("source_ref")
         if source_ref:
             # NAS 源不是 output(integrator 决策 2):源身份并入 input fingerprints,
@@ -1068,7 +1085,7 @@ class Worker:
         previous = await read_previous_manifest(self.storage, job_id, scope_key, step)
         # 幂等跳过 + 中心 manifest 与当前 input/definition digest 一致 → 省去整套重发 IO
         # (含流式哈希;审查 P3-7);仅缺失/不一致时自愈重发。
-        if candidate.get("reused") and previous is not None:
+        if candidate.get("reused") and previous is not None and not manifest_required:
             from shared.step_manifest import compute_input_digest
 
             if (

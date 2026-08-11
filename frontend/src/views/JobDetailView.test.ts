@@ -364,7 +364,10 @@ describe('JobDetailView 笔记 tab', () => {
     const w = mountView()
     await flushPromises()
     expect(w.find('.seg').findAll('button').map(button => button.text())).toEqual(['原文'])
-    expect(w.find('iframe.document-reader-frame').attributes('src')).toBe('/api/jobs/job_BV1abc/document/source')
+    expect(w.find('iframe.document-reader-frame').attributes()).toMatchObject({
+      src: '/api/jobs/job_BV1abc/document/source',
+      sandbox: 'allow-same-origin',
+    })
     expect(w.text()).not.toContain('原文 PDF')
     expect(w.text()).not.toContain('智能版')
   })
@@ -385,7 +388,10 @@ describe('JobDetailView 笔记 tab', () => {
     const btn = seg.findAll('button').find(b => b.text() === '译文')
     await btn!.trigger('click')
     await flushPromises()
-    expect(w.find('iframe.document-reader-frame').attributes('src')).toBe('/api/jobs/job_BV1abc/document/translation')
+    expect(w.find('iframe.document-reader-frame').attributes()).toMatchObject({
+      src: '/api/jobs/job_BV1abc/document/translation',
+      sandbox: 'allow-same-origin',
+    })
     const back = seg.findAll('button').find(b => b.text() === '原文')
     await back!.trigger('click')
     await flushPromises()

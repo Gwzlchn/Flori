@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import http.client
+import ipaddress
+import json
 import os
 import re
+import shutil
+import socket
+import ssl
 import subprocess
 import urllib.request
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from shared.document_source_resolver import (
     DocumentSourceAlternative,
@@ -18,6 +26,27 @@ from shared.document_source_resolver import (
     resolve_document_source_alternative,
 )
 from shared.source_detect import detect_source, extract_arxiv_id, extract_bilibili_bvid
+from shared.scholarly_html_snapshot import (
+    SCHOLARLY_HTML_ASSET_PREFIX,
+    SCHOLARLY_HTML_CSS_MAX_BYTES,
+    SCHOLARLY_HTML_MAX_RESOURCES,
+    SCHOLARLY_HTML_MAX_REFERENCE_EVENTS,
+    SCHOLARLY_HTML_MAX_STYLE_CHUNKS,
+    SCHOLARLY_HTML_MAX_STYLESHEETS,
+    SCHOLARLY_HTML_RESOURCE_MAX_BYTES,
+    SCHOLARLY_HTML_RESOURCE_TOTAL_MAX_BYTES,
+    SCHOLARLY_HTML_SOURCE_MAX_BYTES,
+    SCHOLARLY_HTML_SNAPSHOT_FORMAT,
+    SCHOLARLY_HTML_SNAPSHOT_MAX_BYTES,
+    SCHOLARLY_HTML_SNAPSHOT_PATH,
+    SCHOLARLY_HTML_SNAPSHOT_VERSION,
+    canonical_snapshot_bytes,
+    iter_css_urls,
+    scholarly_provider_hosts,
+    sha256_digest,
+    validate_scholarly_document_url,
+    validate_scholarly_html_snapshot,
+)
 from shared.step_base import StepBase, file_hash
 
 
@@ -54,6 +83,213 @@ class _PublicUrlRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(
             req, fp, code, msg, headers, target,
         )
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """连接已校验的数字IP,但TLS证书与SNI仍绑定原始域名。"""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        pinned_ip: str,
+        *,
+        timeout: int,
+    ) -> None:
+        super().__init__(
+            host,
+            port=port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        original = self._create_connection
+
+        def create_pinned(_address, timeout, source_address):
+            ip = ipaddress.ip_address(self._pinned_ip)
+            family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            try:
+                sock.settimeout(timeout)
+                if source_address:
+                    sock.bind(source_address)
+                target = (
+                    (self._pinned_ip, self.port, 0, 0)
+                    if ip.version == 6
+                    else (self._pinned_ip, self.port)
+                )
+                sock.connect(target)
+                return sock
+            except BaseException:
+                sock.close()
+                raise
+
+        self._create_connection = create_pinned
+        try:
+            super().connect()
+        finally:
+            self._create_connection = original
+
+
+def _public_https_target(url: str) -> tuple[str, int, tuple[str, ...]]:
+    """解析并冻结一次公网HTTPS目标;返回值可直接用于固定IP连接。"""
+    if len(url) > 8192:
+        raise ValueError("snapshot resource URL exceeds limit")
+    parsed = urlparse(url)
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError("snapshot resource URL has invalid port") from exc
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("snapshot resource URL must be uncredentialed HTTPS")
+    try:
+        infos = socket.getaddrinfo(
+            parsed.hostname,
+            port,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+    except socket.gaierror as exc:
+        raise ValueError("snapshot resource host cannot be resolved") from exc
+    addresses: list[str] = []
+    for info in infos:
+        address = str(ipaddress.ip_address(info[4][0]))
+        ip = ipaddress.ip_address(address)
+        if not ip.is_global:
+            raise ValueError("snapshot resource resolves to non-public address")
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise ValueError("snapshot resource host has no public address")
+    return parsed.hostname, port, tuple(addresses)
+
+
+class _StaticHtmlReferenceParser(HTMLParser):
+    """只提取浏览器自动加载的论文样式与图片边,不解释脚本内伪标签。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.styles: list[tuple[str, str]] = []
+        self.images: list[str] = []
+        self._linked_styles: set[str] = set()
+        self._image_sources: set[str] = set()
+        self._style_chunks: list[str] | None = None
+        self._style_bytes = 0
+        self._inline_style_bytes = 0
+        self._style_chunk_count = 0
+        self._reference_events = 0
+
+    @staticmethod
+    def _attr_map(attrs: list[tuple[str, str | None]]) -> dict[str, str]:
+        if len(attrs) > 256:
+            raise ValueError("HTML static resource attribute count exceeds limit")
+        total_bytes = 0
+        for name, value in attrs:
+            raw_value = value or ""
+            if len(name) + len(raw_value) > 256 * 1024:
+                raise ValueError("HTML static resource attributes exceed byte limit")
+            total_bytes += len(name.encode("utf-8")) + len(raw_value.encode("utf-8"))
+            if total_bytes > 256 * 1024:
+                raise ValueError("HTML static resource attributes exceed byte limit")
+        return {name.casefold(): value or "" for name, value in attrs}
+
+    def _add_reference_event(self) -> None:
+        self._reference_events += 1
+        if self._reference_events > SCHOLARLY_HTML_MAX_REFERENCE_EVENTS:
+            raise ValueError("HTML static reference count exceeds limit")
+
+    def _add_style(self, kind: str, value: str) -> None:
+        if len(self.styles) >= SCHOLARLY_HTML_MAX_STYLESHEETS:
+            raise ValueError("HTML stylesheet count exceeds limit")
+        self.styles.append((kind, value))
+
+    def _append_style_chunk(self, value: str) -> None:
+        if self._style_chunks is None:
+            return
+        self._style_chunk_count += 1
+        if self._style_chunk_count > SCHOLARLY_HTML_MAX_STYLE_CHUNKS:
+            raise ValueError("inline stylesheet chunk count exceeds limit")
+        if len(value) > SCHOLARLY_HTML_CSS_MAX_BYTES:
+            raise ValueError("inline stylesheet exceeds limit")
+        size = len(value.encode("utf-8"))
+        if self._style_bytes + size > SCHOLARLY_HTML_CSS_MAX_BYTES:
+            raise ValueError("inline stylesheet exceeds limit")
+        if self._inline_style_bytes + size > SCHOLARLY_HTML_RESOURCE_TOTAL_MAX_BYTES:
+            raise ValueError("inline stylesheets exceed total byte limit")
+        self._style_bytes += size
+        self._inline_style_bytes += size
+        self._style_chunks.append(value)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized = tag.casefold()
+        if normalized not in {"link", "style", "img", "image"}:
+            return
+        values = self._attr_map(attrs) if normalized != "style" else {}
+        if normalized == "link":
+            rel = {token.casefold() for token in values.get("rel", "").split()}
+            if "stylesheet" in rel and values.get("href"):
+                self._add_reference_event()
+                href = values["href"]
+                if href not in self._linked_styles:
+                    self._linked_styles.add(href)
+                    self._add_style("link", href)
+        elif normalized == "style":
+            if self._style_chunks is not None:
+                raise ValueError("nested style element is not allowed")
+            if len(self.styles) >= SCHOLARLY_HTML_MAX_STYLESHEETS:
+                raise ValueError("HTML stylesheet count exceeds limit")
+            self._style_chunks = []
+            self._style_bytes = 0
+            self._style_chunk_count = 0
+        elif normalized == "img" and values.get("src"):
+            self._add_reference_event()
+            source = values["src"]
+            if source not in self._image_sources:
+                if len(self.images) >= SCHOLARLY_HTML_MAX_RESOURCES:
+                    raise ValueError("HTML image count exceeds limit")
+                self._image_sources.add(source)
+                self.images.append(source)
+        elif normalized == "image":
+            source = values.get("href") or values.get("xlink:href")
+            if source:
+                self._add_reference_event()
+                if source not in self._image_sources:
+                    if len(self.images) >= SCHOLARLY_HTML_MAX_RESOURCES:
+                        raise ValueError("HTML image count exceeds limit")
+                    self._image_sources.add(source)
+                    self.images.append(source)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() != "style" or self._style_chunks is None:
+            return
+        self._add_style("inline", "".join(self._style_chunks))
+        self._style_chunks = None
+
+    def handle_data(self, data: str) -> None:
+        self._append_style_chunk(data)
+
+    def handle_entityref(self, name: str) -> None:
+        self._append_style_chunk(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        self._append_style_chunk(f"&#{name};")
+
+    def finish(self) -> tuple[list[tuple[str, str]], list[str]]:
+        if self._style_chunks is not None:
+            raise ValueError("unclosed style element")
+        return list(self.styles), list(self.images)
 
 
 class DownloadStep(StepBase):
@@ -316,33 +552,98 @@ class DownloadStep(StepBase):
         self._fetch_arxiv_html(arxiv_id)
 
     def _fetch_arxiv_html(self, arxiv_id: str) -> None:
-        """抓 arxiv HTML 源 → input/source.html;页内图片下载到 job 根 assets/(与 article/前端
-        `/api/jobs/{id}/assets/` 约定一致),并把 HTML 里的 src 重写为 assets/<名>。
-        先官方 https://arxiv.org/html/<id>(新论文原生),404 再 ar5iv;都失败 = 无 HTML 源
-        (老 LaTeX 编译失败/纯扫描件),不写 source.html → 02 步按 pdf-only 处理。best-effort。"""
-        html = None
-        for base in (f"https://arxiv.org/html/{arxiv_id}",
-                     f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}"):
-            html, final_url = self._fetch_html(base, timeout=60)
+        """冻结官方HTML或ar5iv的静态依赖闭包;任一必需资源失败就换源或回退PDF。"""
+        for provider, base in (
+            ("arxiv", f"https://arxiv.org/html/{arxiv_id}"),
+            ("ar5iv", f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}"),
+        ):
+            try:
+                html, final_url = self._fetch_scholarly_html(base, provider=provider)
+            except ValueError as exc:
+                self.log.warning(
+                    "arxiv_html_snapshot_failed",
+                    arxiv_id=arxiv_id,
+                    provider=provider,
+                    error=f"{type(exc).__name__}:{str(exc)[:240]}",
+                )
+                continue
             # ar5iv 对无 HTML 的论文回 200 落地页. 官方偶尔以200提前断流,
             # 仅有ltx_不足以证明整篇到齐,截断源必须继续回退ar5iv或PDF.
             if html and "ltx_" in html and self._arxiv_html_is_complete(html):
                 # 图 base 用重定向后的最终 URL(官方 html/<id> 302 到 …/<id>v<N>,相对 src 相对它)。
-                self._arxiv_html_base = final_url or base
-                break
+                document_url = validate_scholarly_document_url(provider, final_url or base)
+                try:
+                    rewritten, snapshot, resources = self._build_scholarly_html_snapshot(
+                        html, document_url=document_url, provider=provider,
+                    )
+                    snapshot_bytes = canonical_snapshot_bytes(snapshot)
+                    if len(snapshot_bytes) > SCHOLARLY_HTML_SNAPSHOT_MAX_BYTES:
+                        raise ValueError("snapshot JSON exceeds limit")
+                except ValueError as exc:
+                    self.log.warning(
+                        "arxiv_html_snapshot_failed",
+                        arxiv_id=arxiv_id,
+                        provider=provider,
+                        error=f"{type(exc).__name__}:{str(exc)[:240]}",
+                    )
+                    continue
+                self._clear_scholarly_html_snapshot()
+                for path, body in resources.items():
+                    self.artifacts.write(path, body)
+                self.artifacts.write("input/source.html", rewritten)
+                self.artifacts.write(SCHOLARLY_HTML_SNAPSHOT_PATH, snapshot_bytes)
+                self._arxiv_html_base = document_url
+                self.log.info(
+                    "arxiv_html_fetched",
+                    arxiv_id=arxiv_id,
+                    base=document_url,
+                    bytes=len(rewritten.encode("utf-8")),
+                    resources=len(snapshot["resources"]),
+                )
+                return
             if html and "ltx_" in html:
                 self.log.warning(
                     "arxiv_html_incomplete", arxiv_id=arxiv_id,
                     base=final_url or base, bytes=len(html),
                 )
-            html = None
-        if not html:
-            self.log.info("arxiv_html_unavailable", arxiv_id=arxiv_id)
-            return
-        html = self._localize_html_images(html, self._arxiv_html_base)
-        self.artifacts.write("input/source.html", html)
-        self.log.info("arxiv_html_fetched", arxiv_id=arxiv_id, base=self._arxiv_html_base,
-                      bytes=len(html))
+        self._clear_scholarly_html_snapshot()
+        self.log.info("arxiv_html_unavailable", arxiv_id=arxiv_id)
+
+    def _fetch_scholarly_html(
+        self,
+        url: str,
+        *,
+        provider: str,
+    ) -> tuple[str | None, str | None]:
+        """逐跳固定论文入口IP;最终URL仍必须属于声明来源。"""
+        response = self._fetch_pinned_https(
+            url,
+            timeout=60,
+            max_bytes=SCHOLARLY_HTML_SOURCE_MAX_BYTES,
+            allowed_hosts=scholarly_provider_hosts(provider),
+        )
+        if not self._fetch_succeeded(response):
+            return None, response.final_url or url
+        final_url = validate_scholarly_document_url(
+            provider, response.final_url or url,
+        )
+        if self._has_pdf_signature(response.body):
+            return None, final_url
+        return self._decode_fetch_body(response), final_url
+
+    def _clear_scholarly_html_snapshot(self) -> None:
+        """先移除隔离工作副本中的旧闭包,失败重抓不得重新签发历史产物。"""
+        for relative in ("input/source.html", SCHOLARLY_HTML_SNAPSHOT_PATH):
+            path = self.job_dir / relative
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        assets = self.job_dir / SCHOLARLY_HTML_ASSET_PREFIX.rstrip("/")
+        if assets.is_symlink() or (assets.exists() and not assets.is_dir()):
+            assets.unlink()
+        elif assets.is_dir():
+            shutil.rmtree(assets)
 
     @staticmethod
     def _arxiv_html_is_complete(html: str) -> bool:
@@ -351,35 +652,341 @@ class DownloadStep(StepBase):
             re.search(r"</body\s*>\s*</html\s*>\s*$", html, re.I)
         )
 
-    def _localize_html_images(self, html: str, base_url: str) -> str:
-        """下载 HTML 内 <img src> 到 job 根 assets/,src 重写为 assets/<扁平名>。
-        单图失败保留原引用(绝对化,前端在线渲染兜底),不失败整体。"""
+    _HTML_TAG_RE = re.compile(r"<(?P<tag>link|style|img|image)\b(?P<body>[^>]*)>", re.I | re.S)
+    _HTML_ATTR_RE = re.compile(
+        r"(?P<name>[A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*(?:"
+        r"(?P<quote>['\"])(?P<quoted>.*?)(?P=quote)|"
+        r"(?P<unquoted>[^\s\"'=<>`]+))",
+        re.S,
+    )
+
+    @staticmethod
+    def _html_static_references(
+        html: str,
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """按文档顺序提取外部CSS、内联CSS和自动加载图片引用。"""
+        parser = _StaticHtmlReferenceParser()
+        parser.feed(html)
+        parser.close()
+        return parser.finish()
+
+    @classmethod
+    def _rewrite_html_images(cls, html: str, replacements: dict[str, str]) -> str:
+        def rewrite_tag(match: re.Match[str]) -> str:
+            tag = match.group("tag").casefold()
+            if tag not in {"img", "image"}:
+                return match.group(0)
+
+            def rewrite_attr(attribute: re.Match[str]) -> str:
+                name = attribute.group("name").casefold()
+                if name not in {"src", "href", "xlink:href"}:
+                    return attribute.group(0)
+                value = attribute.group("quoted") or attribute.group("unquoted") or ""
+                replacement = replacements.get(value)
+                if replacement is None:
+                    return attribute.group(0)
+                quote = attribute.group("quote")
+                if quote:
+                    return f"{attribute.group('name')}={quote}{replacement}{quote}"
+                return f'{attribute.group("name")}="{replacement}"'
+
+            body = cls._HTML_ATTR_RE.sub(rewrite_attr, match.group("body"))
+            return f"<{match.group('tag')}{body}>"
+
+        return cls._HTML_TAG_RE.sub(rewrite_tag, html)
+
+    @staticmethod
+    def _response_media_type(response: HttpFetchResult) -> str:
+        return response.content_type.partition(";")[0].strip().casefold()
+
+    @staticmethod
+    def _resource_identity(body: bytes, media_type: str) -> tuple[str, str]:
+        signatures = (
+            ("font/woff2", ".woff2", b"wOF2"),
+            ("font/woff", ".woff", b"wOFF"),
+            ("font/otf", ".otf", b"OTTO"),
+            ("font/ttf", ".ttf", b"\x00\x01\x00\x00"),
+            ("image/png", ".png", b"\x89PNG\r\n\x1a\n"),
+            ("image/jpeg", ".jpg", b"\xff\xd8\xff"),
+            ("image/gif", ".gif", b"GIF8"),
+            ("image/webp", ".webp", b"RIFF"),
+        )
+        for detected, suffix, signature in signatures:
+            if body.startswith(signature):
+                if detected == "image/webp" and body[8:12] != b"WEBP":
+                    continue
+                return detected, suffix
+        if (
+            media_type == "image/avif"
+            and len(body) >= 12
+            and body[4:8] == b"ftyp"
+            and body[8:12] in {b"avif", b"avis"}
+        ):
+            return "image/avif", ".avif"
+        raise ValueError("snapshot resource has unsupported signature")
+
+    @staticmethod
+    def _snapshot_asset_path(body: bytes, suffix: str, *, image: bool) -> str:
+        digest = hashlib.sha256(body).hexdigest()
+        kind = "image-" if image else "resource-"
+        return f"{SCHOLARLY_HTML_ASSET_PREFIX}{kind}{digest}{suffix}"
+
+    @staticmethod
+    def _fetch_pinned_https(
+        url: str,
+        *,
+        timeout: int,
+        max_bytes: int,
+        allowed_hosts: frozenset[str] | None = None,
+    ) -> HttpFetchResult:
+        """逐跳固定公网IP抓HTTPS;重定向重新解析,不让连接层二次查DNS。"""
+        current_url = url
+        for _redirect in range(6):
+            current_host = (urlparse(current_url).hostname or "").casefold()
+            if allowed_hosts is not None and current_host not in allowed_hosts:
+                return HttpFetchResult(
+                    b"", current_url, None, "", "provider_host_not_allowed",
+                )
+            try:
+                host, port, addresses = _public_https_target(current_url)
+            except ValueError as exc:
+                return HttpFetchResult(b"", current_url, None, "", str(exc))
+            parsed = urlparse(current_url)
+            request_target = parsed.path or "/"
+            if parsed.query:
+                request_target += "?" + parsed.query
+            errors: list[str] = []
+            for address in addresses:
+                connection = _PinnedHTTPSConnection(
+                    host, port, address, timeout=timeout,
+                )
+                try:
+                    connection.request(
+                        "GET",
+                        request_target,
+                        headers={
+                            "User-Agent": "Mozilla/5.0",
+                            "Accept-Encoding": "identity",
+                            "Connection": "close",
+                        },
+                    )
+                    response = connection.getresponse()
+                    status = response.status
+                    content_type = response.getheader("Content-Type", "")
+                    if status in {301, 302, 303, 307, 308}:
+                        location = response.getheader("Location")
+                        response.close()
+                        if not location:
+                            return HttpFetchResult(
+                                b"", current_url, status, content_type,
+                                "redirect_missing_location",
+                            )
+                        current_url = urljoin(current_url, location)
+                        break
+                    body = response.read(max_bytes + 1)
+                    response.close()
+                    if len(body) > max_bytes:
+                        return HttpFetchResult(
+                            b"", current_url, status, content_type,
+                            "response_too_large",
+                        )
+                    return HttpFetchResult(
+                        body, current_url, status, content_type, None,
+                    )
+                except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+                    errors.append(f"{address}:{type(exc).__name__}:{str(exc)[:120]}")
+                finally:
+                    connection.close()
+            else:
+                return HttpFetchResult(
+                    b"", current_url, None, "", ";".join(errors) or "connect_failed",
+                )
+            # 只有 redirect 分支会从地址循环 break,下一轮重新校验并固定新目标。
+            continue
+        return HttpFetchResult(
+            b"", current_url, None, "", "too_many_redirects",
+        )
+
+    def _snapshot_fetch(self, url: str, *, max_bytes: int) -> HttpFetchResult:
+        response = self._fetch_pinned_https(
+            url, timeout=60, max_bytes=max_bytes,
+        )
+        if not self._fetch_succeeded(response):
+            raise ValueError(f"snapshot resource fetch failed: {response.error or response.status_code}")
+        if not response.body:
+            raise ValueError("snapshot resource is empty")
+        return response
+
+    def _build_scholarly_html_snapshot(
+        self,
+        html: str,
+        *,
+        document_url: str,
+        provider: str,
+    ) -> tuple[str, dict, dict[str, bytes]]:
+        """在内存中闭合资源后一次发布，避免失败候选留下可渲染半快照。"""
         from urllib.parse import urljoin
 
-        assets = self.job_dir / "assets"
-        srcs = dict.fromkeys(re.findall(r'<img[^>]+src="([^"]+)"', html))
-        n_ok = 0
-        for src in srcs:
-            if src.startswith("data:"):
+        styles, image_refs = self._html_static_references(html)
+        blobs: dict[str, bytes] = {}
+        records_by_source: dict[str, dict] = {}
+        records_by_alias: dict[str, dict] = {}
+        stylesheet_paths: list[str] = []
+        stylesheet_sources_seen: set[str] = set()
+        total_bytes = 0
+
+        def add_record(
+            request_url: str,
+            source_url: str,
+            body: bytes,
+            *,
+            kind: str,
+            media_type: str,
+            suffix: str,
+        ) -> str:
+            nonlocal total_bytes
+            existing = records_by_source.get(request_url)
+            if existing is not None:
+                if (
+                    existing["sha256"] != sha256_digest(body)
+                    or existing["source_url"] != source_url
+                ):
+                    raise ValueError("snapshot source URL changed within one fetch")
+                return existing["path"]
+            if request_url in records_by_alias or source_url in records_by_alias:
+                raise ValueError("snapshot URL alias has multiple resource identities")
+            total_bytes += len(body)
+            if total_bytes > SCHOLARLY_HTML_RESOURCE_TOTAL_MAX_BYTES:
+                raise ValueError("snapshot resources exceed total byte limit")
+            if len(records_by_source) >= SCHOLARLY_HTML_MAX_RESOURCES:
+                raise ValueError("snapshot resource count exceeds limit")
+            identity_body = request_url.encode("utf-8") + b"\0" + body
+            path = self._snapshot_asset_path(identity_body, suffix, image=kind == "image")
+            previous = blobs.get(path)
+            if previous is not None and previous != body:
+                raise ValueError("snapshot content-addressed path collision")
+            blobs[path] = body
+            records_by_source[request_url] = {
+                "kind": kind,
+                "path": path,
+                "request_url": request_url,
+                "source_url": source_url,
+                "sha256": sha256_digest(body),
+                "size_bytes": len(body),
+                "media_type": media_type,
+            }
+            records_by_alias[request_url] = records_by_source[request_url]
+            records_by_alias[source_url] = records_by_source[request_url]
+            return path
+
+        def fetch_binary(source_url: str) -> str:
+            response = self._snapshot_fetch(
+                source_url, max_bytes=SCHOLARLY_HTML_RESOURCE_MAX_BYTES,
+            )
+            media_type, suffix = self._resource_identity(
+                response.body, self._response_media_type(response),
+            )
+            kind = "image" if media_type.startswith("image/") else "font"
+            return add_record(
+                source_url,
+                response.final_url or source_url,
+                response.body,
+                kind=kind,
+                media_type=media_type,
+                suffix=suffix,
+            )
+
+        def visit_stylesheet(source_url: str, *, inline_body: bytes | None = None) -> None:
+            if source_url in stylesheet_sources_seen:
+                return
+            if len(stylesheet_sources_seen) >= SCHOLARLY_HTML_MAX_STYLESHEETS:
+                raise ValueError("snapshot stylesheet count exceeds limit")
+            stylesheet_sources_seen.add(source_url)
+            if inline_body is None:
+                response = self._snapshot_fetch(source_url, max_bytes=SCHOLARLY_HTML_CSS_MAX_BYTES)
+                media_type = self._response_media_type(response)
+                if media_type and media_type != "text/css":
+                    raise ValueError("snapshot stylesheet MIME mismatch")
+                body = response.body
+                canonical_source = response.final_url or source_url
+            else:
+                body = inline_body
+                canonical_source = source_url
+            imports, dependencies = iter_css_urls(body)
+            for imported in imports:
+                if imported.startswith(("data:", "#")):
+                    raise ValueError("snapshot stylesheet import is not fetchable")
+                visit_stylesheet(urljoin(canonical_source, imported))
+            for dependency in dependencies:
+                if dependency.startswith("#"):
+                    continue
+                if dependency.startswith("data:"):
+                    raise ValueError("snapshot stylesheet data resource is not allowed")
+                fetch_binary(urljoin(canonical_source, dependency))
+            path = add_record(
+                source_url,
+                canonical_source,
+                body,
+                kind="stylesheet",
+                media_type="text/css",
+                suffix=".css",
+            )
+            stylesheet_paths.append(path)
+
+        inline_index = 0
+        for kind, value in styles:
+            if kind == "link":
+                if value.startswith("data:"):
+                    raise ValueError("snapshot linked stylesheet data URL is not allowed")
+                visit_stylesheet(urljoin(document_url, value))
                 continue
-            # ★不加尾斜杠:页面 URL(…/html/1810.04805,无重定向)按 RFC 3986 相对解析时末段
-            # 被丢弃,恰是浏览器语义——img src 本就带版本目录(1810.04805v2/x1.png)。手拼 "/" 会把
-            # 末段当目录,拼出 …/1810.04805/1810.04805v2/x1.png 双段 404(线上:图全下载失败留外链)。
-            absolute = urljoin(base_url, src)
-            fname = re.sub(r"[^A-Za-z0-9._-]", "_", src.split("?")[0].strip("/"))[-80:]
-            try:
-                assets.mkdir(parents=True, exist_ok=True)
-                self.commands.run(
-                    ["curl", "-fsSL", "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "-o", str(assets / fname), "--", absolute], timeout=60)
-                html = html.replace(f'src="{src}"', f'src="assets/{fname}"')
-                n_ok += 1
-            except Exception as e:
-                # 失败:引用绝对化留痕(相对路径离开 arxiv 域必坏,绝对 URL 至少可在线渲染)。
-                html = html.replace(f'src="{src}"', f'src="{absolute}"')
-                self.log.warning("arxiv_html_image_failed", src=src[:120], error=str(e)[:120])
-        if n_ok:
-            self.log.info("arxiv_html_images_localized", count=n_ok, total=len(srcs))
-        return html
+            inline_index += 1
+            pseudo_url = f"{document_url}#flori-inline-style-{inline_index}"
+            visit_stylesheet(pseudo_url, inline_body=value.encode("utf-8"))
+
+        image_replacements: dict[str, str] = {}
+        for image_ref in image_refs:
+            if image_ref.startswith("data:"):
+                continue
+            absolute = urljoin(document_url, image_ref)
+            response = self._snapshot_fetch(
+                absolute, max_bytes=SCHOLARLY_HTML_RESOURCE_MAX_BYTES,
+            )
+            media_type, suffix = self._resource_identity(
+                response.body, self._response_media_type(response),
+            )
+            if not media_type.startswith("image/"):
+                raise ValueError("snapshot HTML resource is not an image")
+            path = add_record(
+                absolute,
+                response.final_url or absolute,
+                response.body,
+                kind="image",
+                media_type=media_type,
+                suffix=suffix,
+            )
+            image_replacements[image_ref] = path
+        rewritten = self._rewrite_html_images(html, image_replacements)
+        rewritten_bytes = rewritten.encode("utf-8")
+        snapshot = {
+            "format": SCHOLARLY_HTML_SNAPSHOT_FORMAT,
+            "format_version": SCHOLARLY_HTML_SNAPSHOT_VERSION,
+            "job_id": self.job_dir.name,
+            "provider": provider,
+            "document_url": document_url,
+            "html": {
+                "path": "input/source.html",
+                "sha256": sha256_digest(rewritten_bytes),
+                "size_bytes": len(rewritten_bytes),
+                "media_type": "text/html",
+            },
+            "stylesheets": stylesheet_paths,
+            "resources": sorted(records_by_source.values(), key=lambda item: item["path"].encode("utf-8")),
+        }
+        validate_scholarly_html_snapshot(
+            snapshot, expected_job_id=self.job_dir.name, source_html=rewritten_bytes,
+        )
+        return rewritten, snapshot, blobs
 
     def _fetch_arxiv_meta(self, arxiv_id: str) -> None:
         """arxiv API 取权威元数据 → stash self._arxiv_meta(由 _extract_metadata 并入 metadata.json)。
@@ -741,12 +1348,13 @@ class DownloadStep(StepBase):
         return source_meta
 
     @staticmethod
-    def _fetch_response(url: str, timeout: int) -> HttpFetchResult:
+    def _fetch_response(
+        url: str, timeout: int, *, max_bytes: int = 64 * 1024 * 1024,
+    ) -> HttpFetchResult:
         """urllib 抓取有界文档,保留状态,MIME,最终 URL 和 challenge 体."""
         import http.client
         import urllib.error
 
-        max_bytes = 64 * 1024 * 1024
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         opener = urllib.request.build_opener(_PublicUrlRedirectHandler())
         try:
@@ -799,9 +1407,11 @@ class DownloadStep(StepBase):
         return response.body.decode("utf-8", errors="replace")
 
     @staticmethod
-    def _fetch_html(url: str, timeout: int) -> tuple[str | None, str | None]:
+    def _fetch_html(
+        url: str, timeout: int, *, max_bytes: int = 64 * 1024 * 1024,
+    ) -> tuple[str | None, str | None]:
         """HTML 来源的 best-effort 兼容入口，论文 resolver 使用完整响应。"""
-        response = DownloadStep._fetch_response(url, timeout)
+        response = DownloadStep._fetch_response(url, timeout, max_bytes=max_bytes)
         if not DownloadStep._fetch_succeeded(response):
             return None, None
         if DownloadStep._has_pdf_signature(response.body):

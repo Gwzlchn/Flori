@@ -18,7 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from tests.conftest import make_fakeredis
 from api.main import create_app
 from shared.config import AppConfig
-from shared.models import Step, StepStatus
+from shared.models import Job, Step, StepStatus
 from shared.step_manifest import manifest_relative_path, validate_manifest
 from shared.step_output_commit import (
     StepOutput,
@@ -1003,6 +1003,136 @@ def _fake_success_runner(worker: Worker, *, mutate=None):
 
 
 class TestWorkerManifestFlow:
+    @pytest.mark.parametrize("global_isolation", [False, True])
+    @pytest.mark.asyncio
+    async def test_manifest_only_download_success_and_reuse_commit_new_manifest(
+        self, global_isolation, manifest_worker, worker_redis, worker_db,
+        worker_config, tmp_jobs_dir,
+    ):
+        manifest_worker.storage._isolate = global_isolation
+        worker_config.pipelines["test"]["steps"][0].update({
+            "name": "01_download",
+            "module": "steps.common.step_01_download",
+            "outputs": ["input/source.html"],
+        })
+        await manifest_worker.register()
+        claim = make_claim(step="01_download", exec_id="w_test:1")
+        worker_db.create_job(Job(
+            id=claim["job_id"], content_type="document", pipeline="test",
+            document_kind="research_paper", source="arxiv",
+        ))
+        canonical = tmp_jobs_dir / claim["job_id"]
+        _write(canonical, "job.json", json.dumps({
+            "url": "https://arxiv.org/abs/2305.14314",
+            "source": "arxiv",
+            "content_type": "document",
+        }).encode())
+        _write(canonical, "input/source.html", b"old-html")
+        await _prime_step(worker_redis, worker_db, claim, manifest_worker.worker_id)
+
+        async def first_run(ctx, on_progress, on_tick):
+            _write(ctx.work_dir, "input/source.html", b"new-html")
+            record = build_candidate_record(
+                ctx.step, {"input": "sha256:" + "0" * 64},
+            )
+            (ctx.work_dir / candidate_filename(ctx.step)).write_text(
+                json.dumps(record),
+            )
+            return 0, ""
+
+        manifest_worker.runner.run_step = first_run
+        await manifest_worker.execute(claim)
+
+        manifest_path = canonical / ".flori/steps/01_download/manifest.json"
+        first_manifest = json.loads(manifest_path.read_text())
+        assert first_manifest["execution"]["exec_id"] == "w_test:1"
+        assert (canonical / "input/source.html").read_bytes() == b"new-html"
+
+        async def reused_run(ctx, on_progress, on_tick):
+            record = build_candidate_record(
+                ctx.step, {"input": "sha256:" + "0" * 64}, reused=True,
+            )
+            (ctx.work_dir / candidate_filename(ctx.step)).write_text(
+                json.dumps(record),
+            )
+            return 0, ""
+
+        manifest_worker.runner.run_step = reused_run
+        claim2 = make_claim(step="01_download", exec_id="w_test:2")
+        await _prime_step(worker_redis, worker_db, claim2, manifest_worker.worker_id)
+        await manifest_worker.execute(claim2)
+
+        second_manifest = json.loads(manifest_path.read_text())
+        assert second_manifest["execution"]["exec_id"] == "w_test:2"
+        assert len(await lifecycle_payloads(worker_redis, "step_completed")) == 2
+
+        manifest_before_failure = manifest_path.read_bytes()
+
+        async def fail_commit(*args, **kwargs):
+            raise RuntimeError("commit unavailable")
+
+        manifest_worker.storage.commit_step_outputs = fail_commit
+        claim3 = make_claim(step="01_download", exec_id="w_test:3")
+        await _prime_step(worker_redis, worker_db, claim3, manifest_worker.worker_id)
+        await manifest_worker.execute(claim3)
+
+        assert manifest_path.read_bytes() == manifest_before_failure
+        assert (canonical / "input/source.html").read_bytes() == b"new-html"
+        assert len(await lifecycle_payloads(worker_redis, "step_completed")) == 2
+        assert len(await lifecycle_payloads(worker_redis, "step_failed")) == 1
+
+    @pytest.mark.parametrize("global_isolation", [False, True])
+    @pytest.mark.asyncio
+    async def test_manifest_only_download_cannot_report_done_without_commit(
+        self, global_isolation, manifest_worker, worker_redis, worker_db,
+        worker_config, tmp_jobs_dir,
+    ):
+        manifest_worker.storage._isolate = global_isolation
+        worker_config.pipelines["test"]["steps"][0].update({
+            "name": "01_download",
+            "module": "steps.common.step_01_download",
+            "outputs": ["input/source.html"],
+        })
+        await manifest_worker.register()
+        claim = make_claim(step="01_download", exec_id="w_test:1")
+        worker_db.create_job(Job(
+            id=claim["job_id"], content_type="document", pipeline="test",
+            document_kind="research_paper", source="arxiv",
+        ))
+        canonical = tmp_jobs_dir / claim["job_id"]
+        _write(canonical, "job.json", json.dumps({
+            "url": "https://arxiv.org/abs/2305.14314",
+            "source": "arxiv",
+            "content_type": "document",
+        }).encode())
+        _write(canonical, "input/source.html", b"old-html")
+        await _prime_step(worker_redis, worker_db, claim, manifest_worker.worker_id)
+
+        async def run_step(ctx, on_progress, on_tick):
+            assert ctx.work_dir != canonical
+            _write(ctx.work_dir, "input/source.html", b"new-html")
+            record = build_candidate_record(
+                ctx.step, {"input": "sha256:" + "0" * 64},
+            )
+            (ctx.work_dir / candidate_filename(ctx.step)).write_text(
+                json.dumps(record),
+            )
+            return 0, ""
+
+        async def skip_manifest(*args, **kwargs):
+            return None
+
+        manifest_worker.runner.run_step = run_step
+        manifest_worker._publish_step_manifest = skip_manifest
+
+        await manifest_worker.execute(claim)
+
+        assert (canonical / "input/source.html").read_bytes() == b"old-html"
+        assert await lifecycle_payloads(worker_redis, "step_completed") == []
+        failed = await lifecycle_payloads(worker_redis, "step_failed")
+        assert len(failed) == 1
+        assert "isolated download requires a committed manifest" in failed[0]["error"]
+
     @pytest.mark.asyncio
     async def test_success_publishes_manifest_then_done(
         self, manifest_worker, worker_redis, worker_db, tmp_jobs_dir,
@@ -1469,6 +1599,38 @@ class TestGatewayMixedVersionWindow:
 
 
 class TestLocalAttemptIsolation:
+    @pytest.mark.asyncio
+    async def test_arxiv_document_download_forces_manifest_only_attempt(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.delenv("FLORI_LOCAL_ATTEMPT_ISOLATION", raising=False)
+        storage = LocalStorage(tmp_path / "jobs")
+        canonical = tmp_path / "jobs" / "j_paper"
+        _write(canonical, "job.json", json.dumps({
+            "url": "https://arxiv.org/abs/2305.14314",
+            "source": "arxiv",
+            "content_type": "document",
+        }).encode())
+        _write(canonical, "input/source.html", b"old-html")
+
+        work_dir = await storage.pull("j_paper", "01_download")
+        assert work_dir != canonical
+        assert storage.requires_manifest_commit(work_dir) is True
+        (work_dir / "input/source.html").write_bytes(b"new-html")
+
+        await storage.push("j_paper", "01_download", work_dir)
+        assert (canonical / "input/source.html").read_bytes() == b"old-html"
+
+        _write(work_dir, "logs/01_download.log", b"diagnostic")
+        await storage.push(
+            "j_paper", "01_download", work_dir,
+            only_globs=diagnostics_globs("01_download", "job"),
+        )
+        assert (canonical / "logs/01_download.log").read_bytes() == b"diagnostic"
+
+        await storage.cleanup("j_paper", "01_download", work_dir)
+        assert not work_dir.exists()
+
     @pytest.mark.asyncio
     async def test_pull_copies_committed_view_and_push_writes_back(
         self, tmp_path, monkeypatch,

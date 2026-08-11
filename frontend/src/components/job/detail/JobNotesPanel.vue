@@ -87,14 +87,14 @@ defineEmits<{
       <span class="lead"><FileText :size="13" /> HTML 原文保留来源结构、公式和稳定锚点。</span>
       <a :href="sourceHtmlUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
     </div>
-    <iframe :src="sourceHtmlUrl" sandbox="" class="document-reader-frame" title="文档 HTML 原文" loading="lazy" />
+    <iframe :src="sourceHtmlUrl" sandbox="allow-same-origin" class="document-reader-frame" title="文档 HTML 原文" loading="lazy" />
   </div>
   <div v-else-if="isDocument && noteVariant === 'translated' && hasTranslation" class="document-reader-wrap">
     <div class="pdf-head">
       <span class="lead translated"><Languages :size="13" /> 与原文 block 严格对齐的中文译文。</span>
       <a :href="translatedHtmlUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
     </div>
-    <iframe :src="translatedHtmlUrl" sandbox="" class="document-reader-frame" title="文档中文译文" loading="lazy" />
+    <iframe :src="translatedHtmlUrl" sandbox="allow-same-origin" class="document-reader-frame" title="文档中文译文" loading="lazy" />
   </div>
   <div v-else class="notes-wrap">
     <div class="card pad prose max-w-none">

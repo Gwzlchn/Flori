@@ -30,12 +30,29 @@ from shared.storage import (
     read_file_bounded,
     read_verification_artifact_bounded,
 )
+from shared.step_manifest import (
+    MANIFEST_MAX_CANONICAL_BYTES,
+    ManifestError,
+    manifest_relative_path,
+    validate_manifest,
+)
+from shared.scholarly_html_snapshot import (
+    SCHOLARLY_HTML_CSS_MAX_BYTES,
+    SCHOLARLY_HTML_RESOURCE_MAX_BYTES,
+    SCHOLARLY_HTML_SNAPSHOT_MAX_BYTES,
+    SCHOLARLY_HTML_SNAPSHOT_PATH,
+    ScholarlyHtmlSnapshotError,
+    ScholarlyHtmlSnapshotLimitError,
+    decode_scholarly_html_snapshot,
+    sha256_digest,
+)
 from shared.step_scope import JOB_SCOPE, part_scope
 from api.deps import get_config, get_db, get_storage, validate_path_segment, verify_token
 from api.services.document_reader import (
     DOCUMENT_HTML_MAX_BYTES,
     DocumentReaderError,
     DocumentReaderLimitError,
+    build_snapshot_css,
     document_html_headers,
     render_document_html,
     render_document_model_html,
@@ -418,6 +435,140 @@ async def _validated_document_model(
         raise HTTPException(422, "document model is invalid")
 
 
+def _manifest_output_index(manifest: dict) -> dict[str, dict]:
+    return {
+        str(entry["path"]): entry
+        for entry in manifest.get("outputs") or []
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    }
+
+
+def _output_record_matches(entry: dict | None, data: bytes, *, digest: str | None = None) -> bool:
+    return _output_record_matches_identity(
+        entry, size_bytes=len(data), digest=digest or sha256_digest(data),
+    )
+
+
+def _output_record_matches_identity(
+    entry: dict | None,
+    *,
+    size_bytes: int,
+    digest: str,
+) -> bool:
+    return bool(
+        entry
+        and entry.get("size_bytes") == size_bytes
+        and entry.get("sha256") == digest
+    )
+
+
+async def _validated_scholarly_snapshot(
+    storage: StorageBackend,
+    job_id: str,
+    source: bytes | None = None,
+) -> tuple[dict, dict[str, dict]] | None:
+    raw = await read_file_bounded(
+        storage, job_id, SCHOLARLY_HTML_SNAPSHOT_PATH,
+        SCHOLARLY_HTML_SNAPSHOT_MAX_BYTES,
+    )
+    if raw is None:
+        return None
+    if len(raw) > SCHOLARLY_HTML_SNAPSHOT_MAX_BYTES:
+        raise HTTPException(413, "scholarly HTML snapshot exceeds reader limit")
+    manifest_raw = await read_file_bounded(
+        storage,
+        job_id,
+        manifest_relative_path(JOB_SCOPE, "01_download"),
+        MANIFEST_MAX_CANONICAL_BYTES,
+    )
+    if manifest_raw is None or len(manifest_raw) > MANIFEST_MAX_CANONICAL_BYTES:
+        raise HTTPException(422, "scholarly HTML snapshot has no current download manifest")
+    try:
+        manifest = json.loads(manifest_raw)
+        validate_manifest(manifest)
+    except (json.JSONDecodeError, TypeError, ValueError, ManifestError) as exc:
+        raise HTTPException(
+            422, "scholarly HTML snapshot has no current download manifest",
+        ) from exc
+    if (
+        manifest.get("outcome") != "done"
+        or manifest.get("job_id") != job_id
+        or manifest.get("step") != "01_download"
+        or (manifest.get("scope") or {}).get("scope_key") != JOB_SCOPE
+    ):
+        raise HTTPException(422, "scholarly HTML snapshot has no current download manifest")
+    outputs = _manifest_output_index(manifest)
+    if not _output_record_matches(outputs.get(SCHOLARLY_HTML_SNAPSHOT_PATH), raw):
+        raise HTTPException(422, "scholarly HTML snapshot is not bound to download manifest")
+    try:
+        snapshot = decode_scholarly_html_snapshot(
+            raw, expected_job_id=job_id, source_html=source,
+        )
+    except ScholarlyHtmlSnapshotLimitError as exc:
+        raise HTTPException(413, str(exc)) from exc
+    except ScholarlyHtmlSnapshotError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    html_record = snapshot["html"]
+    if source is None:
+        source_bound = _output_record_matches_identity(
+            outputs.get("input/source.html"),
+            size_bytes=html_record["size_bytes"],
+            digest=html_record["sha256"],
+        )
+    else:
+        source_bound = _output_record_matches(
+            outputs.get("input/source.html"), source, digest=html_record["sha256"],
+        )
+    if not source_bound:
+        raise HTTPException(422, "scholarly HTML source is not bound to download manifest")
+    for record in snapshot["resources"]:
+        entry = outputs.get(record["path"])
+        if not entry or (
+            entry.get("size_bytes") != record["size_bytes"]
+            or entry.get("sha256") != record["sha256"]
+        ):
+            raise HTTPException(422, "scholarly HTML resource is not bound to download manifest")
+    return snapshot, outputs
+
+
+async def _snapshot_stylesheets(
+    storage: StorageBackend,
+    job_id: str,
+    snapshot: dict,
+) -> tuple[str, dict[str, str]]:
+    resources = {record["path"]: record for record in snapshot["resources"]}
+    stylesheets: list[tuple[dict, bytes]] = []
+    for path in snapshot["stylesheets"]:
+        record = resources[path]
+        data = await read_file_bounded(
+            storage, job_id, path, min(record["size_bytes"], SCHOLARLY_HTML_CSS_MAX_BYTES),
+        )
+        if (
+            data is None
+            or len(data) != record["size_bytes"]
+            or sha256_digest(data) != record["sha256"]
+        ):
+            raise HTTPException(422, "scholarly HTML stylesheet bytes do not match snapshot")
+        stylesheets.append((record, data))
+    try:
+        css = await asyncio.to_thread(
+            build_snapshot_css,
+            stylesheets,
+            job_id=job_id,
+            resources=resources,
+        )
+    except ScholarlyHtmlSnapshotLimitError as exc:
+        raise HTTPException(413, str(exc)) from exc
+    except ScholarlyHtmlSnapshotError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    digests = {
+        path: str(record["sha256"])
+        for path, record in resources.items()
+        if record["kind"] in {"font", "image"}
+    }
+    return css, digests
+
+
 async def _render_document_reader(function, /, *args, **kwargs) -> bytes:
     try:
         return await asyncio.to_thread(function, *args, **kwargs)
@@ -461,15 +612,71 @@ async def get_document_source(
             target_segment=segment, target_exact=exact,
         )
     else:
+        snapshot = await _validated_scholarly_snapshot(storage, job_id, source)
+        if snapshot is None:
+            snapshot_css = None
+            snapshot_resources = None
+        else:
+            snapshot_css, snapshot_resources = await _snapshot_stylesheets(
+                storage, job_id, snapshot[0],
+            )
         content = await _render_document_reader(
             render_document_html,
             source, job_id=job_id, document=model,
             target_segment=segment, target_exact=exact,
+            snapshot_css=snapshot_css,
+            snapshot_resource_digests=snapshot_resources,
         )
     return Response(
         content=content,
         media_type="text/html; charset=utf-8",
         headers=document_html_headers(),
+    )
+
+
+@router.get(
+    "/{job_id}/document/resource", response_class=Response, responses=_BINARY_RESPONSE,
+)
+async def get_document_resource(
+    job_id: str,
+    path: str = Query(min_length=1, max_length=512),
+    storage: StorageBackend = Depends(get_storage),
+):
+    """返回当前下载manifest绑定的论文图片或字体;原始CSS永不直接下发。"""
+    _validate_job_id(job_id)
+    validated = await _validated_scholarly_snapshot(storage, job_id)
+    if validated is None:
+        raise HTTPException(404, "scholarly HTML snapshot not found")
+    snapshot, _ = validated
+    record = next(
+        (
+            item for item in snapshot["resources"]
+            if item["path"] == path and item["kind"] in {"font", "image"}
+        ),
+        None,
+    )
+    if record is None:
+        raise HTTPException(404, "scholarly HTML resource not found")
+    data = await read_file_bounded(
+        storage, job_id, path,
+        min(record["size_bytes"], SCHOLARLY_HTML_RESOURCE_MAX_BYTES),
+    )
+    if (
+        data is None
+        or len(data) != record["size_bytes"]
+        or sha256_digest(data) != record["sha256"]
+    ):
+        raise HTTPException(422, "scholarly HTML resource bytes do not match snapshot")
+    return Response(
+        content=data,
+        media_type=record["media_type"],
+        headers={
+            "Cache-Control": "public, max-age=604800, immutable",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cross-Origin-Resource-Policy": "same-origin",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

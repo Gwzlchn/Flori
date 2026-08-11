@@ -250,6 +250,10 @@ class TestSemanticAttestationPipeline:
         self, configs_dir,
     ):
         jobs = load_yaml(configs_dir / "pipelines.yaml")["document"]["jobs"]
+        assert jobs["01_download"]["version"] == "6"
+        assert "input/html_snapshot.json" in jobs["01_download"]["outputs"]
+        assert "input/html_assets/*" in jobs["01_download"]["outputs"]
+        assert "assets/*" not in jobs["01_download"]["outputs"]
         assert "06_semantic_attestation" not in jobs
         assert jobs["04_translate"]["needs"] == ["03_structure"]
         assert jobs["04_translate"]["allow_failure"] is True

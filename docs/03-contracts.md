@@ -630,16 +630,27 @@ Document 原生阅读端点：
 ```
 GET /api/jobs/{id}/document/source?segment=&exact=      → text/html
 GET /api/jobs/{id}/document/translation?segment=&exact= → text/html
+GET /api/jobs/{id}/document/resource?path=<rel>         → image/* | font/*
 ```
 
 `source` 对 `generic_html` 从已校验的 `intermediate/document.json` 生成规范正文投影；不可变
 `input/source.html` 仍是原始证据与 HTML locator 真源,但不会把站点导航、页脚和原站脚本重放进阅读面。
-`scholarly_html` 从不可变HTML生成安全副本,保留MathML、受控SVG、LaTeXML/ar5iv语义class和有界布局属性;
-阅读器用仓库内固定兼容CSS恢复标题、作者、摘要、Figure/Table、公式、定理和参考文献版式,不执行上游
-`style/link`。`translation` 从 `output/translated.html` 二次净化后返回。两者都拒绝活动脚本、远程CSS、
-远程图片/SVG引用和CSS资源函数,只把同Job相对资源重写到受控artifact端点;CSP显式关闭script/connect/
-object/frame/worker/media并叠加response sandbox,前端仍以空权限sandbox iframe承载。源HTML、CSS声明或
-资源值畸形时只丢弃对应不可信结构,不会修改持久化原文件。证据锚点只由已验证Document Model的DOM
+`scholarly_html` 的 `01_download` 按官方 arXiv HTML、ar5iv HTML 顺序尝试,只有 HTML、样式表、递归
+`@import`、字体和图片的有界闭包全部下载并校验后才写入 `input/source.html`、
+`input/html_snapshot.json` 和 `input/html_assets/*`。任一必需资源失败时整份候选失效并尝试下一来源;
+两个来源都失败则只保留 PDF,不发布半快照或回退在线资源。快照与当前 `01_download` 成功 manifest
+逐文件绑定 SHA-256、大小、MIME、最终 URL 和来源 URL；只有该manifest发布后闭包才成为可读权威,
+因此 portable 备份按普通成功产物一并收录。
+
+原文阅读器从不可变HTML生成安全副本,保留MathML、受控SVG、LaTeXML/ar5iv语义class和有界布局属性;
+有快照时按上游顺序解析并净化CSS,删除 `@import` 与活动声明,把每个 `url()` 改写到同Job、同manifest
+绑定的 `document/resource`。浏览器不会直接读取原始CSS,资源端点也不下发CSS;只返回已重验摘要与
+MIME的字体和位图。旧Job没有快照时继续使用仓库内固定兼容CSS,不会联网补资源。`translation` 从
+`output/translated.html` 二次净化后返回。两者都拒绝活动脚本和任何未入快照的远程CSS、图片、字体
+或SVG引用;CSP显式关闭script/connect/object/frame/worker/media并叠加response sandbox。前端iframe
+只开放 `allow-same-origin` 让同源字体/图片可加载,不开放脚本、表单、导航或弹窗能力。源HTML、CSS声明
+或资源值畸形时 fail-closed,不会修改持久化原文件或放宽
+为外联。证据锚点只由已验证Document Model的DOM
 locator生成;译文内嵌segment还必须属于同一Document Model且全篇唯一。源HTML自带的`flori-*` class、
 `source-*` ID和`data-source-segment`不能生成内部高亮。阅读器同时限制节点数、嵌套深度、属性总数与
 输出字节;越界返回413,身份冲突返回422,解析在线程中执行而不阻塞API事件循环。
@@ -3055,6 +3066,39 @@ video:
 新增内容类型的 DAG 仍在此文件声明。若复用概念步,必须同时在来源契约中显式登记该 pipeline;未知类型不得靠默认分支猜测来源。
 
 #### Document 文件契约
+
+学术 HTML 下载成功时还必须发布 `input/html_snapshot.json`。该文件是阅读资源闭包真源,格式为
+`flori-scholarly-html-snapshot` v1：
+
+```json
+{
+  "format": "flori-scholarly-html-snapshot",
+  "format_version": 1,
+  "job_id": "jobs_arxiv_...",
+  "provider": "arxiv",
+  "document_url": "https://arxiv.org/html/...",
+  "html": {"path": "input/source.html", "sha256": "sha256:...",
+    "size_bytes": 123, "media_type": "text/html"},
+  "stylesheets": ["input/html_assets/resource-<digest>.css"],
+  "resources": [
+    {"kind": "stylesheet", "path": "input/html_assets/resource-<digest>.css",
+     "request_url": "https://.../paper.css", "source_url": "https://.../paper.css",
+     "sha256": "sha256:...", "size_bytes": 123, "media_type": "text/css"}
+  ]
+}
+```
+
+`resources[]` 只允许 `stylesheet|font|image`,按 `path` 的UTF-8字节序排列；任意记录的
+`request_url|source_url` 在整个数组中全局唯一,同一记录两者相等不算重复；
+`stylesheets[]` 是样式应用顺序并且必须逐项指向 `stylesheet` 记录。HTML上限32 MiB,快照JSON上限1 MiB,单CSS 2 MiB,
+单字体/图片8 MiB,资源总量32 MiB,最多256项和32份样式,HTML静态引用事件最多4096次。HTML、快照与每项资源都必须是同一
+`01_download` 成功manifest的精确输出。CSS解析后最多10000条规则、100000条声明、200000个token、32层嵌套和
+4 MiB合并净化输出。根HTML与每个依赖URL都在请求前解析全部地址并拒绝任一非公网结果,连接固定到该次校验的
+数字IP,TLS证书与SNI仍验证原始域名；每次重定向重新执行同一过程,根HTML还逐跳限制在声明 provider 的主机集合。
+本地存储即使未全局启用 attempt isolation,arXiv 文档 `01_download` 也强制在独立副本生成候选；成功业务输出只经
+manifest-last 提交协议发布,运行与下载阶段不覆盖旧闭包。逐文件提交窗口中断时旧manifest会让半快照校验失败,
+不得接受混代资源；后续幂等重试负责完成替换。越界、摘要/MIME/路径/Job身份不符
+或存在未闭合外部依赖时拒绝渲染。
 
 `intermediate/document.json` 使用 schema v2，顶层至少包含：
 

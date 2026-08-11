@@ -5,6 +5,7 @@
 """
 
 import json
+import socket
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from steps.common import step_01_download as download_module
 from steps.common.step_01_download import DownloadStep, HttpFetchResult
 from tests.steps.conftest import make_step_config
 
@@ -349,7 +351,7 @@ class TestDownloadArxiv:
                           document_kind="research_paper")
         # 元数据 curl 返回空响应(ParseError → best-effort 兜底);HTML 抓取 patch 掉(不碰网络)。
         with patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="")) as run, \
-                patch.object(step, "_fetch_html", return_value=(None, None)):
+                patch.object(step, "_fetch_scholarly_html", return_value=(None, None)):
             step._download_arxiv("https://arxiv.org/abs/2301.00001")
             cmd = run.call_args[0][0]
             assert cmd[0] == "curl"
@@ -792,6 +794,248 @@ class TestExtractMetadataTypes:
 # _fetch_arxiv_html(HTML 源:官方 → ar5iv 回退;图片本地化)
 
 class TestFetchArxivHtml:
+    def test_static_reference_parser_ignores_script_pseudotags_and_reads_unquoted_attrs(self):
+        styles, images = DownloadStep._html_static_references(
+            '<script>"<img src=evil.png>"</script>'
+            '<link rel=stylesheet href=paper.css><img src=figure.png>'
+        )
+
+        assert styles == [("link", "paper.css")]
+        assert images == ["figure.png"]
+        assert 'src="input/html_assets/figure.png"' in DownloadStep._rewrite_html_images(
+            '<img src=figure.png>',
+            {"figure.png": "input/html_assets/figure.png"},
+        )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://cdn.example/paper.css",
+            "https://user:secret@cdn.example/paper.css",
+            "https://cdn.example/paper.woff2#font",
+        ],
+    )
+    def test_snapshot_resource_rejects_unsafe_url_before_network(self, tmp_path, url):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path)
+        with patch.object(download_module.socket, "getaddrinfo") as resolve:
+            with pytest.raises(ValueError, match="uncredentialed HTTPS"):
+                step._snapshot_fetch(url, max_bytes=1024)
+        resolve.assert_not_called()
+
+    @pytest.mark.parametrize("address", ["100.64.0.1", "192.0.0.8"])
+    def test_snapshot_resource_rejects_resolved_non_global_address(
+        self, address,
+    ):
+        info = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (address, 443))
+        with patch.object(download_module.socket, "getaddrinfo", return_value=[info]):
+            with pytest.raises(ValueError, match="non-public address"):
+                download_module._public_https_target("https://cdn.example/paper.css")
+
+    def test_snapshot_resource_accepts_resolved_global_address(self):
+        info = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", 443))
+        with patch.object(download_module.socket, "getaddrinfo", return_value=[info]):
+            assert download_module._public_https_target(
+                "https://cdn.example/paper.css",
+            ) == ("cdn.example", 443, ("8.8.8.8",))
+
+    def test_snapshot_resource_rejects_https_to_http_redirect(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path)
+
+        class RedirectResponse:
+            status = 302
+
+            @staticmethod
+            def getheader(name, default=None):
+                return {
+                    "Content-Type": "text/plain",
+                    "Location": "http://internal.example/resource",
+                }.get(name, default)
+
+            @staticmethod
+            def close():
+                return None
+
+        class FakeConnection:
+            def __init__(self, host, port, pinned_ip, *, timeout):
+                assert (host, port, pinned_ip, timeout) == (
+                    "cdn.example", 443, "203.0.113.8", 60,
+                )
+
+            def request(self, *args, **kwargs):
+                return None
+
+            @staticmethod
+            def getresponse():
+                return RedirectResponse()
+
+            @staticmethod
+            def close():
+                return None
+
+        def resolve(url):
+            if url.startswith("http://"):
+                raise ValueError("snapshot resource URL must be uncredentialed HTTPS")
+            return "cdn.example", 443, ("203.0.113.8",)
+
+        with patch.object(download_module, "_public_https_target", side_effect=resolve), \
+                patch.object(download_module, "_PinnedHTTPSConnection", FakeConnection):
+            with pytest.raises(ValueError, match="uncredentialed HTTPS"):
+                step._snapshot_fetch(
+                    "https://cdn.example/paper.css", max_bytes=1024,
+                )
+
+    def test_snapshot_https_connection_receives_validated_numeric_ip(self):
+        class OkResponse:
+            status = 200
+
+            @staticmethod
+            def getheader(name, default=None):
+                return "text/css" if name == "Content-Type" else default
+
+            @staticmethod
+            def read(size):
+                assert size == 1025
+                return b".paper{color:#123}"
+
+            @staticmethod
+            def close():
+                return None
+
+        observed = {}
+
+        class FakeConnection:
+            def __init__(self, host, port, pinned_ip, *, timeout):
+                observed["target"] = (host, port, pinned_ip, timeout)
+
+            def request(self, method, target, *, headers):
+                observed["request"] = (method, target, headers["Host"] if "Host" in headers else None)
+
+            @staticmethod
+            def getresponse():
+                return OkResponse()
+
+            @staticmethod
+            def close():
+                return None
+
+        with patch.object(
+            download_module, "_public_https_target",
+            return_value=("cdn.example", 443, ("198.51.100.8",)),
+        ), patch.object(download_module, "_PinnedHTTPSConnection", FakeConnection):
+            response = DownloadStep._fetch_pinned_https(
+                "https://cdn.example/assets/paper.css?rev=1",
+                timeout=60,
+                max_bytes=1024,
+            )
+
+        assert observed["target"] == ("cdn.example", 443, "198.51.100.8", 60)
+        assert observed["request"][:2] == (
+            "GET", "/assets/paper.css?rev=1",
+        )
+        assert response.body == b".paper{color:#123}"
+
+    def test_scholarly_root_uses_provider_allowlist_and_validates_final_url(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(
+            job_dir, tmp_path, source="arxiv", content_type="document",
+            document_kind="research_paper",
+        )
+        body = b"<html><body><article class='ltx_document'>paper</article></body></html>"
+        with patch.object(
+            step, "_fetch_pinned_https",
+            return_value=HttpFetchResult(
+                body, "https://arxiv.org/html/2305.14314v1", 200,
+                "text/html; charset=utf-8", None,
+            ),
+        ) as fetch:
+            html, final_url = step._fetch_scholarly_html(
+                "https://arxiv.org/html/2305.14314", provider="arxiv",
+            )
+
+        assert "ltx_document" in html
+        assert final_url == "https://arxiv.org/html/2305.14314v1"
+        fetch.assert_called_once_with(
+            "https://arxiv.org/html/2305.14314",
+            timeout=60,
+            max_bytes=download_module.SCHOLARLY_HTML_SOURCE_MAX_BYTES,
+            allowed_hosts=frozenset({"arxiv.org", "www.arxiv.org"}),
+        )
+
+        with patch.object(
+            step, "_fetch_pinned_https",
+            return_value=HttpFetchResult(
+                body, "https://evil.example/html/2305.14314", 200,
+                "text/html", None,
+            ),
+        ), pytest.raises(ValueError, match="provider host mismatch"):
+            step._fetch_scholarly_html(
+                "https://arxiv.org/html/2305.14314", provider="arxiv",
+            )
+
+    def test_pinned_root_redirect_does_not_request_unapproved_host(self):
+        class RedirectResponse:
+            status = 302
+
+            @staticmethod
+            def getheader(name, default=None):
+                return {
+                    "Content-Type": "text/html",
+                    "Location": "https://evil.example/html/paper",
+                }.get(name, default)
+
+            @staticmethod
+            def close():
+                return None
+
+        class FakeConnection:
+            def __init__(self, host, port, pinned_ip, *, timeout):
+                assert host == "arxiv.org"
+
+            def request(self, *args, **kwargs):
+                return None
+
+            @staticmethod
+            def getresponse():
+                return RedirectResponse()
+
+            @staticmethod
+            def close():
+                return None
+
+        resolve = MagicMock(return_value=("arxiv.org", 443, ("198.51.100.8",)))
+        with patch.object(download_module, "_public_https_target", resolve), \
+                patch.object(download_module, "_PinnedHTTPSConnection", FakeConnection):
+            response = DownloadStep._fetch_pinned_https(
+                "https://arxiv.org/html/2305.14314",
+                timeout=60,
+                max_bytes=1024,
+                allowed_hosts=frozenset({"arxiv.org"}),
+            )
+
+        assert response.error == "provider_host_not_allowed"
+        assert resolve.call_count == 1
+
+    def test_static_reference_parser_bounds_chunks_and_reference_events(self, monkeypatch):
+        monkeypatch.setattr(download_module, "SCHOLARLY_HTML_CSS_MAX_BYTES", 8)
+        with pytest.raises(ValueError, match="stylesheet exceeds"):
+            DownloadStep._html_static_references(
+                "<style>123456789</style>",
+            )
+
+        monkeypatch.setattr(download_module, "SCHOLARLY_HTML_MAX_REFERENCE_EVENTS", 2)
+        with pytest.raises(ValueError, match="reference count"):
+            DownloadStep._html_static_references(
+                '<img src="same.png"><img src="same.png"><img src="same.png">',
+            )
+
+        attributes = " ".join(f'data-{index}="x"' for index in range(257))
+        with pytest.raises(ValueError, match="attribute count"):
+            DownloadStep._html_static_references(
+                f'<img src="figure.png" {attributes}>',
+            )
+
     def test_fetch_and_localize(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
@@ -800,20 +1044,25 @@ class TestFetchArxivHtml:
             '<html><body><div class="ltx_page_main">'
             '<img src="x1v2/x1.png"></div></body></html>'
         )
-        with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
-                patch.object(step.commands, "run", return_value=SimpleNamespace(stdout="")) as run:
+        image = b"\x89PNG\r\n\x1a\n" + b"x" * 16
+        with patch.object(step, "_fetch_scholarly_html", return_value=(html, "https://arxiv.org/html/x1")), \
+                patch.object(step, "_snapshot_fetch", return_value=HttpFetchResult(
+                    image, "https://arxiv.org/html/x1v2/x1.png", 200, "image/png", None,
+                )):
             step._fetch_arxiv_html("1810.04805")
         saved = (job_dir / "input" / "source.html").read_text(encoding="utf-8")
-        assert 'src="assets/x1v2_x1.png"' in saved        # 引用重写为本地 assets(扁平名含相对目录段)
-        curl_cmd = run.call_args[0][0]
-        assert "https://arxiv.org/html/x1v2/x1.png" in curl_cmd  # RFC3986:base 末段丢弃(浏览器语义,无手拼斜杠)
+        assert 'src="input/html_assets/image-' in saved
+        snapshot = json.loads((job_dir / "input/html_snapshot.json").read_text())
+        assert snapshot["provider"] == "arxiv"
+        assert snapshot["resources"][0]["request_url"] == "https://arxiv.org/html/x1v2/x1.png"
+        assert snapshot["resources"][0]["sha256"].startswith("sha256:")
 
     def test_ar5iv_fallback_then_unavailable(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
                           document_kind="research_paper")
         # 官方与 ar5iv 都无 LaTeXML 产物(None / 落地页无 ltx_)→ 不写 source.html。
-        with patch.object(step, "_fetch_html", side_effect=[(None, None), ("<html>no latexml</html>", "u")]):
+        with patch.object(step, "_fetch_scholarly_html", side_effect=[(None, None), ("<html>no latexml</html>", "u")]):
             step._fetch_arxiv_html("9901.00001")
         assert not (job_dir / "input" / "source.html").exists()
 
@@ -824,7 +1073,7 @@ class TestFetchArxivHtml:
         truncated = '<html><body><div class="ltx_page_main"><math><mi>x</mi>'
         complete = '<html><body><div class="ltx_page_main">ok</div></body></html>'
         with patch.object(
-            step, "_fetch_html",
+            step, "_fetch_scholarly_html",
             side_effect=[
                 (truncated, "https://arxiv.org/html/2205.14135v2"),
                 (complete, "https://ar5iv.labs.arxiv.org/html/2205.14135"),
@@ -841,14 +1090,14 @@ class TestFetchArxivHtml:
                           document_kind="research_paper")
         truncated = '<html><body><div class="ltx_page_main"><math><mi>x</mi>'
         with patch.object(
-            step, "_fetch_html",
+            step, "_fetch_scholarly_html",
             side_effect=[(truncated, "official"), (truncated, "ar5iv")],
         ):
             step._fetch_arxiv_html("2205.14135")
 
         assert not (job_dir / "input/source.html").exists()
 
-    def test_image_download_failure_keeps_absolute_url(self, tmp_path):
+    def test_image_download_failure_rejects_incomplete_html_snapshot(self, tmp_path):
         job_dir = _make_job_dir(tmp_path)
         step = _make_step(job_dir, tmp_path, source="arxiv", content_type="document",
                           document_kind="research_paper")
@@ -856,8 +1105,167 @@ class TestFetchArxivHtml:
             '<html><body><div class="ltx_page_main">'
             '<img src="x1v2/x1.png"></div></body></html>'
         )
-        with patch.object(step, "_fetch_html", return_value=(html, "https://arxiv.org/html/x1")), \
-                patch.object(step.commands, "run", side_effect=RuntimeError("curl fail")):
+        with patch.object(
+            step, "_fetch_scholarly_html",
+            side_effect=[
+                (html, "https://arxiv.org/html/x1"),
+                (html, "https://ar5iv.labs.arxiv.org/html/x1"),
+            ],
+        ), \
+                patch.object(step, "_snapshot_fetch", side_effect=ValueError("fetch fail")):
             step._fetch_arxiv_html("1810.04805")
-        saved = (job_dir / "input" / "source.html").read_text(encoding="utf-8")
-        assert 'src="https://arxiv.org/html/x1v2/x1.png"' in saved  # 失败留绝对 URL(RFC3986 语义拼)
+        assert not (job_dir / "input/source.html").exists()
+        assert not (job_dir / "input/html_snapshot.json").exists()
+
+    def test_failed_refetch_cannot_reissue_old_snapshot_outputs(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(
+            job_dir, tmp_path, source="arxiv", content_type="document",
+            document_kind="research_paper",
+        )
+        (job_dir / "input/source.html").write_text("<html>old</html>")
+        (job_dir / "input/html_snapshot.json").write_text('{"old":true}')
+        (job_dir / "input/html_assets").mkdir()
+        (job_dir / "input/html_assets/old.css").write_text(".old{}")
+
+        with patch.object(step, "_fetch_scholarly_html", return_value=(None, None)):
+            step._fetch_arxiv_html("1810.04805")
+
+        assert not (job_dir / "input/source.html").exists()
+        assert not (job_dir / "input/html_snapshot.json").exists()
+        assert not (job_dir / "input/html_assets").exists()
+
+    def test_unexpected_root_fetch_error_preserves_old_snapshot_outputs(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(
+            job_dir, tmp_path, source="arxiv", content_type="document",
+            document_kind="research_paper",
+        )
+        (job_dir / "input/source.html").write_bytes(b"old-html")
+        (job_dir / "input/html_snapshot.json").write_bytes(b'{"old":true}')
+        (job_dir / "input/html_assets").mkdir()
+        (job_dir / "input/html_assets/old.css").write_bytes(b".old{}")
+
+        with patch.object(
+            step, "_fetch_scholarly_html", side_effect=RuntimeError("unexpected"),
+        ), pytest.raises(RuntimeError, match="unexpected"):
+            step._fetch_arxiv_html("1810.04805")
+
+        assert (job_dir / "input/source.html").read_bytes() == b"old-html"
+        assert (job_dir / "input/html_snapshot.json").read_bytes() == b'{"old":true}'
+        assert (job_dir / "input/html_assets/old.css").read_bytes() == b".old{}"
+
+    def test_snapshot_cleanup_unlinks_asset_symlink_without_touching_target(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(job_dir, tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        protected = outside / "protected.css"
+        protected.write_text(".protected{}")
+        (job_dir / "input/html_assets").symlink_to(outside, target_is_directory=True)
+
+        step._clear_scholarly_html_snapshot()
+
+        assert protected.read_text() == ".protected{}"
+        assert not (job_dir / "input/html_assets").exists()
+
+    def test_oversized_snapshot_json_rejects_provider_before_publish(
+        self, tmp_path, monkeypatch,
+    ):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(
+            job_dir, tmp_path, source="arxiv", content_type="document",
+            document_kind="research_paper",
+        )
+        html = '<html><body><article class="ltx_document">paper</article></body></html>'
+        monkeypatch.setattr(download_module, "SCHOLARLY_HTML_SNAPSHOT_MAX_BYTES", 1)
+
+        with patch.object(
+            step, "_fetch_scholarly_html",
+            side_effect=[
+                (html, "https://arxiv.org/html/2305.14314"),
+                (html, "https://ar5iv.labs.arxiv.org/html/2305.14314"),
+            ],
+        ):
+            step._fetch_arxiv_html("2305.14314")
+
+        assert not (job_dir / "input/source.html").exists()
+        assert not (job_dir / "input/html_snapshot.json").exists()
+
+    def test_snapshots_imported_css_fonts_and_images_in_dependency_order(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(
+            job_dir, tmp_path, source="arxiv", content_type="document",
+            document_kind="research_paper",
+        )
+        html = """<html><head><link rel="stylesheet" href="/assets/main.css"></head>
+        <body><article class="ltx_document"><img src="figures/x.png"></article></body></html>"""
+        main_css = b"@import url(fonts.css);.ltx_document{font-family:Paper}"
+        font_css = b"@font-face{font-family:Paper;src:url(paper.woff2)}"
+        font = b"wOF2" + b"f" * 32
+        image = b"\x89PNG\r\n\x1a\n" + b"i" * 32
+        responses = [
+            HttpFetchResult(main_css, "https://arxiv.org/assets/main.css", 200, "text/css", None),
+            HttpFetchResult(font_css, "https://arxiv.org/assets/fonts.css", 200, "text/css", None),
+            HttpFetchResult(font, "https://arxiv.org/assets/paper.woff2", 200, "font/woff2", None),
+            HttpFetchResult(image, "https://arxiv.org/figures/x.png", 200, "image/png", None),
+        ]
+
+        with patch.object(step, "_fetch_scholarly_html", return_value=(html, "https://arxiv.org/html/2305.14314")), \
+                patch.object(step, "_snapshot_fetch", side_effect=responses):
+            step._fetch_arxiv_html("2305.14314")
+
+        snapshot = json.loads((job_dir / "input/html_snapshot.json").read_text())
+        by_kind = {}
+        for record in snapshot["resources"]:
+            by_kind.setdefault(record["kind"], []).append(record)
+            assert (job_dir / record["path"]).read_bytes()
+        assert [
+            next(record for record in snapshot["resources"] if record["path"] == path)["request_url"]
+            for path in snapshot["stylesheets"]
+        ] == [
+            "https://arxiv.org/assets/fonts.css",
+            "https://arxiv.org/assets/main.css",
+        ]
+        assert len(by_kind["font"]) == 1
+        assert len(by_kind["image"]) == 1
+        saved = (job_dir / "input/source.html").read_text()
+        assert "https://arxiv.org/figures/x.png" not in saved
+        assert "input/html_assets/image-" in saved
+
+    def test_snapshot_preserves_link_and_inline_stylesheet_order(self, tmp_path):
+        job_dir = _make_job_dir(tmp_path)
+        step = _make_step(
+            job_dir, tmp_path, source="arxiv", content_type="document",
+            document_kind="research_paper",
+        )
+        html = (
+            '<html><head><link rel="stylesheet" href="a.css">'
+            '<style>.inline{color:red}</style>'
+            '<link rel="stylesheet" href="b.css"></head>'
+            '<body><article class="ltx_document">paper</article></body></html>'
+        )
+        responses = [
+            HttpFetchResult(
+                b".a{color:blue}", "https://arxiv.org/html/a.css",
+                200, "text/css", None,
+            ),
+            HttpFetchResult(
+                b".b{color:green}", "https://arxiv.org/html/b.css",
+                200, "text/css", None,
+            ),
+        ]
+
+        with patch.object(
+            step, "_fetch_scholarly_html",
+            return_value=(html, "https://arxiv.org/html/2305.14314"),
+        ), patch.object(step, "_snapshot_fetch", side_effect=responses):
+            step._fetch_arxiv_html("2305.14314")
+
+        snapshot = json.loads((job_dir / "input/html_snapshot.json").read_text())
+        by_path = {record["path"]: record for record in snapshot["resources"]}
+        assert [by_path[path]["request_url"] for path in snapshot["stylesheets"]] == [
+            "https://arxiv.org/html/a.css",
+            "https://arxiv.org/html/2305.14314#flori-inline-style-1",
+            "https://arxiv.org/html/b.css",
+        ]

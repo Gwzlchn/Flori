@@ -4,22 +4,72 @@ from __future__ import annotations
 
 import hashlib
 import json
+import mimetypes
 
 import pytest
 
+from api.routes import notes as notes_routes
 from api.services import document_reader as document_reader_service
+from shared import scholarly_html_snapshot as snapshot_service
 from api.services.document_reader import (
     DocumentReaderError,
     DocumentReaderLimitError,
+    build_snapshot_css,
     document_html_headers,
     render_document_html,
     render_document_model_html,
 )
 from shared.document_contract import DOCUMENT_SCHEMA_VERSION
+from shared.scholarly_html_snapshot import (
+    ScholarlyHtmlSnapshotLimitError,
+    canonical_snapshot_bytes,
+    sha256_digest,
+)
+from shared.step_output_commit import StepOutput, build_step_manifest
 
 
 def _fingerprint(raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _write_download_manifest(job_dir, job_id: str, paths: list[str]) -> None:
+    outputs = []
+    for path in sorted(paths, key=lambda value: value.encode("utf-8")):
+        data = (job_dir / path).read_bytes()
+        outputs.append(StepOutput(
+            path=path,
+            job_rel=path,
+            size_bytes=len(data),
+            sha256=sha256_digest(data),
+            media_type=mimetypes.guess_type(path)[0],
+        ))
+    _, encoded, _ = build_step_manifest(
+        job_id=job_id,
+        scope_key="job",
+        step="01_download",
+        part_index=None,
+        exec_id="exec_snapshot",
+        job_generation=1,
+        attempt=1,
+        started_at="2026-08-11T01:00:00Z",
+        committed_at="2026-08-11T01:01:00Z",
+        duration_sec=60,
+        input_fingerprints={"job": "sha256:" + "1" * 64},
+        definition_digest="sha256:" + "2" * 64,
+        outputs=outputs,
+        producer={
+            "flori_version": "2.8.2",
+            "build_sha": None,
+            "worker_id": "test",
+            "runner": "subprocess",
+            "image": None,
+            "image_digest": None,
+            "tool_versions": {},
+        },
+    )
+    target = job_dir / ".flori/steps/01_download/manifest.json"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(encoded)
 
 
 def _document(job_id: str, raw: bytes) -> dict:
@@ -64,6 +114,69 @@ def _document(job_id: str, raw: bytes) -> dict:
         "references": [],
         "assets": [],
     }
+
+
+def test_snapshot_stylesheets_share_one_sanitized_output_budget(monkeypatch):
+    monkeypatch.setattr(
+        document_reader_service, "SCHOLARLY_HTML_SANITIZED_CSS_MAX_BYTES", 32,
+    )
+    resources = {
+        "input/html_assets/a.css": {
+            "kind": "stylesheet",
+            "request_url": "https://cdn.example/a.css",
+            "source_url": "https://cdn.example/a.css",
+        },
+        "input/html_assets/b.css": {
+            "kind": "stylesheet",
+            "request_url": "https://cdn.example/b.css",
+            "source_url": "https://cdn.example/b.css",
+        },
+    }
+    stylesheets = [
+        (resources["input/html_assets/a.css"], b".alpha{color:red}"),
+        (resources["input/html_assets/b.css"], b".beta{background:blue}"),
+    ]
+
+    with pytest.raises(ScholarlyHtmlSnapshotLimitError, match="combined sanitized"):
+        build_snapshot_css(stylesheets, job_id="job_budget", resources=resources)
+
+
+def test_snapshot_stylesheets_share_rule_and_declaration_budgets(monkeypatch):
+    monkeypatch.setattr(snapshot_service, "SCHOLARLY_HTML_CSS_MAX_RULES", 1)
+    monkeypatch.setattr(snapshot_service, "SCHOLARLY_HTML_CSS_MAX_DECLARATIONS", 1)
+    resources = {
+        "input/html_assets/a.css": {
+            "kind": "stylesheet",
+            "request_url": "https://cdn.example/a.css",
+            "source_url": "https://cdn.example/a.css",
+        },
+        "input/html_assets/b.css": {
+            "kind": "stylesheet",
+            "request_url": "https://cdn.example/b.css",
+            "source_url": "https://cdn.example/b.css",
+        },
+    }
+
+    with pytest.raises(ScholarlyHtmlSnapshotLimitError, match="rule count"):
+        build_snapshot_css(
+            [
+                (resources["input/html_assets/a.css"], b".a{color:red}"),
+                (resources["input/html_assets/b.css"], b".b{color:blue}"),
+            ],
+            job_id="job_budget",
+            resources=resources,
+        )
+
+    monkeypatch.setattr(snapshot_service, "SCHOLARLY_HTML_CSS_MAX_RULES", 10)
+    with pytest.raises(ScholarlyHtmlSnapshotLimitError, match="declaration count"):
+        build_snapshot_css(
+            [(
+                resources["input/html_assets/a.css"],
+                b".a{color:red;background:blue}",
+            )],
+            job_id="job_budget",
+            resources=resources,
+        )
 
 
 def test_reader_sanitizes_active_content_and_preserves_source_bytes():
@@ -442,6 +555,144 @@ async def test_scholarly_html_source_keeps_sanitized_mathml(client, test_config)
 
     assert response.status_code == 200
     assert '<math><mi>x</mi><mo>=</mo><mn>1</mn></math>' in response.text
+
+
+@pytest.mark.asyncio
+async def test_scholarly_html_snapshot_restores_local_css_fonts_and_images(
+    client, test_config, monkeypatch,
+):
+    job_id = "job_scholarly_snapshot"
+    job_dir = test_config.jobs_dir / job_id
+    (job_dir / "input/html_assets").mkdir(parents=True)
+    (job_dir / "intermediate").mkdir()
+    css_path = "input/html_assets/paper.css"
+    font_path = "input/html_assets/paper.woff2"
+    image_path = "input/html_assets/figure.png"
+    css = b"""
+    @font-face{font-family:Paper;src:url(https://cdn.example/paper.woff2)}
+    .ltx_document{max-width:80rem;margin:0 auto;font-family:Paper;background:url(https://evil.example/pixel)}
+    """
+    font = b"wOF2" + b"f" * 32
+    image = b"\x89PNG\r\n\x1a\n" + b"i" * 32
+    raw = (
+        '<html><head><link rel="stylesheet" href="https://cdn.example/paper.css"></head>'
+        f'<body><article class="ltx_document"><p>Safe body</p><img src="{image_path}"></article></body></html>'
+    ).encode()
+    (job_dir / "input/source.html").write_bytes(raw)
+    (job_dir / css_path).write_bytes(css)
+    (job_dir / font_path).write_bytes(font)
+    (job_dir / image_path).write_bytes(image)
+    snapshot = {
+        "format": "flori-scholarly-html-snapshot",
+        "format_version": 1,
+        "job_id": job_id,
+        "provider": "ar5iv",
+        "document_url": "https://ar5iv.labs.arxiv.org/html/2305.14314",
+        "html": {
+            "path": "input/source.html",
+            "sha256": sha256_digest(raw),
+            "size_bytes": len(raw),
+            "media_type": "text/html",
+        },
+        "stylesheets": [css_path],
+        "resources": [
+            {
+                "kind": "stylesheet", "path": css_path,
+                "request_url": "https://cdn.example/paper.css",
+                "source_url": "https://cdn.example/paper.css",
+                "sha256": sha256_digest(css), "size_bytes": len(css),
+                "media_type": "text/css",
+            },
+            {
+                "kind": "font", "path": font_path,
+                "request_url": "https://cdn.example/paper.woff2",
+                "source_url": "https://cdn.example/paper.woff2",
+                "sha256": sha256_digest(font), "size_bytes": len(font),
+                "media_type": "font/woff2",
+            },
+            {
+                "kind": "image", "path": image_path,
+                "request_url": "https://cdn.example/figure.png",
+                "source_url": "https://cdn.example/figure.png",
+                "sha256": sha256_digest(image), "size_bytes": len(image),
+                "media_type": "image/png",
+            },
+        ],
+    }
+    snapshot["resources"].sort(key=lambda item: item["path"].encode("utf-8"))
+    snapshot_raw = canonical_snapshot_bytes(snapshot)
+    (job_dir / "input/html_snapshot.json").write_bytes(snapshot_raw)
+    (job_dir / "intermediate/document.json").write_text(
+        json.dumps(_document(job_id, raw)), encoding="utf-8",
+    )
+    paths = [
+        "input/source.html", "input/html_snapshot.json", css_path, font_path, image_path,
+    ]
+    _write_download_manifest(job_dir, job_id, paths)
+
+    response = await client.get(f"/api/jobs/{job_id}/document/source")
+
+    assert response.status_code == 200
+    assert ".ltx_document{max-width:80rem" in response.text
+    assert "max-width:980px" not in response.text
+    assert "evil.example" not in response.text
+    assert f"/api/jobs/{job_id}/document/resource?path=input%2Fhtml_assets%2Fpaper.woff2" in response.text
+    assert f'src="/api/jobs/{job_id}/document/resource?path=input%2Fhtml_assets%2Ffigure.png"' in response.text
+    assert "script-src 'none'" in response.headers["content-security-policy"]
+
+    bounded_reads: list[str] = []
+    original_bounded_read = notes_routes.read_file_bounded
+
+    async def track_bounded_read(storage, requested_job_id, rel_path, limit):
+        bounded_reads.append(rel_path)
+        return await original_bounded_read(storage, requested_job_id, rel_path, limit)
+
+    monkeypatch.setattr(notes_routes, "read_file_bounded", track_bounded_read)
+    font_response = await client.get(
+        f"/api/jobs/{job_id}/document/resource", params={"path": font_path},
+    )
+    image_response = await client.get(
+        f"/api/jobs/{job_id}/document/resource", params={"path": image_path},
+    )
+    css_response = await client.get(
+        f"/api/jobs/{job_id}/document/resource", params={"path": css_path},
+    )
+    assert font_response.status_code == image_response.status_code == 200
+    assert font_response.content == font
+    assert image_response.content == image
+    assert css_response.status_code == 404
+    assert "input/source.html" not in bounded_reads
+
+    (job_dir / font_path).write_bytes(b"wOF2tampered")
+    tampered = await client.get(
+        f"/api/jobs/{job_id}/document/resource", params={"path": font_path},
+    )
+    assert tampered.status_code == 422
+
+    (job_dir / css_path).write_bytes(b".tampered{color:red}")
+    tampered_css = await client.get(f"/api/jobs/{job_id}/document/source")
+    assert tampered_css.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_scholarly_snapshot_without_download_manifest_never_falls_back_online(
+    client, test_config,
+):
+    job_id = "job_unbound_scholarly_snapshot"
+    job_dir = test_config.jobs_dir / job_id
+    (job_dir / "input").mkdir(parents=True)
+    (job_dir / "intermediate").mkdir()
+    raw = b"<html><body><article><p>Safe body</p></article></body></html>"
+    (job_dir / "input/source.html").write_bytes(raw)
+    (job_dir / "input/html_snapshot.json").write_text("{}", encoding="utf-8")
+    (job_dir / "intermediate/document.json").write_text(
+        json.dumps(_document(job_id, raw)), encoding="utf-8",
+    )
+
+    response = await client.get(f"/api/jobs/{job_id}/document/source")
+
+    assert response.status_code == 422
+    assert "download manifest" in response.json()["message"]
 
 
 @pytest.mark.asyncio

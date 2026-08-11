@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterable, AsyncIterator, Callable, Protocol
+from urllib.parse import urlparse
 
 from shared.errors import WorkerAuthRejected
 from shared.runner_ops import current_task_lease
@@ -645,8 +646,9 @@ class LocalStorage:
     """本地部署:数据就在本机,pull/push 默认 no-op(work_dir 即 canonical job 目录)。
 
     FLORI_LOCAL_ATTEMPT_ISOLATION=1 时启用隔离 attempt(设计稿 §2.6):pull 复制
-    committed 视图到独立工作目录(真实复制,不以可写 hardlink 暴露 canonical),
-    push 只回写快照外新增/改动的文件。默认关闭,保持既有语义(双写保守序)。
+    committed 视图到独立工作目录(真实复制,不以可写 hardlink 暴露 canonical)。
+    arXiv 文档下载即使未开全局隔离也强制走 manifest-only attempt,避免慢网络失败
+    先破坏上次成功的 HTML 闭包。
     """
 
     def __init__(self, jobs_dir: Path):
@@ -656,6 +658,7 @@ class LocalStorage:
         ) not in ("", "0", "false")
         # 隔离模式:pull 时记录快照(relpath -> (size, mtime)),push 只回写增量。
         self._snapshots: dict[str, dict[str, tuple[int, float]]] = {}
+        self._manifest_only_attempts: set[str] = set()
 
     def _safe_path(self, job_id: str, rel_path: str = "") -> Path:
         # 兜底防穿越:job_id 不得逃出 jobs_dir、rel 不得逃出其 job 目录,
@@ -694,9 +697,41 @@ class LocalStorage:
 
     async def pull(self, job_id: str, step: str) -> Path:
         canonical = self._safe_path(job_id)
-        if not self._isolate:
+        manifest_only = await asyncio.to_thread(
+            self._requires_manifest_only_attempt, canonical, step,
+        )
+        if not self._isolate and not manifest_only:
             return canonical
-        return await asyncio.to_thread(self._pull_isolated_sync, job_id, step, canonical)
+        work_dir = await asyncio.to_thread(
+            self._pull_isolated_sync, job_id, step, canonical,
+        )
+        if manifest_only:
+            self._manifest_only_attempts.add(str(work_dir))
+        return work_dir
+
+    @staticmethod
+    def _requires_manifest_only_attempt(canonical: Path, step: str) -> bool:
+        if step != "01_download":
+            return False
+        try:
+            raw = (canonical / "job.json").read_bytes()
+            if len(raw) > 1024 * 1024:
+                return False
+            job = json.loads(raw)
+        except (OSError, ValueError):
+            return False
+        if type(job) is not dict or job.get("content_type") != "document":
+            return False
+        url = job.get("url")
+        host = (
+            (urlparse(url).hostname or "").casefold()
+            if isinstance(url, str) else ""
+        )
+        return job.get("source") == "arxiv" or host in {"arxiv.org", "www.arxiv.org"}
+
+    def requires_manifest_commit(self, work_dir: Path) -> bool:
+        """成功 push 被推迟的 attempt 必须由 final manifest 提交完成发布。"""
+        return str(Path(work_dir)) in self._manifest_only_attempts
 
     def _attempts_root(self) -> Path:
         return self.jobs_dir / ".flori" / "attempts"
@@ -727,10 +762,15 @@ class LocalStorage:
         exclude_paths: set[str] | None = None,
         only_globs: list[str] | None = None,
     ) -> None:
-        if not self._isolate:
+        manifest_only = str(Path(work_dir)) in self._manifest_only_attempts
+        if not self._isolate and not manifest_only:
             return
         canonical = self._safe_path(job_id)
         if Path(work_dir).resolve() == canonical.resolve():
+            return
+        # 成功业务输出由九步提交协议从 attempt 直接 stage,不能先覆盖 canonical。
+        # 失败诊断带 only_globs,仍可独立回传。
+        if manifest_only and only_globs is None:
             return
         await asyncio.to_thread(
             self._push_isolated_sync, job_id, step, Path(work_dir),
@@ -771,8 +811,10 @@ class LocalStorage:
                 tmp.unlink(missing_ok=True)
 
     async def cleanup(self, job_id: str, step: str, work_dir: Path) -> None:
-        if not self._isolate:
+        manifest_only = str(Path(work_dir)) in self._manifest_only_attempts
+        if not self._isolate and not manifest_only:
             return
+        self._manifest_only_attempts.discard(str(Path(work_dir)))
         self._snapshots.pop(str(work_dir), None)
 
         def _cleanup_attempt() -> None:
