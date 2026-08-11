@@ -119,6 +119,46 @@ def test_barrier_read_reopens_atomically_replaced_inode(tmp_path, monkeypatch):
     assert read_barrier(data)["phase"] == PHASE_SNAPSHOTTING
 
 
+def test_barrier_read_reopens_when_named_stat_inode_is_unlinked(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    acquire_barrier(
+        data, operation_id="exact-dr-owner", created_at="2026-07-20T00:00:00+00:00",
+    )
+    replacement = data / "exact-dr-control" / ".replacement.json"
+    replacement.write_bytes(canonical_json_bytes({
+        **read_barrier(data),
+        "phase": PHASE_SNAPSHOTTING,
+        "updated_at": "2026-07-20T00:01:00+00:00",
+    }))
+    real_stat = os.stat
+    replaced = False
+
+    def replace_during_named_stat(name, *args, **kwargs):
+        nonlocal replaced
+        if name != BARRIER_NAME or replaced or kwargs.get("dir_fd") is None:
+            return real_stat(name, *args, **kwargs)
+        replaced = True
+        directory_fd = kwargs["dir_fd"]
+        fd = os.open(name, os.O_RDONLY, dir_fd=directory_fd)
+        try:
+            os.replace(
+                replacement.name,
+                BARRIER_NAME,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            unlinked = os.fstat(fd)
+            assert unlinked.st_nlink == 0
+            return unlinked
+        finally:
+            os.close(fd)
+
+    monkeypatch.setattr(os, "stat", replace_during_named_stat)
+
+    assert read_barrier(data)["phase"] == PHASE_SNAPSHOTTING
+
+
 def test_barrier_read_reopens_renamed_inode(tmp_path, monkeypatch):
     data = tmp_path / "data"
     data.mkdir()

@@ -176,6 +176,8 @@ def _read_control_file_at(
                 continue
             except OSError as exc:
                 raise ExactDrBarrierError(f"cannot stat {label}: {exc}") from exc
+            if named.st_nlink == 0:
+                continue
             if (
                 not stat.S_ISREG(named.st_mode)
                 or named.st_nlink != 1
