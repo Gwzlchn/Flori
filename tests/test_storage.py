@@ -1,5 +1,6 @@
 """shared/storage.py 的单测。"""
 
+import asyncio
 import os
 import socket
 import threading
@@ -2743,30 +2744,96 @@ class TestGatewayStorageReuse(_GatewayStorageHelpers):
         assert "/api/runner/jobs/j1/artifacts/parts/pt_a/input/source.mp4" not in put_urls
 
     @pytest.mark.asyncio
-    async def test_reuse_pull_skips_locally_present(self, tmp_path, monkeypatch):
+    async def test_reuse_pull_refreshes_central_and_preserves_local_only(
+        self, tmp_path, monkeypatch,
+    ):
         monkeypatch.setenv("STORAGE_WORKDIR_REUSE", "1")
+        monkeypatch.setenv("STORAGE_NO_PUSH_GLOBS", "input/source.mp4")
         gw, client = self._gw(tmp_path)
-        # 上一步留下的 source.mp4 已在本机
         work_dir = tmp_path / "work" / "j1"
         (work_dir / "input").mkdir(parents=True)
+        (work_dir / "output").mkdir()
         (work_dir / "input" / "source.mp4").write_bytes(b"LOCAL")
+        (work_dir / "output" / "review.json").write_bytes(b"OLD")
+        (work_dir / "output" / "removed.json").write_bytes(b"STALE")
 
         client.get.return_value = self._resp(
-            json_data={"files": ["input/source.mp4", "job.json"]})
+            json_data={"files": [
+                "input/source.mp4", "job.json", "output/review.json",
+            ]})
 
         def _stream(method, url, headers=None):
             if url.endswith("job.json"):
                 return self._stream_cm(b"J")
-            raise AssertionError(f"unexpected stream {url}")  # 不该重拉 source.mp4
+            if url.endswith("output/review.json"):
+                return self._stream_cm(b"NEW")
+            raise AssertionError(f"unexpected stream {url}")
 
         client.stream.side_effect = _stream
 
-        out = await gw.pull("j1", "02")
+        out = await gw.pull("j1", "09_publish")
         streamed = [c.args[1] for c in client.stream.call_args_list]
         assert "/api/runner/jobs/j1/artifacts/input/source.mp4" not in streamed
-        assert (out / "input" / "source.mp4").read_bytes() == b"LOCAL"  # 本机原样保留
-        # 快照覆盖全部本机文件(含留下的 mp4),push 才不会误传
-        assert set(gw._snapshots[str(out)]) == {"input/source.mp4", "job.json"}
+        assert (out / "input" / "source.mp4").read_bytes() == b"LOCAL"
+        assert (out / "output" / "review.json").read_bytes() == b"NEW"
+        assert not (out / "output" / "removed.json").exists()
+        assert set(gw._snapshots[str(out)]) == {
+            "input/source.mp4", "job.json", "output/review.json",
+        }
+
+    @pytest.mark.asyncio
+    async def test_reuse_pull_failure_keeps_previous_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("STORAGE_WORKDIR_REUSE", "1")
+        gw, client = self._gw(tmp_path)
+        work_dir = tmp_path / "work" / "j1"
+        (work_dir / "output").mkdir(parents=True)
+        target = work_dir / "output" / "review.json"
+        target.write_bytes(b"OLD")
+        client.get.return_value = self._resp(
+            json_data={"files": ["output/review.json"]},
+        )
+        resp = MagicMock(status_code=200)
+        resp.raise_for_status = MagicMock()
+
+        async def _broken(chunk_size=65536):
+            yield b"PARTIAL"
+            raise ConnectionError("download interrupted")
+
+        resp.aiter_bytes = _broken
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=resp)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        client.stream.return_value = cm
+
+        with pytest.raises(ConnectionError, match="download interrupted"):
+            await gw.pull("j1", "09_publish")
+
+        assert target.read_bytes() == b"OLD"
+        assert not list(target.parent.glob(".*.flori-part-*"))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("separate_instance", [False, True])
+    async def test_reuse_execution_guard_serializes_same_job_directory(
+        self, tmp_path, monkeypatch, separate_instance,
+    ):
+        monkeypatch.setenv("STORAGE_WORKDIR_REUSE", "1")
+        first, _ = self._gw(tmp_path)
+        second = self._gw(tmp_path)[0] if separate_instance else first
+        first_guard = await first.acquire_execution_guard("j1")
+        waiting = asyncio.Event()
+
+        async def on_wait():
+            waiting.set()
+
+        contender = asyncio.create_task(
+            second.acquire_execution_guard("j1", on_wait=on_wait),
+        )
+        await asyncio.wait_for(waiting.wait(), timeout=2)
+        assert contender.done() is False
+
+        await first.release_execution_guard(first_guard)
+        second_guard = await asyncio.wait_for(contender, timeout=2)
+        await second.release_execution_guard(second_guard)
 
     @pytest.mark.asyncio
     async def test_reuse_cleanup_keeps_dir(self, tmp_path, monkeypatch):
@@ -2798,6 +2865,34 @@ class TestGatewayStorageReuse(_GatewayStorageHelpers):
         await gw.pull("j2", "00")
         assert not stale.exists()  # 过期兄弟目录被回收
         assert (work_root / "j2").exists()  # 当前 job 目录保留
+
+    @pytest.mark.asyncio
+    async def test_reuse_gc_never_removes_locked_stale_job(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("STORAGE_WORKDIR_REUSE", "1")
+        monkeypatch.setenv("STORAGE_WORKDIR_GC_TTL_SEC", "100")
+        owner, _ = self._gw(tmp_path)
+        collector, client = self._gw(tmp_path)
+        stale = tmp_path / "work" / "old_job"
+        stale.mkdir(parents=True)
+        (stale / "running.out").write_bytes(b"in-flight")
+        os.utime(stale, (0, 0))
+        guard = await owner.acquire_execution_guard("old_job")
+        client.get.side_effect = lambda url, headers=None: self._resp(
+            json_data={"files": []},
+        )
+
+        await collector.pull("j2", "00")
+        assert (stale / "running.out").read_bytes() == b"in-flight"
+
+        await owner.release_execution_guard(guard)
+        await collector.pull("j3", "00")
+        assert (stale / "running.out").read_bytes() == b"in-flight"
+
+        os.utime(stale, (0, 0))
+        await collector.pull("j4", "00")
+        assert not stale.exists()
 
         monkeypatch.delenv("MINIO_URL", raising=False)
         s = create_storage(tmp_path)

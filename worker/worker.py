@@ -671,7 +671,21 @@ class Worker:
         source_root_id: str | None = None
         source_exclude_paths: set[str] = set()
         auth_failed = False
+        execution_guard = None
         try:
+            acquire_guard = getattr(
+                self.storage, "acquire_execution_guard", None,
+            )
+            if callable(acquire_guard):
+                async def on_guard_wait() -> None:
+                    await self.transport.update_status(
+                        self.worker_id, "busy", job_id, execution_step,
+                    )
+                    await self.transport.report_step_alive(job_id, execution_step)
+
+                execution_guard = await acquire_guard(
+                    job_id, on_wait=on_guard_wait,
+                )
             storage_dir = await self.storage.pull(job_id, execution_step)
             work_dir = storage_dir if part_id is None else storage_dir / "parts" / part_id
             work_dir.mkdir(parents=True, exist_ok=True)
@@ -967,10 +981,19 @@ class Worker:
 
         finally:
             self.source_library.dematerialize(source_link)
-            if storage_dir:
-                await self.storage.cleanup(job_id, execution_step, storage_dir)
-            if not auth_failed:
-                await self.transport.release(claim)
+            try:
+                if storage_dir:
+                    await self.storage.cleanup(job_id, execution_step, storage_dir)
+            finally:
+                try:
+                    release_guard = getattr(
+                        self.storage, "release_execution_guard", None,
+                    )
+                    if callable(release_guard):
+                        await release_guard(execution_guard)
+                finally:
+                    if not auth_failed:
+                        await self.transport.release(claim)
 
     # manifest 提交协议(设计稿 §2.6 九步:begin_commit→staging→promote→read-back→
     # manifest-last→同 token done→staging 清理;§2.5 输出所有权与成功校验)

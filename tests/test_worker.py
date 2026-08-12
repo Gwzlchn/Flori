@@ -1406,6 +1406,64 @@ class TestPoolExhaustion:
 
 class TestStoragePullFailure:
     @pytest.mark.asyncio
+    async def test_execution_guard_spans_pull_run_push_and_cleanup(
+        self, worker, redis, db, tmp_jobs_dir,
+    ):
+        await worker.register()
+        db.create_job(make_job())
+        db.upsert_step(Step(
+            job_id="j_test_001", name="A", status=StepStatus.READY, pool="cpu",
+        ))
+        await redis.try_acquire_slot("cpu", 3, "w_test:1")
+        job_dir = tmp_jobs_dir / "j_test_001"
+        job_dir.mkdir(exist_ok=True)
+        events = []
+
+        async def acquire(job_id, *, on_wait=None):
+            events.append("acquire")
+            assert on_wait is not None
+            await on_wait()
+            events.append("wait-heartbeat")
+            return object()
+
+        async def pull(job_id, step):
+            events.append("pull")
+            return job_dir
+
+        async def run_step(ctx, on_progress, on_tick):
+            events.append("run")
+            return 0, ""
+
+        async def push(job_id, step, work_dir, **kwargs):
+            events.append("push")
+
+        async def cleanup(job_id, step, work_dir):
+            events.append("cleanup")
+
+        async def release(handle):
+            events.append("release")
+
+        worker.storage.acquire_execution_guard = acquire
+        worker.storage.release_execution_guard = release
+        worker.storage.pull = pull
+        worker.storage.push = push
+        worker.storage.cleanup = cleanup
+        worker.runner.run_step = run_step
+        worker.transport.update_status = AsyncMock()
+        worker.transport.report_step_alive = AsyncMock()
+        claim = make_claim()
+        await activate_claim(redis, claim, worker.worker_id)
+
+        await worker.execute(claim)
+
+        assert events == [
+            "acquire", "wait-heartbeat", "pull", "run", "push", "cleanup", "release",
+        ]
+        worker.transport.report_step_alive.assert_awaited_once_with(
+            claim["job_id"], claim["step"],
+        )
+
+    @pytest.mark.asyncio
     async def test_pull_failure_releases_slot_and_publishes_failed(
         self, worker, redis, db, tmp_jobs_dir,
     ):

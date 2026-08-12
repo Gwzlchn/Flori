@@ -3638,6 +3638,8 @@ RETRY_POLICY = {
 
 NAS 只读源不是 output:`01_download` NAS 分支产物只有 `input/metadata.json`,源身份以 `source_ref/source_digest/source_size_bytes` 并入 `compatibility.input_fingerprints`,校验器绝不从中心存储拉源对象(源完整性由 `job_parts` + `shared/source_library.py` 承担)。gateway `STORAGE_NO_PUSH_GLOBS` 与 >10 GiB 超限输出同款豁免:不在 manifest 即不被完成权威证明,备份/下游按 manifest 语义忽略。
 
+gateway 开启 `STORAGE_WORKDIR_REUSE=1` 时,本地 Job 目录只是下载缓存,不是完成权威。同一物理缓存目录从 pull、步骤执行、push、manifest 提交到 cleanup 必须持有跨进程 Job 排他锁,等待者持续续约任务;解锁前刷新顶层 Job 活跃时间,GC 只在取得同一锁并重新确认 TTL 后删除;不同物理缓存目录互不阻塞。锁内每次 pull 对中心清单中当前步骤可见的文件做单文件原子刷新,并删除中心已撤销的旧文件;只有 `STORAGE_NO_PUSH_GLOBS` 显式声明且由其它身份门保护的本地源可跨步骤保留。文件已存在、mtime 或大小相同都不能替代当前中心版本证明。
+
 ### 7.4 pipelines outputs 所有权与 output_policy
 
 `configs/pipelines.yaml` 各步 `outputs` glob 是输出所有权单一事实源(fnmatch 语义)。可选 `output_policy` 块:

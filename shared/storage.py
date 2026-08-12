@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterable, AsyncIterator, Callable, Protocol
+from typing import AsyncIterable, AsyncIterator, Awaitable, Callable, Protocol
 from urllib.parse import urlparse
 
 from shared.errors import WorkerAuthRejected
@@ -50,6 +50,7 @@ _MINIO_STREAM_PART_SIZE = 5 * 1024 * 1024
 # S3/MinIO 单次 copy_object 上限;超过必须 compose_object 分段服务端拷贝。
 _MINIO_COPY_LIMIT = 5 * 1024 * 1024 * 1024
 _STREAM_EOF = object()
+_EXECUTION_LOCK_POLL_SEC = 1.0
 
 # 执行 staging 命名空间(设计稿 §2.6):对象键 .flori/staging/{job_id}/{exec_id}/{job_rel}。
 # 处于 .flori 内部命名空间,永不作为业务产物 push/pull/list/clone(见 _is_internal_file)。
@@ -2764,9 +2765,9 @@ class GatewayStorage:
     pull/push 与 open/write_stream 分块传输;中心端校验完成后才原子发布上传对象.
 
     远端 worker 经慢链路(出站 HTTPS)连中心存储时,两个可选项把大源文件挡在链路外:
-      - STORAGE_WORKDIR_REUSE=1:job 目录跨步骤复用(按 job_id 命名),pull 跳过本机
-        已存在的文件、cleanup 不逐步 rmtree,改由 pull 时按 TTL GC 兄弟目录。
-        于是 01_download 下载的 source.mp4 留在本机,后续 03/04/02 步直接读本地,不重拉。
+      - STORAGE_WORKDIR_REUSE=1:job 目录跨步骤复用(按 job_id 命名),cleanup 不逐步
+        rmtree,改由 pull 时按 TTL GC 兄弟目录。中心清单内的文件每次原子刷新,
+        只有 STORAGE_NO_PUSH_GLOBS 声明的本地源可复用,避免旧同路径产物遮蔽当前版本。
       - STORAGE_NO_PUSH_GLOBS=input/source.mp4,...:匹配的文件不回传中心存储,只留本机。
         大源文件(视频/音频)因此永不上行慢链路;帧图/字幕/OCR 等小产物照常回传供 AI 步消费。
     二者默认关闭(空),不改变既有部署语义;远端重算 worker 才在 docker run 里开。
@@ -2806,6 +2807,58 @@ class GatewayStorage:
             )
         return self._client_obj
 
+    async def acquire_execution_guard(
+        self,
+        job_id: str,
+        *,
+        on_wait: Callable[[], Awaitable[None]] | None = None,
+    ):
+        """复用目录按 Job 跨进程排他,等待期间由 Worker 续约 claim。"""
+        if not self._reuse:
+            return None
+        import fcntl
+
+        handle = await asyncio.to_thread(open, self._job_lock_path(job_id), "a+b")
+
+        def _try_lock() -> bool:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            return True
+
+        try:
+            while not await asyncio.to_thread(_try_lock):
+                if on_wait is not None:
+                    await on_wait()
+                await asyncio.sleep(_EXECUTION_LOCK_POLL_SEC)
+            return handle, self._work_root / job_id
+        except BaseException:
+            await asyncio.to_thread(handle.close)
+            raise
+
+    async def release_execution_guard(self, handle) -> None:
+        if handle is None:
+            return
+        import fcntl
+        file_handle, job_root = handle
+
+        def _release() -> None:
+            try:
+                if job_root.is_dir():
+                    os.utime(job_root, None)
+                fcntl.flock(file_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                file_handle.close()
+
+        await asyncio.to_thread(_release)
+
+    def _job_lock_path(self, job_id: str) -> Path:
+        lock_dir = self._work_root / ".flori-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        token = hashlib.sha256(job_id.encode("utf-8")).hexdigest()
+        return lock_dir / f"{token}.lock"
+
     def _auth(self, job_id: str | None = None) -> dict:
         headers = {"Authorization": f"Bearer {self._token_getter()}"}
         lease = current_task_lease()
@@ -2835,12 +2888,15 @@ class GatewayStorage:
             work_dir = self._work_root / job_id / scope_token / uuid.uuid4().hex / "root"
         work_dir.mkdir(parents=True, exist_ok=True)
         rels = await self.list_files(job_id)
+        remote_files: set[str] = set()
         for rel in rels:
             if not execution_artifact_allowed(step, rel, write=False):
                 continue
+            remote_files.add(rel)
             dest = work_dir / rel
-            # 复用模式:本机已有同名文件就不重拉(留住的 source.mp4 不走慢链路下行)。
-            if self._reuse and dest.is_file():
+            # 只有显式不上传的本地源可绕过中心刷新。其它同路径文件必须重拉,
+            # 本地存在、mtime 或大小都不能证明它属于当前上游 manifest。
+            if self._reuse and dest.is_file() and self._is_no_push(step, rel):
                 continue
             dest.parent.mkdir(parents=True, exist_ok=True)
             staging = dest.with_name(f".{dest.name}.flori-part-{uuid.uuid4().hex}")
@@ -2860,6 +2916,10 @@ class GatewayStorage:
                 os.replace(staging, dest)
             finally:
                 staging.unlink(missing_ok=True)
+        if self._reuse:
+            await asyncio.to_thread(
+                self._remove_stale_reused_files, work_dir, step, remote_files,
+            )
         # 快照覆盖 work_dir 全部本机文件(含复用留下的),push 才能据此跳过未改动的文件。
         snapshot: dict[str, tuple[int, float]] = {}
         for path in work_dir.rglob("*"):
@@ -2871,17 +2931,65 @@ class GatewayStorage:
             await asyncio.to_thread(os.utime, work_dir, None)  # 标记活动时间,供 GC 判活
         return work_dir
 
+    def _remove_stale_reused_files(
+        self, work_dir: Path, step: str, remote_files: set[str],
+    ) -> None:
+        """删掉中心清单已撤销的旧文件,保留显式 local-only 源。"""
+        for path in work_dir.rglob("*"):
+            if path.is_symlink():
+                path.unlink(missing_ok=True)
+                continue
+            if not path.is_file():
+                continue
+            rel = path.relative_to(work_dir).as_posix()
+            if (
+                rel in remote_files
+                or is_credential_file(rel)
+                or _is_internal_file(rel)
+                or self._is_no_push(step, rel)
+                or self._is_part_local_only(rel)
+                or not execution_artifact_allowed(step, rel, write=False)
+            ):
+                continue
+            path.unlink()
+
+    def _is_part_local_only(self, rel: str) -> bool:
+        parts = rel.split("/", 2)
+        return (
+            len(parts) == 3
+            and parts[0] == "parts"
+            and any(fnmatch.fnmatch(parts[2], pattern) for pattern in self._no_push)
+        )
+
     def _gc_stale(self, current_job_id: str) -> None:
         """复用模式回收:删超过 TTL 未活动的兄弟 job 目录,给磁盘兜底。失败不致命。"""
+        import fcntl
+
         if not self._work_root.exists():
             return
         cutoff = time.time() - self._gc_ttl
         for child in self._work_root.iterdir():
-            if child.name == current_job_id or not child.is_dir():
+            if (
+                child.name == current_job_id
+                or child.name.startswith(".flori")
+                or not child.is_dir()
+            ):
                 continue
             try:
-                if child.stat().st_mtime < cutoff:
-                    shutil.rmtree(child, ignore_errors=True)
+                with open(self._job_lock_path(child.name), "a+b") as handle:
+                    try:
+                        fcntl.flock(
+                            handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB,
+                        )
+                    except BlockingIOError:
+                        continue
+                    try:
+                        # 锁前快照不能用于删除。持锁后重新读取活动时间,
+                        # 避免刚结束执行的目录被旧 cutoff 误删。
+                        if child.stat().st_mtime < cutoff:
+                            shutil.rmtree(child, ignore_errors=True)
+                    finally:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             except OSError:
                 continue
 
