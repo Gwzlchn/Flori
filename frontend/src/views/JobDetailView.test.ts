@@ -837,6 +837,25 @@ describe('JobDetailView Document 原文阅读面', () => {
     expect(w.text()).toContain('点击图片可查看本地无损原图')
   })
 
+  it('HTML iframe 在 load 早于 ref 就绪时仍绑定原图点击', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({
+      content_type: 'document', pipeline: 'document', source_profile: 'scholarly_html', status: 'done',
+      document_kind: 'research_paper', artifacts: ['input/source.html'],
+    }))
+    const frameDocument = document.implementation.createHTMLDocument()
+    const contentDocument = vi.spyOn(HTMLIFrameElement.prototype, 'contentDocument', 'get')
+      .mockReturnValue(frameDocument)
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    const w = mountView()
+    await flushPromises()
+    frameDocument.body.innerHTML = '<img class="flori-snapshot-image" src="/api/jobs/job_BV1abc/document/resource?path=input%2Fhtml_assets%2Ffigure.png">'
+    frameDocument.querySelector('img')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(open).toHaveBeenCalledOnce()
+    w.unmount()
+    contentDocument.mockRestore()
+    open.mockRestore()
+  })
+
   it('PDF 页码跳转切到 PDF 变体并定位目标页', async () => {
     fetchDetail.mockResolvedValue(makeDetail({
       content_type: 'document', pipeline: 'document', source_profile: 'scholarly_html', status: 'done',

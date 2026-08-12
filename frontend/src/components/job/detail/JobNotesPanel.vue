@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { ChevronDown, ExternalLink, FileText, Languages, List, RefreshCw, Star } from 'lucide-vue-next'
 import MarkdownViewer from '../../notes/MarkdownViewer.vue'
 import DocumentPdfViewer from '../../document/DocumentPdfViewer.vue'
@@ -78,6 +78,7 @@ function bindSourceImageViewer() {
   sourceDocument = document
 }
 
+watch(sourceFrame, bindSourceImageViewer, { flush: 'post' })
 onBeforeUnmount(unbindSourceImageViewer)
 </script>
 
