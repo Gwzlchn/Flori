@@ -163,6 +163,7 @@ def _html_segment(
         "suffix": str(html.get("suffix") or source[end:end + 32]),
         "dom_path": str(html.get("dom_path") or ""),
     }
+    support_text = bounded_support_text(html_lib.unescape(raw_exact))
     return {
         "segment_id": str(block["block_id"]),
         "source_id": "html",
@@ -170,13 +171,13 @@ def _html_segment(
         "end": end,
         "section": str(block.get("parent_id") or block["block_id"]),
         "locator": canonical,
-        "support_text": bounded_support_text(html_lib.unescape(raw_exact)),
-        "support_artifact": {
+        "support_text": support_text,
+        "support_artifact": ({
             "kind": "html",
             "path": "input/source.html",
             "sha256": source_sha,
             "selector": {"start": start, "end": end},
-        },
+        } if support_text is not None else None),
     }
 
 

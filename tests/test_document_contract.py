@@ -344,9 +344,41 @@ def test_source_manifest_uses_html_as_primary_when_pdf_crosswalk_exists(tmp_path
 
     assert [segment["segment_id"] for segment in manifest["segments"]] == ["S1.P1"]
     assert manifest["segments"][0]["source_id"] == "html"
+    assert manifest["segments"][0]["support_text"] == "hello"
+    assert manifest["segments"][0]["support_artifact"]["path"] == (
+        "input/source.html"
+    )
     assert {artifact["source_id"] for artifact in manifest["source_artifacts"]} == {
         "html", "pdf",
     }
+
+
+def test_html_source_manifest_omits_support_pair_for_oversized_exact_text(
+    tmp_path,
+):
+    job_dir = tmp_path / "jobs_document_fixture"
+    (job_dir / "input").mkdir(parents=True)
+    exact = "x" * 4097
+    source = f"<p>{exact}</p>"
+    (job_dir / "input" / "source.html").write_text(source, encoding="utf-8")
+    document = _document()
+    block = document["blocks"][-1]
+    block["parent_id"] = None
+    block["text"] = exact
+    block["locator"]["html"].update({
+        "exact": exact,
+        "start": 3,
+        "end": 3 + len(exact),
+    })
+    document["blocks"] = [block]
+
+    manifest = build_document_source_manifest(job_dir, document)
+
+    segment = manifest["segments"][0]
+    assert segment["locator"]["exact"] == exact
+    assert source[segment["start"]:segment["end"]] == exact
+    assert segment["support_text"] is None
+    assert segment["support_artifact"] is None
 
 
 def test_source_manifest_uses_unique_raw_text_node_when_inline_html_splits_block(
