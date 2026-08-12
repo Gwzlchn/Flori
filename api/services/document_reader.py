@@ -159,6 +159,7 @@ _DOCUMENT_SNAPSHOT_FRAME_STYLE = """
 html,body{margin:0;min-height:100%;background:#fff;color:#111}
 .flori-document{min-height:100vh}
 img,svg{max-width:100%;height:auto}
+.flori-snapshot-image{cursor:zoom-in}
 .flori-source-anchor{display:inline!important;position:relative;top:-12px;visibility:hidden}
 .flori-source-target{outline:3px solid #f4b942;outline-offset:5px;background:#fff7d6;scroll-margin-top:18px}
 .flori-exact-target{border-radius:3px;background:#ffe47a;color:inherit}
@@ -314,23 +315,17 @@ def _asset_url(
     return f"/api/jobs/{quote(job_id, safe='')}/artifact?path={quote(local, safe='')}"
 
 
-def _snapshot_image_density_style(
+def _bound_snapshot_image_path(
     attrs: Mapping[str, str],
     snapshot_resource_digests: Mapping[str, str] | None,
 ) -> str | None:
-    """用上游版面宽度消费高密度快照图片;只接受已绑定资源和有界整数。"""
+    """识别当前快照绑定的本地图片;重复属性由调用方固定使用首值。"""
     if snapshot_resource_digests is None:
         return None
     local = _safe_local_path(attrs.get("src", ""))
     if local is None or local not in snapshot_resource_digests:
         return None
-    width = _safe_dimension_attr(attrs.get("width", ""))
-    if width is None or not width.isdigit():
-        return None
-    return (
-        f"width:{width}px!important;max-width:100%!important;"
-        "height:auto!important;max-height:none!important"
-    )
+    return local
 
 
 def build_snapshot_css(
@@ -816,11 +811,10 @@ class _SafeDocumentParser(HTMLParser):
         first_attr_map: dict[str, str] = {}
         for key, value in attrs:
             first_attr_map.setdefault(key.lower(), value or "")
-        density_style = (
-            _snapshot_image_density_style(first_attr_map, self.snapshot_resource_digests)
+        bound_snapshot_image = (
+            _bound_snapshot_image_path(first_attr_map, self.snapshot_resource_digests)
             if tag == "img" else None
         )
-        style_seen = False
         if tag == "img" and not attr_map.get("src") and attr_map.get("data-artifact"):
             source = _asset_url(
                 self.job_id, attr_map["data-artifact"], self.snapshot_resource_digests,
@@ -849,6 +843,8 @@ class _SafeDocumentParser(HTMLParser):
                 ]
                 if target:
                     tokens.append("flori-source-target")
+                if bound_snapshot_image is not None:
+                    tokens.append("flori-snapshot-image")
                 if tokens:
                     rendered_class = " ".join(dict.fromkeys(tokens))
                     safe.append(f'class="{html.escape(rendered_class, quote=True)}"')
@@ -858,15 +854,7 @@ class _SafeDocumentParser(HTMLParser):
             if name == "data-source-segment":
                 continue
             if name == "style":
-                style_seen = True
                 rendered_style = _safe_inline_style(raw) if tag in _SAFE_STYLE_TAGS else None
-                if density_style is not None:
-                    preserved = [
-                        declaration for declaration in (rendered_style or "").split(";")
-                        if declaration.partition(":")[0]
-                        not in {"height", "max-height", "max-width", "width"}
-                    ]
-                    rendered_style = ";".join([*preserved, density_style])
                 if rendered_style is not None:
                     safe.append(f'style="{html.escape(rendered_style, quote=True)}"')
                 continue
@@ -906,10 +894,14 @@ class _SafeDocumentParser(HTMLParser):
                 if len(raw) > 65536:
                     continue
                 safe.append(f'{name}="{html.escape(raw, quote=True)}"')
-        if density_style is not None and not style_seen:
-            safe.append(f'style="{density_style}"')
-        if target and not class_seen:
-            safe.append('class="flori-source-target"')
+        if not class_seen:
+            generated_classes: list[str] = []
+            if target:
+                generated_classes.append("flori-source-target")
+            if bound_snapshot_image is not None:
+                generated_classes.append("flori-snapshot-image")
+            if generated_classes:
+                safe.append(f'class="{" ".join(generated_classes)}"')
         return (" " + " ".join(safe)) if safe else ""
 
     @staticmethod

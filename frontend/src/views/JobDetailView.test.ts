@@ -3,6 +3,7 @@ import { ref, reactive } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import type { JobDetail, JobConcept } from '../types'
 import { installSourceCatalog } from '../constants/sources'
+import { boundDocumentImageUrl } from '../utils/documentReader'
 
 // 路由 mock: route.params.id 决定加载哪个 job;push 用于跳转(删除/概念)。
 // params 用 reactive:测「切 job」时改 routeParams.id,组件的 jobId 才会响应式变化。
@@ -826,6 +827,16 @@ describe('JobDetailView Document 原文阅读面', () => {
     expect(viewer.props('url')).toBe('/api/jobs/job_BV1abc/media?path=input%2Fsource.pdf')
   })
 
+  it('HTML 原文提示图片可查看本地无损原图', async () => {
+    fetchDetail.mockResolvedValue(makeDetail({
+      content_type: 'document', pipeline: 'document', source_profile: 'scholarly_html', status: 'done',
+      document_kind: 'research_paper', artifacts: ['input/source.html'],
+    }))
+    const w = mountView()
+    await flushPromises()
+    expect(w.text()).toContain('点击图片可查看本地无损原图')
+  })
+
   it('PDF 页码跳转切到 PDF 变体并定位目标页', async () => {
     fetchDetail.mockResolvedValue(makeDetail({
       content_type: 'document', pipeline: 'document', source_profile: 'scholarly_html', status: 'done',
@@ -841,6 +852,19 @@ describe('JobDetailView Document 原文阅读面', () => {
     const viewer = w.findComponent({ name: 'DocumentPdfViewer' })
     expect(viewer.props('url')).toBe('/api/jobs/job_BV1abc/media?path=input%2Fsource.pdf')
     expect(viewer.props('page')).toBe(4)
+  })
+})
+
+describe('Document 原图地址门', () => {
+  const base = 'https://flori.example/content/job_BV1abc'
+  const bound = '/api/jobs/job_BV1abc/document/resource?path=input%2Fhtml_assets%2Ffigure.png'
+
+  it('只接受当前 job 的单一本地资源路径', () => {
+    expect(boundDocumentImageUrl('job_BV1abc', bound, base)).toBe(`https://flori.example${bound}`)
+    expect(boundDocumentImageUrl('job_BV1abc', 'https://evil.example/image.png', base)).toBeNull()
+    expect(boundDocumentImageUrl('job_BV1abc', '/api/jobs/job_other/document/resource?path=x', base)).toBeNull()
+    expect(boundDocumentImageUrl('job_BV1abc', '/api/jobs/job_BV1abc/document/resource', base)).toBeNull()
+    expect(boundDocumentImageUrl('job_BV1abc', `${bound}&path=other`, base)).toBeNull()
   })
 })
 

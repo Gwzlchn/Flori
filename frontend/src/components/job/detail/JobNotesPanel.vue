@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { onBeforeUnmount, ref } from 'vue'
 import { ChevronDown, ExternalLink, FileText, Languages, List, RefreshCw, Star } from 'lucide-vue-next'
 import MarkdownViewer from '../../notes/MarkdownViewer.vue'
 import DocumentPdfViewer from '../../document/DocumentPdfViewer.vue'
 import type { AiProviderInfo, CanonicalEvidenceProjection } from '../../../types'
+import { boundDocumentImageUrl } from '../../../utils/documentReader'
 
 type NoteVariant = 'smart' | 'original' | 'translated' | 'pdf'
 interface Version { provider: string; model: string; version: string; file: string; review_file: string | null; overall: number | null; review_state?: string | null }
@@ -10,7 +12,7 @@ type Provider = AiProviderInfo
 interface Heading { id: string; text: string; level: number }
 interface Term { term: string; zh_name?: string; aliases?: string[] }
 
-defineProps<{
+const props = defineProps<{
   jobId: string
   domain: string
   hasSmartNote: boolean
@@ -48,6 +50,35 @@ defineEmits<{
   pdfPage: [page: number]
   evidenceCitation: [id: string]
 }>()
+
+const sourceFrame = ref<HTMLIFrameElement | null>(null)
+let sourceDocument: Document | null = null
+
+function unbindSourceImageViewer() {
+  sourceDocument?.removeEventListener('click', openBoundSourceImage)
+  sourceDocument = null
+}
+
+function openBoundSourceImage(event: Event) {
+  const target = event.target as HTMLImageElement | null
+  if (target?.tagName !== 'IMG' || !target.classList.contains('flori-snapshot-image')) return
+  const source = target.currentSrc || target.src
+  const url = boundDocumentImageUrl(props.jobId, source, window.location.href)
+  if (!url) return
+  event.preventDefault()
+  event.stopPropagation()
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function bindSourceImageViewer() {
+  unbindSourceImageViewer()
+  const document = sourceFrame.value?.contentDocument
+  if (!document) return
+  document.addEventListener('click', openBoundSourceImage)
+  sourceDocument = document
+}
+
+onBeforeUnmount(unbindSourceImageViewer)
 </script>
 
 <template>
@@ -84,10 +115,10 @@ defineEmits<{
   </div>
   <div v-else-if="isDocument && noteVariant === 'original' && hasSourceHtml" class="document-reader-wrap">
     <div class="pdf-head">
-      <span class="lead"><FileText :size="13" /> HTML 原文保留来源结构、公式和稳定锚点。</span>
+      <span class="lead"><FileText :size="13" /> HTML 原文按上游版式显示，点击图片可查看本地无损原图。</span>
       <a :href="sourceHtmlUrl" target="_blank" rel="noopener">新窗口打开<ExternalLink :size="13" /></a>
     </div>
-    <iframe :src="sourceHtmlUrl" sandbox="allow-same-origin" class="document-reader-frame" title="文档 HTML 原文" loading="lazy" />
+    <iframe ref="sourceFrame" :src="sourceHtmlUrl" sandbox="allow-same-origin" class="document-reader-frame" title="文档 HTML 原文" loading="lazy" @load="bindSourceImageViewer" />
   </div>
   <div v-else-if="isDocument && noteVariant === 'translated' && hasTranslation" class="document-reader-wrap">
     <div class="pdf-head">
