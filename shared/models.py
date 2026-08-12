@@ -15,6 +15,7 @@ DEFAULT_AI_MODEL = "claude-opus-5"
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_QODER_MODEL = "ultimate"
 DEFAULT_KIMI_MODEL = "moonshot-v1-128k"
+MAX_WORKER_CONCURRENCY = 128
 # provider 缺省模型的单一来源:各家模型名互不通用,跨 provider 沿用同一个默认必错。
 DEFAULT_PROVIDER_MODELS = {
     DEFAULT_AI_PROVIDER: DEFAULT_AI_MODEL,

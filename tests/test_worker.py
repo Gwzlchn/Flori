@@ -1529,7 +1529,7 @@ class TestConcurrency:
         w = Worker(
             transport=RedisTransport(redis, db), config=config, storage=storage,
             worker_type="cpu", pools=["cpu", "io"], tags=set(), reject_tags=set(),
-            concurrency=3,
+            concurrency=128,
         )
         slots: list[int] = []
         slots_ready = asyncio.Event()
@@ -1537,7 +1537,7 @@ class TestConcurrency:
 
         async def fake_loop(slot=0):
             slots.append(slot)
-            if len(slots) >= 3:
+            if len(slots) >= 128:
                 slots_ready.set()
             await stop.wait()
 
@@ -1551,7 +1551,7 @@ class TestConcurrency:
         w.shutdown()
         stop.set()
         await asyncio.wait_for(task, timeout=10)
-        assert sorted(slots) == [0, 1, 2]
+        assert sorted(slots) == list(range(128))
 
     @pytest.mark.asyncio
     async def test_supervisor_scales_up_and_down(self, redis, db, config, storage):

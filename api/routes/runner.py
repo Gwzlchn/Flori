@@ -25,6 +25,7 @@ from shared.content_policy import RETIRED_PROVIDER_VALUES
 from shared.db import Database
 from shared.models import (
     AIUsage,
+    MAX_WORKER_CONCURRENCY,
     Worker,
     generate_worker_id,
     validate_ai_metering_units,
@@ -217,7 +218,7 @@ class RunnerRegisterRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     reject_tags: list[str] = Field(default_factory=list)
     hostname: str | None = None
-    concurrency: int = 1
+    concurrency: int = Field(default=1, ge=1, le=MAX_WORKER_CONCURRENCY)
     spec: dict = Field(default_factory=dict)   # 版本/机器配置(worker 自报,redis-only)
 
 
@@ -228,7 +229,7 @@ class RunnerResumeRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     reject_tags: list[str] = Field(default_factory=list)
     hostname: str | None = None
-    concurrency: int = 1
+    concurrency: int = Field(default=1, ge=1, le=MAX_WORKER_CONCURRENCY)
     spec: dict = Field(default_factory=dict)
 
 
@@ -237,7 +238,9 @@ class RunnerHeartbeatRequest(BaseModel):
     status: str = "idle"
     current_job: str = ""
     current_step: str = ""
-    concurrency: int | None = Field(default=None, ge=1, le=64)
+    concurrency: int | None = Field(
+        default=None, ge=1, le=MAX_WORKER_CONCURRENCY,
+    )
     load: dict = Field(default_factory=dict)   # 本机 live 负载 {cpu_pct,mem_pct,loadavg};可空
     applied_cfg_rev: int = 0                   # worker 已生效的配置版本(回报,前端显示同步态)
     # 在跑步集合 [{job_id,step,exec_id}]:心跳捎带,为每个并发步刷进度心跳.独立 alive 通道

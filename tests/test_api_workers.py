@@ -375,6 +375,20 @@ class TestWorkerConfig:
         cfg2, _ = db.get_worker_desired_config("cpu-cfg01")
         assert cfg2 == {"concurrency": 2}   # 只存显式指定键
 
+    def test_put_config_accepts_128_and_rejects_129(self, app, db):
+        from fastapi.testclient import TestClient
+        _make_worker(db, id="cpu-cfg128")
+        c = TestClient(app)
+        accepted = c.put(
+            "/api/workers/cpu-cfg128/config", json={"concurrency": 128},
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["desired_config"] == {"concurrency": 128}
+        rejected = c.put(
+            "/api/workers/cpu-cfg128/config", json={"concurrency": 129},
+        )
+        assert rejected.status_code == 422
+
     def test_put_config_validates(self, app, db):
         from fastapi.testclient import TestClient
         _make_worker(db, id="cpu-cfg02")

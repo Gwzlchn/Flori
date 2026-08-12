@@ -8017,7 +8017,7 @@
           "concurrency": {
             "anyOf": [
               {
-                "maximum": 64.0,
+                "maximum": 128.0,
                 "minimum": 1.0,
                 "type": "integer"
               },

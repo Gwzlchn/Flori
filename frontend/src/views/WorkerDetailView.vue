@@ -33,6 +33,7 @@ const error = ref('')
 const busy = ref(false)
 const cfgConcurrency = ref(1)
 const cfgSaving = ref(false)
+const MAX_WORKER_CONCURRENCY = 128
 
 function desiredConcurrency(w: Worker): number {
   return w.desired_config?.concurrency ?? w.concurrency ?? 1
@@ -171,8 +172,12 @@ async function saveNote() {
 async function saveConfig() {
   if (!worker.value) return
   const concurrency = Math.trunc(Number(cfgConcurrency.value))
-  if (!Number.isFinite(concurrency) || concurrency < 1) {
-    showToast('并发必须大于 0', 'error')
+  if (
+    !Number.isFinite(concurrency)
+    || concurrency < 1
+    || concurrency > MAX_WORKER_CONCURRENCY
+  ) {
+    showToast(`并发必须在 1–${MAX_WORKER_CONCURRENCY} 之间`, 'error')
     return
   }
   cfgSaving.value = true
@@ -296,7 +301,8 @@ onBeforeUnmount(() => global.setCrumbs(null))
         <div style="display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap">
           <div class="field" style="margin:0;max-width:150px">
             <label>并发</label>
-            <input v-model.number="cfgConcurrency" type="number" min="1" max="64" class="input" />
+            <input v-model.number="cfgConcurrency" type="number" min="1"
+              :max="MAX_WORKER_CONCURRENCY" class="input" />
           </div>
           <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px">
             <span class="badge b-mut">当前 {{ worker.concurrency }}</span>

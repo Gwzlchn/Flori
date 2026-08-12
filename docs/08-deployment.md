@@ -284,8 +284,9 @@ docker run -d --restart unless-stopped \
   -e GATEWAY_TLS_INSECURE=1 \                 # 自签/裸IP 网关需要;有受信证书可删
   -e WORKER_REGISTRATION_TOKEN=<管理页铸造的 flw- token> \
   -e WORKER_NAME=cpu-1 \                       # 确定性 id;同机多 worker 各给唯一名,不撞
+  -e WORKER_CONCURRENCY=4 \                    # 单Worker 1..128;按节点容量设置
   -e CONFIG_DIR=/app/configs \
-  ghcr.io/${IMAGE_OWNER:-gwzlchn}/flori-worker-cpu:latest \
+  ghcr.io/<owner>/flori-worker-cpu:latest \
   python -m worker.main --pools cpu
 ```
 
@@ -305,6 +306,9 @@ docker run -d --restart unless-stopped \
 AI Worker 必须选择与 `FLORI_CLI_PROVIDER` 对应的镜像:`claude-cli` → `flori-worker-ai-claude`,
 `qoder-cli` → `flori-worker-ai-qoder`,`codex-cli` → `flori-worker-ai-codex`。三者可以独立构建、发布和滚动;
 镜像入口会拒绝 provider 与内置 CLI 不一致,也会拒绝 AI 镜像声明 compute pool。
+`WORKER_CONCURRENCY`和中心热配置都允许1到128;该值是认领槽位而非容量保证。Qoder等CLI步骤的实际峰值
+受CPU、内存与Provider配额共同约束,大并发优先拆到多个独立Worker节点。`deploy/edge/worker.yml`分别使用
+`WORKER_CONCURRENCY_CPU`和`WORKER_CONCURRENCY_AI`,避免为AI扩容时误放大CPU任务。
 
 > 旧的「中转 Redis(TLS)+MinIO」直连模型见上方 compose，已被网关模型取代，仅在需要 worker 直连内部组件时保留。
 

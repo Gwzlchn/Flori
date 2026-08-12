@@ -59,6 +59,16 @@ def test_source_library_and_ai_variant_images_keep_routes_and_tags_closed() -> N
     assert ai["image"] == expected_image
     assert "WORKER_AI_IMAGE" not in compose_text
 
+    edge_services = yaml.safe_load(
+        (ROOT / "deploy/edge/worker.yml").read_text()
+    )["services"]
+    assert edge_services["worker-cpu"]["environment"]["WORKER_CONCURRENCY"] == (
+        "${WORKER_CONCURRENCY_CPU:-1}"
+    )
+    assert edge_services["worker-ai"]["environment"]["WORKER_CONCURRENCY"] == (
+        "${WORKER_CONCURRENCY_AI:-1}"
+    )
+
     executor_services = yaml.safe_load(
         (ROOT / "docker-compose.executor.yml").read_text()
     )["services"]

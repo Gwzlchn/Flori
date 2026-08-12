@@ -219,7 +219,7 @@ describe('WorkerDetailView', () => {
     api.get.mockImplementation((url: string) => {
       if (url === '/api/workers') {
         return Promise.resolve([
-          makeWorker({ concurrency: 3, desired_config: { concurrency: 3 }, cfg_rev: 2, applied_cfg_rev: 2 }),
+          makeWorker({ concurrency: 128, desired_config: { concurrency: 128 }, cfg_rev: 2, applied_cfg_rev: 2 }),
         ])
       }
       if (url.endsWith('/tasks')) return Promise.resolve([])
@@ -227,7 +227,7 @@ describe('WorkerDetailView', () => {
         detailCalls += 1
         return Promise.resolve(detailCalls === 1
           ? makeWorker({ concurrency: 1, desired_config: { concurrency: 1 }, cfg_rev: 1, applied_cfg_rev: 1 })
-          : makeWorker({ concurrency: 3, desired_config: { concurrency: 3 }, cfg_rev: 2, applied_cfg_rev: 2 }))
+          : makeWorker({ concurrency: 128, desired_config: { concurrency: 128 }, cfg_rev: 2, applied_cfg_rev: 2 }))
       }
       return Promise.resolve(makeWorker())
     })
@@ -235,18 +235,32 @@ describe('WorkerDetailView', () => {
     await flushPromises()
     const configCard = w.findAll('.card').find(c => c.text().includes('配置') && c.text().includes('当前 1'))
     expect(configCard).toBeTruthy()
-    await configCard!.find('input[type="number"]').setValue('3')
+    const concurrencyInput = configCard!.find('input[type="number"]')
+    expect(concurrencyInput.attributes('max')).toBe('128')
+    await concurrencyInput.setValue('128')
     const saveBtn = configCard!.findAll('button').find(b => b.text().includes('保存配置'))
     expect(saveBtn).toBeTruthy()
     await saveBtn!.trigger('click')
     await flushPromises()
 
-    expect(api.put).toHaveBeenCalledWith('/api/workers/w1/config', { concurrency: 3 })
+    expect(api.put).toHaveBeenCalledWith('/api/workers/w1/config', { concurrency: 128 })
     expect(detailCalls).toBe(2)
     const concurrencyRow = w.findAll('tr').find(row => row.text().startsWith('并发'))
-    expect(concurrencyRow?.text()).toContain('3')
-    expect(w.text()).toContain('当前 3')
+    expect(concurrencyRow?.text()).toContain('128')
+    expect(w.text()).toContain('当前 128')
     expect(showToast).toHaveBeenCalledWith('配置已保存', 'success')
+  })
+
+  it('配置保存：129 在前端拒绝且不发请求', async () => {
+    const showToast = vi.fn()
+    const w = factory({ showToast })
+    await flushPromises()
+    const configCard = w.findAll('.card').find(c => c.text().includes('配置'))
+    await configCard!.find('input[type="number"]').setValue('129')
+    const saveBtn = configCard!.findAll('button').find(b => b.text().includes('保存配置'))
+    await saveBtn!.trigger('click')
+    expect(api.put).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith('并发必须在 1–128 之间', 'error')
   })
 
   it('成功率：完成与失败均为 0 时显示「—」', async () => {

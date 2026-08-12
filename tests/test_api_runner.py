@@ -67,6 +67,13 @@ class TestRegisterGate:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
+    async def test_register_accepts_128_and_rejects_129(self, client):
+        accepted = await _register(client, concurrency=128)
+        assert accepted.status_code == 200
+        rejected = await _register(client, concurrency=129)
+        assert rejected.status_code == 422
+
+    @pytest.mark.asyncio
     async def test_disabled_when_nothing_configured_503(self, client, redis_mock):
         # Redis 没铸 token 且 env 没配 → fail closed 503
         redis_mock.get_registration_token.return_value = None
@@ -253,6 +260,23 @@ class TestHeartbeat:
         assert resp.status_code == 200
         # 心跳响应即配置热下发通道(docs/03 §1.7.2):未配置时 desired_config=None/rev=0。
         assert resp.json() == {"ok": True, "desired_config": None, "cfg_rev": 0}
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_accepts_128_and_rejects_129(self, client):
+        worker_id, token = await self._register_worker(client)
+        headers = {"Authorization": f"Bearer {token}"}
+        accepted = await client.post(
+            "/api/runner/heartbeat",
+            json={"worker_id": worker_id, "concurrency": 128},
+            headers=headers,
+        )
+        assert accepted.status_code == 200
+        rejected = await client.post(
+            "/api/runner/heartbeat",
+            json={"worker_id": worker_id, "concurrency": 129},
+            headers=headers,
+        )
+        assert rejected.status_code == 422
 
     @pytest.mark.asyncio
     async def test_heartbeat_restores_expired_worker_presence(

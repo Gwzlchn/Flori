@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from shared.db import PROMPT_VERSION_EXCLUSIVE_MAX, PROMPT_VERSION_MIN
 from shared.document_registry import DOCUMENT_KIND_NAMES
 from shared.source_registry import CONTENT_TYPE_NAMES, SUBSCRIPTION_SOURCE_NAMES
+from shared.models import MAX_WORKER_CONCURRENCY
 
 
 ContentType = Enum(
@@ -329,7 +330,9 @@ class WorkerConfigRequest(BaseModel):
     """中心下发 worker 运行配置(当前仅 concurrency;worker 心跳热应用,docs/03 §1.7.2)。"""
     model_config = {"extra": "forbid"}
 
-    concurrency: int | None = Field(default=None, ge=1, le=64)
+    concurrency: int | None = Field(
+        default=None, ge=1, le=MAX_WORKER_CONCURRENCY,
+    )
 
 
 class WorkerUpdateRequest(BaseModel):
