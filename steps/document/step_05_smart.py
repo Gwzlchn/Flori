@@ -52,6 +52,7 @@ _TEMPLATES = (
     "05_smart_document.introduction",
 )
 _SCHEMAS = ("chapter", "theme", "final", "introduction")
+_MAX_STAGE_ATTEMPTS = 3
 _QUALITY_NOTE_METRIC_KEYS = (
     "pdf_source_quality", "pdf_crosswalk_blocks", "pdf_crosswalk_visuals",
     "pdf_crosswalk_ambiguous", "pdf_crosswalk_visual_ambiguous",
@@ -406,7 +407,7 @@ class DocumentSmartStep(StepBase):
         template = invocation.load_prompt_template(template_name)
         prompt = self._render_stage_prompt(template, values)
         last_error: ValueError | None = None
-        for attempt in range(2):
+        for attempt in range(_MAX_STAGE_ATTEMPTS):
             attempt_prompt = prompt
             if last_error is not None:
                 feedback = canonical_json({"validation_error": str(last_error)})

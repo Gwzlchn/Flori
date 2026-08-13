@@ -563,7 +563,7 @@ def test_stage_prompt_rendering_is_single_pass():
     assert rendered == "A={{B}} B=safe"
 
 
-def test_layered_step_retries_invalid_stage_once_and_publishes_nothing(
+def test_layered_step_retries_invalid_stage_twice_and_publishes_nothing(
     tmp_path, monkeypatch,
 ):
     job = _fixture(tmp_path)
@@ -584,7 +584,7 @@ def test_layered_step_retries_invalid_stage_once_and_publishes_nothing(
     monkeypatch.setattr(AIInvocation, "call", invalid)
     with pytest.raises(ValueError, match="identity mismatch"):
         step.execute()
-    assert calls == 2
+    assert calls == 3
     assert not list((job / "output/versions").glob("notes_smart_*"))
     assert not (job / "output/smart_pipeline/manifest.json").exists()
 
@@ -647,6 +647,38 @@ def test_stage_prompt_budget_rejects_before_ai(tmp_path, monkeypatch):
         step._call_validated(
             step.ai, "test", {}, {"type": "object"}, lambda value: value,
         )
+
+
+def test_stage_third_attempt_can_recover_from_truncated_json(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    step = DocumentSmartStep("05_smart", job, config)
+    responses = iter((
+        '{"ok":',
+        '{"ok":',
+        '{"ok":true}',
+    ))
+    prompts: list[str] = []
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
+        return next(responses)
+
+    monkeypatch.setattr(step.ai, "load_prompt_template", lambda _name: "fixed")
+    monkeypatch.setattr(step.ai, "call", call)
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["ok"], "properties": {"ok": {"type": "boolean"}},
+    }
+    assert step._call_validated(
+        step.ai, "test", {}, schema, lambda value: value,
+    ) == {"ok": True}
+    assert len(prompts) == 3
+    assert "校验反馈=" not in prompts[0]
+    assert "AI stage result is not valid JSON" in prompts[1]
+    assert "AI stage result is not valid JSON" in prompts[2]
 
 
 def test_stage_retry_rechecks_prompt_budget(tmp_path, monkeypatch):
