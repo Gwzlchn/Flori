@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -876,7 +875,6 @@ def test_parallel_stage_uses_bounded_sliding_window(tmp_path, monkeypatch):
             started.append(invocation)
         if invocation in {f"p{index:03d}" for index in range(8)}:
             first_window.wait(timeout=2)
-        time.sleep(0.01)
         with lock:
             active -= 1
         return {"id": invocation}
@@ -904,8 +902,15 @@ def test_parallel_stage_stops_submitting_after_first_final_failure(
     )
     monkeypatch.setattr(step, "_stage_parallelism", lambda: 4)
     first_window = threading.Barrier(4)
+    wait_observed_failure = threading.Event()
     started: list[str] = []
     lock = threading.Lock()
+    real_wait = smart_step_module.wait
+
+    def observable_wait(*args, **kwargs):
+        completed, pending = real_wait(*args, **kwargs)
+        wait_observed_failure.set()
+        return completed, pending
 
     def call(invocation, *_args):
         with lock:
@@ -913,9 +918,10 @@ def test_parallel_stage_stops_submitting_after_first_final_failure(
         first_window.wait(timeout=2)
         if invocation == "p000":
             raise ValueError("p015 exhausted three attempts")
-        time.sleep(0.05)
+        assert wait_observed_failure.wait(timeout=2)
         return {"id": invocation}
 
+    monkeypatch.setattr(smart_step_module, "wait", observable_wait)
     monkeypatch.setattr(step, "_call_validated", call)
     tasks = [
         (f"p{index:03d}", f"p{index:03d}", "template", {}, [], lambda x: x)
