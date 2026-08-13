@@ -786,6 +786,72 @@ def test_stage_third_attempt_can_recover_from_truncated_json(tmp_path, monkeypat
     assert "AI stage result is not valid JSON" in prompts[2]
 
 
+def test_stage_retry_reports_all_unknown_and_allowed_fields(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    step = DocumentSmartStep("05_smart", job, config)
+    responses = iter((
+        json.dumps({
+            "items": [{"claim": "x", "claim_note": ""}],
+            "synthesis": {"analysis": "x", "additional_note": ""},
+        }),
+        json.dumps({
+            "items": [{"claim": "x"}],
+            "synthesis": {"analysis": "x"},
+        }),
+    ))
+    prompts: list[str] = []
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
+        return next(responses)
+
+    monkeypatch.setattr(step.ai, "load_prompt_template", lambda _name: "fixed")
+    monkeypatch.setattr(step.ai, "call", call)
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["items", "synthesis"],
+        "properties": {
+            "items": {
+                "type": "array", "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["claim"],
+                    "properties": {"claim": {"type": "string"}},
+                },
+            },
+            "synthesis": {
+                "type": "object", "additionalProperties": False,
+                "required": ["analysis"],
+                "properties": {"analysis": {"type": "string"}},
+            },
+        },
+    }
+    assert step._call_validated(
+        step.ai, "test", {}, schema, lambda value: value,
+    ) == {"items": [{"claim": "x"}], "synthesis": {"analysis": "x"}}
+    assert len(prompts) == 2
+    feedback = json.loads(prompts[1].split("校验反馈=", 1)[1])["validation_error"]
+    assert 'result.items[0] contains unknown fields ["claim_note"]' in feedback
+    assert 'allowed fields are ["claim"]' in feedback
+    assert 'result.synthesis contains unknown fields ["additional_note"]' in feedback
+    assert 'allowed fields are ["analysis"]' in feedback
+
+
+def test_unknown_field_feedback_escapes_lone_surrogate():
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "properties": {"ok": {"type": "boolean"}},
+    }
+    raw = json.dumps({"ok": True, "\ud800": None})
+    with pytest.raises(ValueError, match="unknown fields") as caught:
+        parse_stage_result(raw, schema)
+    feedback = str(caught.value)
+    assert "\\ud800" in feedback
+    feedback.encode("utf-8")
+
+
 def test_stage_retry_rechecks_prompt_budget(tmp_path, monkeypatch):
     job = _fixture(tmp_path)
     config = make_step_config(

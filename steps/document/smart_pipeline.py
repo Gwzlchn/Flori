@@ -380,11 +380,67 @@ def validate_schema(value: Any, schema: Mapping[str, Any], path: str = "result")
         if not required <= set(value):
             raise ValueError(f"{path} misses required fields")
         properties = schema.get("properties") or {}
-        if schema.get("additionalProperties") is False and not set(value) <= set(properties):
-            raise ValueError(f"{path} contains unknown fields")
+        unknown = set(value) - set(properties)
+        if schema.get("additionalProperties") is False and unknown:
+            raise ValueError(_unknown_fields_message(path, unknown, set(properties)))
         for key, item in value.items():
             if key in properties:
                 validate_schema(item, properties[key], f"{path}.{key}")
+
+
+def _bounded_field_names(values: set[str]) -> str:
+    names = sorted(values)
+    shown = [name if len(name) <= 128 else name[:125] + "..." for name in names[:16]]
+    suffix = f" (+{len(names) - len(shown)} more)" if len(names) > len(shown) else ""
+    return json.dumps(
+        shown, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ) + suffix
+
+
+def _unknown_fields_message(path: str, unknown: set[str], allowed: set[str]) -> str:
+    return (
+        f"{path} contains unknown fields {_bounded_field_names(unknown)}; "
+        f"allowed fields are {_bounded_field_names(allowed)}"
+    )
+
+
+def _collect_unknown_fields(
+    value: Any, schema: Mapping[str, Any], path: str = "result",
+) -> list[tuple[str, set[str], set[str]]]:
+    """收集同一响应里的全部额外字段,让一次反馈足以修正多个对象。"""
+    violations: list[tuple[str, set[str], set[str]]] = []
+    if isinstance(value, dict):
+        properties = schema.get("properties") or {}
+        unknown = set(value) - set(properties)
+        if schema.get("additionalProperties") is False and unknown:
+            violations.append((path, unknown, set(properties)))
+        for key, item in value.items():
+            child_schema = properties.get(key)
+            if isinstance(child_schema, Mapping):
+                violations.extend(
+                    _collect_unknown_fields(item, child_schema, f"{path}.{key}")
+                )
+    elif isinstance(value, list):
+        item_schema = schema.get("items")
+        if isinstance(item_schema, Mapping):
+            for index, item in enumerate(value):
+                violations.extend(
+                    _collect_unknown_fields(item, item_schema, f"{path}[{index}]")
+                )
+    return violations
+
+
+def _unknown_fields_feedback(
+    violations: list[tuple[str, set[str], set[str]]],
+) -> str:
+    shown = violations[:16]
+    message = "; ".join(
+        _unknown_fields_message(path, unknown, allowed)
+        for path, unknown, allowed in shown
+    )
+    if len(violations) > len(shown):
+        message += f"; {len(violations) - len(shown)} additional objects contain unknown fields"
+    return message
 
 
 def parse_stage_result(raw: str, schema: Mapping[str, Any]) -> dict[str, Any]:
@@ -399,6 +455,9 @@ def parse_stage_result(raw: str, schema: Mapping[str, Any]) -> dict[str, Any]:
         result = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ValueError("AI stage result is not valid JSON") from exc
+    unknown_fields = _collect_unknown_fields(result, schema)
+    if unknown_fields:
+        raise ValueError(_unknown_fields_feedback(unknown_fields))
     validate_schema(result, schema)
     return result
 
