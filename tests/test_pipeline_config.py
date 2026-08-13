@@ -501,6 +501,35 @@ class TestAIRoleContract:
             validate_ai_pipeline_contract(pipelines, providers)
 
 
+def test_document_smart_parallelism_provider_defaults_are_bounded():
+    configs_dir = Path(__file__).resolve().parents[1] / "configs"
+    providers = load_yaml(configs_dir / "providers.yaml")
+    assert providers["providers"]["qoder-cli"]["document_smart_parallelism"] == 8
+    assert providers["providers"]["claude-cli"]["document_smart_parallelism"] == 4
+    validate_ai_pipeline_contract(
+        {"p": {"steps": [{
+            "name": "A", "pool": "ai",
+            "ai": {"allowed_providers": ["qoder-cli"]},
+        }]}},
+        providers,
+    )
+
+
+@pytest.mark.parametrize("value", (True, "8", 8.0, 0, -1, 9))
+def test_document_smart_parallelism_rejects_invalid_provider_value(value):
+    providers = {"providers": {"qoder-cli": {
+        "type": "qoder_cli", "model": "ultimate", "models": ["ultimate"],
+        "reasoning_effort": "max", "reasoning_efforts": ["max"],
+        "document_smart_parallelism": value,
+    }}}
+    pipelines = {"p": {"steps": [{
+        "name": "A", "pool": "ai",
+        "ai": {"allowed_providers": ["qoder-cli"]},
+    }]}}
+    with pytest.raises(ValueError, match="document_smart_parallelism"):
+        validate_ai_pipeline_contract(pipelines, providers)
+
+
 # rules:声明式跳过/运行(归一化映射为 condition,行为等价)
 
 

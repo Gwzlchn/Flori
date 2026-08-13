@@ -17,7 +17,6 @@ MAX_STAGE_PROMPT_BYTES = 1024 * 1024
 MAX_STAGE_RESULT_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_ATTACHMENTS = 5
 MAX_PACKAGE_SOURCE_ALIASES = 32
-MAX_PARALLEL_CALLS = 4
 MAX_PACKAGES = 64
 MAX_KNOWLEDGE_ITEMS = 128
 _BIBLIOGRAPHY_RE = re.compile(
@@ -448,13 +447,18 @@ def parse_stage_result(raw: str, schema: Mapping[str, Any]) -> dict[str, Any]:
     if len(data) > MAX_STAGE_RESULT_BYTES:
         raise ValueError("AI stage result exceeds byte limit")
     text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-        text = re.sub(r"\n?```\s*$", "", text).strip()
     try:
         result = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError("AI stage result is not valid JSON") from exc
+        reason = str(exc.msg)[:160]
+        detail = (
+            f"AI stage result is not valid JSON: {reason}; "
+            f"line {exc.lineno} column {exc.colno}. "
+            "Return one complete RFC 8259 JSON object. In JSON strings, encode "
+            "newlines as \\n and literal backslashes as \\\\; only use the legal "
+            "escapes \\\", \\\\, \\/, \\b, \\f, \\n, \\r, \\t, or \\uXXXX."
+        )
+        raise ValueError(detail) from exc
     unknown_fields = _collect_unknown_fields(result, schema)
     if unknown_fields:
         raise ValueError(_unknown_fields_feedback(unknown_fields))

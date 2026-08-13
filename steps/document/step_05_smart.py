@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -13,6 +13,10 @@ from shared.document_contract import (
     MAX_QUALITY_JSON_BYTES,
     validate_document,
     validate_quality,
+)
+from shared.config import (
+    DEFAULT_DOCUMENT_SMART_PARALLELISM,
+    MAX_DOCUMENT_SMART_PARALLELISM,
 )
 from shared.errors import InputInvalidError
 from shared.step_ai import AIInvocation
@@ -25,7 +29,6 @@ from steps.document.provenance import (
     require_unique_document_provenance_anchors,
 )
 from steps.document.smart_pipeline import (
-    MAX_PARALLEL_CALLS,
     MAX_STAGE_PROMPT_BYTES,
     build_chapter_packages,
     build_themes,
@@ -385,18 +388,71 @@ class DocumentSmartStep(StepBase):
     def _parallel_validated(
         self, tasks: list[tuple], schema: Mapping[str, Any],
     ) -> dict[str, dict[str, Any]]:
+        if not tasks:
+            return {}
+        parallelism = min(self._stage_parallelism(), len(tasks))
         results: dict[str, dict[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_CALLS, len(tasks))) as pool:
-            futures = {
-                pool.submit(
-                    self._call_validated, invocation, template, values,
-                    schema, validator, images,
-                ): task_id
-                for task_id, invocation, template, values, images, validator in tasks
-            }
-            for future in as_completed(futures):
-                results[futures[future]] = future.result()
-        return results
+        pool = ThreadPoolExecutor(max_workers=parallelism)
+        futures: dict[Future, str] = {}
+        next_task = 0
+
+        def submit_one() -> None:
+            nonlocal next_task
+            task_id, invocation, template, values, images, validator = tasks[next_task]
+            next_task += 1
+            future = pool.submit(
+                self._call_validated, invocation, template, values,
+                schema, validator, images,
+            )
+            futures[future] = task_id
+
+        for _ in range(parallelism):
+            submit_one()
+        try:
+            while futures:
+                completed, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+                failed = next(
+                    (future for future in completed if future.exception() is not None),
+                    None,
+                )
+                if failed is not None:
+                    for future in futures:
+                        if future not in completed:
+                            future.cancel()
+                    failed.result()
+                for future in completed:
+                    results[futures.pop(future)] = future.result()
+                while next_task < len(tasks) and len(futures) < parallelism:
+                    submit_one()
+            return results
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    def _stage_parallelism(self) -> int:
+        selection = self.ai.selection()
+        provider = (selection.get("override") or {}).get("provider")
+        if not provider:
+            tiers = selection.get("tiers") or []
+            if len(tiers) == 1:
+                provider = tiers[0].get("provider")
+        providers = (self.config.get("providers") or {}).get("providers") or {}
+        provider_config = providers.get(provider) if provider else None
+        value = (
+            provider_config.get(
+                "document_smart_parallelism", DEFAULT_DOCUMENT_SMART_PARALLELISM,
+            )
+            if isinstance(provider_config, dict)
+            else DEFAULT_DOCUMENT_SMART_PARALLELISM
+        )
+        if (
+            type(value) is not int
+            or not 1 <= value <= MAX_DOCUMENT_SMART_PARALLELISM
+        ):
+            raise InputInvalidError(
+                "document smart parallelism must be an integer from 1 to "
+                f"{MAX_DOCUMENT_SMART_PARALLELISM}"
+            )
+        return value
 
     def _call_validated(
         self, invocation: AIInvocation, template_name: str,

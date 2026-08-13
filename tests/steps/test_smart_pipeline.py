@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -783,7 +785,170 @@ def test_stage_third_attempt_can_recover_from_truncated_json(tmp_path, monkeypat
     assert len(prompts) == 3
     assert "校验反馈=" not in prompts[0]
     assert "AI stage result is not valid JSON" in prompts[1]
+    assert "line 1 column 7" in prompts[1]
+    assert "complete RFC 8259 JSON object" in prompts[1]
     assert "AI stage result is not valid JSON" in prompts[2]
+
+
+def test_stage_invalid_escape_feedback_is_precise_and_does_not_echo_raw(
+    tmp_path, monkeypatch,
+):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    step = DocumentSmartStep("05_smart", job, config)
+    bad = '{"ok":"\\ 具体待确认项"}'
+    responses = iter((bad, '{"ok":true}'))
+    prompts: list[str] = []
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
+        return next(responses)
+
+    monkeypatch.setattr(step.ai, "load_prompt_template", lambda _name: "fixed")
+    monkeypatch.setattr(step.ai, "call", call)
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["ok"], "properties": {"ok": {"type": "boolean"}},
+    }
+    assert step._call_validated(
+        step.ai, "test", {}, schema, lambda value: value,
+    ) == {"ok": True}
+    assert len(prompts) == 2
+    assert "Invalid \\\\escape" in prompts[1]
+    assert "line 1 column" in prompts[1]
+    assert "literal backslashes" in prompts[1]
+    assert "具体待确认项" not in prompts[1]
+
+
+@pytest.mark.parametrize("raw", (
+    '```json\n{"ok":true}\n```',
+    '```json\n{"ok":true}',
+))
+def test_stage_result_rejects_markdown_fences(raw):
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["ok"], "properties": {"ok": {"type": "boolean"}},
+    }
+    with pytest.raises(ValueError, match="not valid JSON"):
+        parse_stage_result(raw, schema)
+
+
+@pytest.mark.parametrize(("raw", "reason"), (
+    ('{"ok":"unfinished}', "Unterminated string starting at"),
+    ('{"ok":"\\ detail"}', "Invalid \\escape"),
+    ('{"ok":"closed"},"knowledge":[]', "Extra data"),
+))
+def test_stage_result_reports_p015_json_failure_reason_and_location(raw, reason):
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["ok"], "properties": {"ok": {"type": "string"}},
+    }
+    with pytest.raises(ValueError) as caught:
+        parse_stage_result(raw, schema)
+    message = str(caught.value)
+    assert reason in message
+    assert "line 1 column" in message
+    assert "complete RFC 8259 JSON object" in message
+
+
+def test_parallel_stage_uses_bounded_sliding_window(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    step = DocumentSmartStep(
+        "05_smart", job,
+        make_step_config(
+            tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+        ),
+    )
+    monkeypatch.setattr(step, "_stage_parallelism", lambda: 8)
+    lock = threading.Lock()
+    first_window = threading.Barrier(8)
+    active = 0
+    peak = 0
+    started: list[str] = []
+
+    def call(invocation, *_args):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            started.append(invocation)
+        if invocation in {f"p{index:03d}" for index in range(8)}:
+            first_window.wait(timeout=2)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return {"id": invocation}
+
+    monkeypatch.setattr(step, "_call_validated", call)
+    tasks = [
+        (f"p{index:03d}", f"p{index:03d}", "template", {}, [], lambda x: x)
+        for index in range(24)
+    ]
+    results = step._parallel_validated(tasks, {})
+    assert len(results) == 24
+    assert len(started) == 24
+    assert peak == 8
+
+
+def test_parallel_stage_stops_submitting_after_first_final_failure(
+    tmp_path, monkeypatch,
+):
+    job = _fixture(tmp_path)
+    step = DocumentSmartStep(
+        "05_smart", job,
+        make_step_config(
+            tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+        ),
+    )
+    monkeypatch.setattr(step, "_stage_parallelism", lambda: 4)
+    first_window = threading.Barrier(4)
+    started: list[str] = []
+    lock = threading.Lock()
+
+    def call(invocation, *_args):
+        with lock:
+            started.append(invocation)
+        first_window.wait(timeout=2)
+        if invocation == "p000":
+            raise ValueError("p015 exhausted three attempts")
+        time.sleep(0.05)
+        return {"id": invocation}
+
+    monkeypatch.setattr(step, "_call_validated", call)
+    tasks = [
+        (f"p{index:03d}", f"p{index:03d}", "template", {}, [], lambda x: x)
+        for index in range(20)
+    ]
+    with pytest.raises(ValueError, match="exhausted three attempts"):
+        step._parallel_validated(tasks, {})
+    assert set(started) == {"p000", "p001", "p002", "p003"}
+
+
+@pytest.mark.parametrize(("provider", "expected"), (
+    ("qoder-cli", 8),
+    ("claude-cli", 4),
+    ("codex-cli", 4),
+))
+def test_document_smart_parallelism_follows_materialized_provider(
+    tmp_path, monkeypatch, provider, expected,
+):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["providers"] = {"providers": {
+        "qoder-cli": {"document_smart_parallelism": 8},
+        "claude-cli": {"document_smart_parallelism": 4},
+        "codex-cli": {},
+    }}
+    step = DocumentSmartStep("05_smart", job, config)
+    monkeypatch.setattr(
+        step.ai, "selection",
+        lambda: {"override": {"provider": provider}, "tiers": []},
+    )
+    assert step._stage_parallelism() == expected
 
 
 def test_stage_retry_reports_all_unknown_and_allowed_fields(tmp_path, monkeypatch):

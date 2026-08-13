@@ -26,6 +26,8 @@ _PIPE_VAR_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
 
 # extends 继承链深度上限,防环/防失控(对标 GitLab 建议 ≤3 级)。
 _MAX_EXTENDS_DEPTH = 5
+DEFAULT_DOCUMENT_SMART_PARALLELISM = 4
+MAX_DOCUMENT_SMART_PARALLELISM = 8
 
 # 新→旧字段名映射:归一化后落到 worker/scheduler 现有消费的 step dict 字段。
 _FIELD_ALIASES = {
@@ -94,6 +96,15 @@ def validate_ai_pipeline_contract(pipelines: dict, providers: dict | None = None
         provider_map = providers.get("providers") if isinstance(providers, dict) else None
         if not isinstance(provider_map, dict):
             raise ValueError("providers config must contain a providers mapping")
+        for name, entry in provider_map.items():
+            if not isinstance(entry, dict) or "document_smart_parallelism" not in entry:
+                continue
+            value = entry["document_smart_parallelism"]
+            if type(value) is not int or not 1 <= value <= MAX_DOCUMENT_SMART_PARALLELISM:
+                raise ValueError(
+                    f"provider {name} document_smart_parallelism must be an integer "
+                    f"from 1 to {MAX_DOCUMENT_SMART_PARALLELISM}"
+                )
         # provider 自己的默认值越界没人显式选,却是每次调用的实际取值,加载期就拦。
         defaults = validate_provider_defaults(providers)
         if defaults:

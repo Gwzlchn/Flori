@@ -28,6 +28,7 @@
 - theme_coverage_refs 必须精确包含全部 EXPECTED_THEME_REFS。
 
 输出严格符合 OUTPUT_SCHEMA 的 JSON，不要 Markdown fence 或额外说明。
+输出前检查 JSON 字符串转义：换行写成 `\n`，字面反斜杠写成 `\\`，不得输出未转义换行或 `\ ` 等非法 escape。
 
 OUTPUT_SCHEMA:
 {{OUTPUT_SCHEMA}}
