@@ -504,7 +504,7 @@ class TestAIRoleContract:
 def test_document_smart_parallelism_provider_defaults_are_bounded():
     configs_dir = Path(__file__).resolve().parents[1] / "configs"
     providers = load_yaml(configs_dir / "providers.yaml")
-    assert providers["providers"]["qoder-cli"]["document_smart_parallelism"] == 8
+    assert providers["providers"]["qoder-cli"]["document_smart_parallelism"] == 4
     assert providers["providers"]["claude-cli"]["document_smart_parallelism"] == 4
     validate_ai_pipeline_contract(
         {"p": {"steps": [{

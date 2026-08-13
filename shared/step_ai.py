@@ -97,15 +97,35 @@ class AIInvocation:
 
     def merge_forks(self, invocations: list["AIInvocation"]) -> None:
         """按分片名合并调用审计；transcript 仍保留各自的唯一文件名。"""
-        records = list(self.ai_log_records)
+        records: list[dict] = []
+        records_by_exec_id: dict[str, dict] = {}
         fragment_paths: list[Path] = []
+        sources = [self.ai_log_records]
         for invocation in sorted(invocations, key=lambda item: item.audit_name or ""):
-            records.extend(invocation.ai_log_records)
+            sources.append(invocation.ai_log_records)
             fragment_paths.append(invocation._log_path())
             if invocation.last_response is not None:
                 self.last_provider = invocation.last_provider
                 self.last_model = invocation.last_model
                 self.last_response = invocation.last_response
+
+        for source in sources:
+            for record in source:
+                merged_record = dict(record)
+                exec_id = merged_record.get("exec_id")
+                if not isinstance(exec_id, str) or not exec_id:
+                    records.append(merged_record)
+                    continue
+                comparable = dict(merged_record)
+                comparable.pop("call_index", None)
+                existing = records_by_exec_id.get(exec_id)
+                if existing is not None:
+                    if comparable != existing:
+                        raise ValueError(f"AI log exec_id conflict: {exec_id}")
+                    continue
+                records_by_exec_id[exec_id] = comparable
+                records.append(merged_record)
+
         for index, record in enumerate(records):
             record["call_index"] = index
         self.ai_log_records = records

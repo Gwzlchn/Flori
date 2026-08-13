@@ -121,8 +121,8 @@ providers:
     reasoning_efforts: [low, medium, high, xhigh, max]
     # Qoder 包月订阅,无按量成本;token 用量照实记,cost 恒 0。
     cost_usd: 0
-    # 单篇论文使用滑动窗口,只保留8个在途调用,不会一次提交全部章节包。
-    document_smart_parallelism: 8
+    # 本地实测8路会放大Qoder上游BAD_REQUEST;默认4路,仍使用滑动窗口。
+    document_smart_parallelism: 4
 
   kimi:
     type: openai_compatible

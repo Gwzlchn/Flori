@@ -93,10 +93,72 @@ _CLI_RATE_LIMIT_MARKERS = (
     "overloaded", "quota", "too many requests", "limit reached",
 )
 
+_MAX_CLI_ENVELOPE_ERROR_CHARS = 500
+_MAX_CLI_ENVELOPE_ERROR_ITEMS = 8
+
 
 def _detail_is_rate_limited(detail: str) -> bool:
     low = detail.lower()
     return any(marker in low for marker in _CLI_RATE_LIMIT_MARKERS)
+
+
+def _cli_envelope_error_messages(obj: dict[str, Any]) -> list[str]:
+    """从 CLI 错误信封提取有界文本;不序列化信封,避免把原始响应写进异常。"""
+    values: list[Any] = []
+    errors = obj.get("errors")
+    if isinstance(errors, list):
+        values.extend(errors[:_MAX_CLI_ENVELOPE_ERROR_ITEMS])
+    elif errors is not None:
+        values.append(errors)
+    values.extend((obj.get("error"), obj.get("message")))
+
+    messages: list[str] = []
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("message")
+        if not isinstance(value, str):
+            continue
+        text = " ".join(value[:_MAX_CLI_ENVELOPE_ERROR_CHARS].split())
+        if text:
+            messages.append(text)
+        if len(messages) >= _MAX_CLI_ENVELOPE_ERROR_ITEMS:
+            break
+    return messages
+
+
+def _require_cli_envelope_result(
+    provider: str,
+    obj: dict[str, Any],
+    *,
+    transcript_path: str | None,
+) -> str:
+    """验证 CLI 顶层信封并返回正文;错误终态或无字符串正文一律抛出。"""
+    subtype = obj.get("subtype")
+    subtype_prefix = subtype[:81].lower() if isinstance(subtype, str) else ""
+    subtype_is_error = subtype_prefix == "error" or subtype_prefix.startswith("error_")
+    reasons: list[str] = []
+    if obj.get("is_error") is True:
+        reasons.append("is_error=true")
+    if subtype_is_error:
+        reasons.append(f"subtype={subtype[:80]}")
+    if "result" not in obj:
+        reasons.append("result is missing")
+    elif not isinstance(obj["result"], str):
+        reasons.append("result is not a string")
+
+    if not reasons:
+        return obj["result"]
+
+    messages = _cli_envelope_error_messages(obj)
+    detail = "; ".join((*reasons, *messages))[:_MAX_CLI_ENVELOPE_ERROR_CHARS]
+    error_type = (
+        AIRateLimitError
+        if any(_detail_is_rate_limited(item) for item in (*reasons, *messages))
+        else AIProviderError
+    )
+    error = error_type(f"{provider} returned an invalid or error envelope: {detail}")
+    error.transcript_path = transcript_path  # type: ignore[attr-defined]
+    raise error
 
 
 @lru_cache(maxsize=1)
@@ -889,7 +951,12 @@ class ClaudeCLIProvider:
             obj = json.loads(raw)
             if isinstance(obj, dict):
                 raw_obj = obj
-                content = obj.get("result", raw) or raw
+                raw_session_id = obj.get("session_id")
+                session_id = raw_session_id if isinstance(raw_session_id, str) else None
+                content = _require_cli_envelope_result(
+                    "Claude CLI", obj,
+                    transcript_path=self._find_transcript(session_id, env),
+                )
                 u = obj.get("usage") or {}
                 in_tok = int(u.get("input_tokens", 0) or 0)
                 out_tok = int(u.get("output_tokens", 0) or 0)
@@ -898,7 +965,6 @@ class ClaudeCLIProvider:
                 cost = float(obj.get("total_cost_usd", 0.0) or 0.0)
                 turns = int(obj.get("num_turns", 0) or 0)
                 model = _extract_cli_model(obj) or model
-                session_id = obj.get("session_id")
                 _api = obj.get("duration_api_ms") or obj.get("duration_ms")
                 api_ms = float(_api) if isinstance(_api, (int, float)) else None
                 finish_reason = obj.get("subtype") or obj.get("stop_reason")
@@ -1376,7 +1442,12 @@ class QoderCLIProvider:
             obj = json.loads(raw)
             if isinstance(obj, dict):
                 raw_obj = obj
-                content = obj.get("result", raw) or raw
+                raw_session_id = obj.get("session_id")
+                session_id = raw_session_id if isinstance(raw_session_id, str) else None
+                content = _require_cli_envelope_result(
+                    "Qoder CLI", obj,
+                    transcript_path=self._find_transcript(session_id, env),
+                )
                 u = obj.get("usage") or {}
                 in_tok = int(u.get("input_tokens", 0) or 0)
                 out_tok = int(u.get("output_tokens", 0) or 0)
@@ -1384,7 +1455,6 @@ class QoderCLIProvider:
                 cr = int(u.get("cache_read_input_tokens", 0) or 0)
                 turns = int(obj.get("num_turns", 0) or 0)
                 model = _extract_cli_model(obj) or model
-                session_id = obj.get("session_id")
                 _api = obj.get("duration_api_ms") or obj.get("duration_ms")
                 api_ms = float(_api) if isinstance(_api, (int, float)) else None
                 finish_reason = obj.get("subtype") or obj.get("stop_reason")

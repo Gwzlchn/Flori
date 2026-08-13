@@ -130,6 +130,84 @@ class TestGatewayAttempts:
 # step_base:ai_logs 落盘
 
 class TestAiLogDump:
+    @staticmethod
+    def _merge_record(exec_id="exec:chapter-p001:0", call_index=0, **values):
+        return {
+            "exec_id": exec_id,
+            "call_index": call_index,
+            "audit_stage": "chapter-p001",
+            "phase": "final",
+            "ok": True,
+            "output": {"content": "note"},
+            **values,
+        }
+
+    @pytest.mark.parametrize(("canonical_index", "fragment_index"), ((0, 0), (7, 0)))
+    def test_merge_forks_deduplicates_canonical_and_fragment_by_exec_id(
+        self, tmp_path, canonical_index, fragment_index,
+    ):
+        step = _Step(tmp_path, {"ai": {}})
+        canonical = self._merge_record(call_index=canonical_index)
+        step.ai.ai_log_records = [canonical]
+        step.ai._flush_logs()
+        forked = step.ai.fork("chapter-p001")
+        forked.ai_log_records = [self._merge_record(call_index=fragment_index)]
+        forked._flush_logs()
+        fragment = forked._log_path()
+
+        step.ai.merge_forks([forked])
+
+        assert _read_log(tmp_path) == [self._merge_record(call_index=0)]
+        assert step.ai.call_index == 1
+        assert not fragment.exists()
+
+    def test_merge_forks_rejects_conflicting_duplicate_exec_id(self, tmp_path):
+        step = _Step(tmp_path, {"ai": {}})
+        canonical = self._merge_record()
+        step.ai.ai_log_records = [canonical]
+        step.ai._flush_logs()
+        forked = step.ai.fork("chapter-p001")
+        forked.ai_log_records = [self._merge_record(output={"content": "changed"})]
+        forked._flush_logs()
+        fragment = forked._log_path()
+
+        with pytest.raises(ValueError, match="AI log exec_id conflict"):
+            step.ai.merge_forks([forked])
+
+        assert _read_log(tmp_path) == [canonical]
+        assert fragment.is_file()
+
+    def test_merge_forks_retry_after_flush_failure_does_not_grow(
+        self, tmp_path, monkeypatch,
+    ):
+        step = _Step(tmp_path, {"ai": {}})
+        canonical = self._merge_record(call_index=4)
+        step.ai.ai_log_records = [canonical]
+        step.ai._flush_logs()
+        forked = step.ai.fork("chapter-p001")
+        forked.ai_log_records = [self._merge_record(call_index=0)]
+        forked._flush_logs()
+        fragment = forked._log_path()
+        real_flush = step.ai._flush_logs
+        attempts = 0
+
+        def flaky_flush():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("canonical write failed")
+            real_flush()
+
+        monkeypatch.setattr(step.ai, "_flush_logs", flaky_flush)
+        with pytest.raises(OSError, match="canonical write failed"):
+            step.ai.merge_forks([forked])
+        assert fragment.is_file()
+
+        step.ai.merge_forks([forked])
+
+        assert _read_log(tmp_path) == [self._merge_record(call_index=0)]
+        assert not fragment.exists()
+
     def test_merge_forks_keeps_fragments_when_canonical_flush_fails(
         self, tmp_path, monkeypatch,
     ):

@@ -806,6 +806,177 @@ class _FakeProc:
         return self.returncode
 
 
+@pytest.mark.parametrize(
+    ("provider_class", "command", "state_dir"),
+    (
+        (ClaudeCLIProvider, ["claude", "-p"], ".claude"),
+        (QoderCLIProvider, ["qodercli", "-p"], ".qoder"),
+    ),
+)
+@pytest.mark.parametrize(
+    ("payload", "expected_detail"),
+    (
+        pytest.param(
+            {
+                "type": "result", "subtype": "error_during_execution",
+                "is_error": True, "errors": ["Qoder API error: BAD_REQUEST"],
+                "error_code": 400, "session_id": "p010-session",
+            },
+            "Qoder API error: BAD_REQUEST",
+            id="p010-bad-request",
+        ),
+        pytest.param(
+            {
+                "type": "result", "subtype": "error_during_execution",
+                "is_error": True, "errors": ["Error in upstream response"],
+                "error_code": 500, "session_id": "p015-session",
+            },
+            "Error in upstream response",
+            id="p015-upstream-error",
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_cli_exit_zero_error_envelope_fails_closed_with_transcript(
+    tmp_path, monkeypatch, provider_class, command, state_dir,
+    payload, expected_detail,
+):
+    """真实章节失败形状不得因 CLI exit 0 被当成模型正文。"""
+    transcript_dir = tmp_path / state_dir / "projects" / "-app"
+    transcript_dir.mkdir(parents=True)
+    transcript = transcript_dir / f"{payload['session_id']}.jsonl"
+    transcript.write_text('{"type":"assistant"}\n', encoding="utf-8")
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc(json.dumps(payload).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    provider = provider_class(command, env={"HOME": str(tmp_path)})
+    with pytest.raises(AIProviderError) as caught:
+        await provider.complete(LLMRequest(messages=[{"role": "user", "content": "x"}]))
+
+    assert not isinstance(caught.value, AIRateLimitError)
+    assert expected_detail in str(caught.value)
+    assert "result is missing" in str(caught.value)
+    assert caught.value.transcript_path == str(transcript)
+
+
+@pytest.mark.parametrize(
+    ("provider_class", "command"),
+    (
+        (ClaudeCLIProvider, ["claude", "-p"]),
+        (QoderCLIProvider, ["qodercli", "-p"]),
+    ),
+)
+@pytest.mark.parametrize("result", (None, 7, [], {}))
+@pytest.mark.asyncio
+async def test_cli_envelope_rejects_non_string_result(
+    monkeypatch, provider_class, command, result,
+):
+    payload = {
+        "type": "result", "subtype": "success", "is_error": False,
+        "result": result,
+    }
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc(json.dumps(payload).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    with pytest.raises(AIProviderError, match="result is not a string"):
+        await provider_class(command).complete(
+            LLMRequest(messages=[{"role": "user", "content": "x"}]),
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider_class", "command"),
+    (
+        (ClaudeCLIProvider, ["claude", "-p"]),
+        (QoderCLIProvider, ["qodercli", "-p"]),
+    ),
+)
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    (
+        ({"is_error": True, "subtype": "success"}, "is_error=true"),
+        (
+            {"is_error": False, "subtype": "error_during_execution"},
+            "subtype=error_during_execution",
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_cli_error_status_rejects_even_string_result(
+    monkeypatch, provider_class, command, status, expected,
+):
+    payload = {"type": "result", "result": "partial", **status}
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc(json.dumps(payload).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    with pytest.raises(AIProviderError, match=expected):
+        await provider_class(command).complete(
+            LLMRequest(messages=[{"role": "user", "content": "x"}]),
+        )
+
+
+@pytest.mark.parametrize(
+    ("provider_class", "command"),
+    (
+        (ClaudeCLIProvider, ["claude", "-p"]),
+        (QoderCLIProvider, ["qodercli", "-p"]),
+    ),
+)
+@pytest.mark.asyncio
+async def test_cli_exit_zero_rate_limit_envelope_is_bounded_and_classified(
+    monkeypatch, provider_class, command,
+):
+    payload = {
+        "type": "result", "subtype": "error_during_execution",
+        "is_error": True, "result": None,
+        "errors": ["x" * 100_000, "quota exceeded, limit reached"],
+        "secret": "must-not-leak",
+    }
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc(json.dumps(payload).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    with pytest.raises(AIRateLimitError) as caught:
+        await provider_class(command).complete(
+            LLMRequest(messages=[{"role": "user", "content": "x"}]),
+        )
+
+    assert len(str(caught.value)) <= 560
+    assert "must-not-leak" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("provider_class", "command"),
+    (
+        (ClaudeCLIProvider, ["claude", "-p"]),
+        (QoderCLIProvider, ["qodercli", "-p"]),
+    ),
+)
+@pytest.mark.asyncio
+async def test_cli_success_envelope_keeps_empty_string_result(
+    monkeypatch, provider_class, command,
+):
+    payload = {
+        "type": "result", "subtype": "success", "is_error": False, "result": "",
+    }
+
+    async def fake_exec(*_args, **_kwargs):
+        return _FakeProc(json.dumps(payload).encode())
+
+    monkeypatch.setattr("shared.ai_gateway.asyncio.create_subprocess_exec", fake_exec)
+    response = await provider_class(command).complete(
+        LLMRequest(messages=[{"role": "user", "content": "x"}]),
+    )
+    assert response.content == ""
+
+
 @pytest.mark.asyncio
 async def test_claude_cli_parses_json_usage(monkeypatch):
     """claude -p --output-format json → result/usage(含 cache token)/total_cost_usd/num_turns 全解析。"""

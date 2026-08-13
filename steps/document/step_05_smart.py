@@ -28,6 +28,12 @@ from steps.document.provenance import (
     require_complete_document_marker_coverage,
     require_unique_document_provenance_anchors,
 )
+from steps.document.smart_checkpoint import (
+    build_stage_retry_prompt,
+    build_chapter_checkpoint,
+    build_chapter_input_identity,
+    restore_chapter_attempts,
+)
 from steps.document.smart_pipeline import (
     MAX_STAGE_PROMPT_BYTES,
     build_chapter_packages,
@@ -252,6 +258,7 @@ class DocumentSmartStep(StepBase):
                 },
                 images,
                 lambda value, package=package: validate_chapter_card(value, package),
+                package,
             ))
         return self._parallel_validated(tasks, schema)
 
@@ -398,11 +405,20 @@ class DocumentSmartStep(StepBase):
 
         def submit_one() -> None:
             nonlocal next_task
-            task_id, invocation, template, values, images, validator = tasks[next_task]
+            task = tasks[next_task]
+            task_id, invocation, template, values, images, validator = task[:6]
             next_task += 1
+            runner = (
+                self._call_chapter_validated
+                if len(task) == 7 else self._call_validated
+            )
+            args = (
+                invocation, template, values, schema, validator, images,
+            )
+            if len(task) == 7:
+                args += (task[6],)
             future = pool.submit(
-                self._call_validated, invocation, template, values,
-                schema, validator, images,
+                runner, *args,
             )
             futures[future] = task_id
 
@@ -466,10 +482,8 @@ class DocumentSmartStep(StepBase):
         for attempt in range(_MAX_STAGE_ATTEMPTS):
             attempt_prompt = prompt
             if last_error is not None:
-                feedback = canonical_json({"validation_error": str(last_error)})
-                attempt_prompt += (
-                    "\n\n上一次输出未通过确定性结构与证据闭包校验。"
-                    "重新生成完整 JSON，不要返回补丁或解释。校验反馈=" + feedback
+                attempt_prompt = build_stage_retry_prompt(
+                    prompt, str(last_error),
                 )
             if len(attempt_prompt.encode("utf-8")) > MAX_STAGE_PROMPT_BYTES:
                 raise InputInvalidError("document smart stage prompt exceeds byte limit")
@@ -497,6 +511,79 @@ class DocumentSmartStep(StepBase):
                 })
         assert last_error is not None
         raise last_error
+
+    def _call_chapter_validated(
+        self, invocation: AIInvocation, template_name: str,
+        values: Mapping[str, str], schema: Mapping[str, Any],
+        validator: Callable[[dict[str, Any]], dict[str, Any]],
+        images: list[Path], package: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """优先重验耐久审计断点；未命中时调用 AI 并在成功后签出。"""
+        template_text = invocation.load_prompt_template(template_name)
+        prompt = self._render_stage_prompt(template_text, values)
+        resolved = invocation.resolved_prompts.get(template_name)
+        identity = build_chapter_input_identity(
+            job_dir=self.job_dir,
+            package=package,
+            prompt=prompt,
+            schema=schema,
+            images=images,
+            template=resolved,
+            selection=invocation.selection(),
+        )
+        if identity is not None:
+            records = [*self.ai.ai_log_records, *invocation.ai_log_records]
+            restored = restore_chapter_attempts(
+                records=[record for record in records if isinstance(record, dict)],
+                identity=identity,
+                base_prompt=prompt,
+                schema=schema,
+                validator=validator,
+                parser=parse_stage_result,
+                job_dir=self.job_dir,
+            )
+            if restored is not None:
+                return restored
+
+        result = self._call_validated(
+            invocation, template_name, values, schema, validator, images,
+        )
+        if identity is None or not invocation.ai_log_records:
+            return result
+        checkpoint = build_chapter_checkpoint(
+            record=invocation.ai_log_records[-1],
+            identity=identity,
+            result=result,
+            job_dir=self.job_dir,
+        )
+        if checkpoint is not None:
+            self._persist_chapter_checkpoint(invocation, checkpoint)
+        return result
+
+    @staticmethod
+    def _persist_chapter_checkpoint(
+        invocation: AIInvocation, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        """断点元信息必须先在审计分片落盘；失败时从内存撤销，禁止后续合并带出。"""
+        record = invocation.ai_log_records[-1]
+        exec_id = record.get("exec_id")
+        invocation._amend_last_log({"chapter_checkpoint": dict(checkpoint)})
+        try:
+            persisted = [
+                json.loads(line)
+                for line in invocation._log_path().read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if any(
+                item.get("exec_id") == exec_id
+                and item.get("chapter_checkpoint") == checkpoint
+                for item in persisted if isinstance(item, dict)
+            ):
+                return True
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+            pass
+        record.pop("chapter_checkpoint", None)
+        return False
 
     @staticmethod
     def _render_stage_prompt(template: str, values: Mapping[str, str]) -> str:

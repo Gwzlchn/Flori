@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import shutil
 import threading
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import steps.document.step_05_smart as smart_step_module
@@ -25,6 +30,14 @@ from steps.document.smart_pipeline import (
     render_model_synthesis,
     validate_chapter_card,
     validate_final,
+)
+from steps.document.smart_checkpoint import (
+    build_stage_retry_prompt,
+    build_chapter_checkpoint,
+    build_chapter_input_identity,
+    restore_chapter_attempts,
+    restore_chapter_checkpoint,
+    restore_legacy_chapter_record,
 )
 from steps.document.step_05_smart import DocumentSmartStep
 from steps.document.provenance import (
@@ -166,6 +179,263 @@ def _fake_layered_call(self: AIInvocation, prompt: str, **_kwargs) -> str:
     return _fake_layered_call_with_value(self, prompt, value)
 
 
+def _checkpoint_contract(tmp_path):
+    job = tmp_path / "job"
+    image = job / "intermediate/figures/f001.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"figure-v1")
+    package = {"package_id": "p001", "sources": ["s001"]}
+    schema = {"type": "object", "required": ["package_id"]}
+    prompt = "frozen chapter prompt"
+    template = SimpleNamespace(
+        name="05_smart_document", source="image", sha256="sha256:template",
+        version=7,
+    )
+    selection = {"tiers": [{
+        "provider": "qoder-cli", "model": "ultimate",
+        "reasoning_effort": "max",
+    }]}
+    identity = build_chapter_input_identity(
+        job_dir=job, package=package, prompt=prompt, schema=schema,
+        images=[image], template=template, selection=selection,
+    )
+    assert identity is not None
+    result = {"package_id": "p001"}
+    raw = json.dumps(result)
+    record = {
+        "phase": "final", "ok": True, "audit_stage": "01-chapter-p001",
+        "job_id": job.name, "step": "05_smart",
+        "exec_id": "exec:01-chapter-p001:0", "session_id": "session-p001",
+        "call_index": 0,
+        "prompt": {
+            "rendered": {"user": prompt},
+            "template": {
+                "name": template.name, "source": template.source,
+                "sha256": template.sha256, "version": template.version,
+            },
+            "images": [{
+                "path": str(image), "bytes": image.stat().st_size,
+                "hash": "sha256:" + hashlib.sha256(image.read_bytes()).hexdigest(),
+            }],
+        },
+        "routing": dict(identity["routing"]),
+        "output": {"content": raw},
+        "output_processed": {"contract": "valid", "attempt": 1},
+    }
+    checkpoint = build_chapter_checkpoint(
+        record=record, identity=identity, result=result, job_dir=job,
+    )
+    assert checkpoint is not None
+    record["chapter_checkpoint"] = checkpoint
+    return job, package, schema, prompt, template, selection, identity, record
+
+
+def _restore_contract(job, identity, schema, record):
+    return restore_chapter_checkpoint(
+        record=record,
+        identity=identity,
+        schema=schema,
+        validator=lambda value: value,
+        parser=parse_stage_result,
+        job_dir=job,
+    )
+
+
+def _retry_chain_contract(tmp_path, failures: int, *, legacy: bool = False):
+    job, _package, schema, prompt, _template, _selection, identity, success = (
+        _checkpoint_contract(tmp_path)
+    )
+    validator = lambda value: value
+    records = []
+    expected_prompt = prompt
+    for attempt in range(failures):
+        invalid = deepcopy(success)
+        invalid.pop("chapter_checkpoint")
+        invalid["exec_id"] = f"exec:01-chapter-p001:{attempt}"
+        invalid["session_id"] = f"session-p001-{attempt}"
+        invalid["prompt"]["rendered"]["user"] = expected_prompt
+        invalid["output"]["content"] = "{}"
+        invalid["output_processed"] = {
+            "contract": "invalid", "attempt": attempt + 1,
+            "error": "untrusted producer text",
+        }
+        records.append(invalid)
+        with pytest.raises(ValueError) as caught:
+            validator(parse_stage_result("{}", schema))
+        expected_prompt = build_stage_retry_prompt(prompt, str(caught.value))
+    success["exec_id"] = f"exec:01-chapter-p001:{failures}"
+    success["session_id"] = f"session-p001-{failures}"
+    success["prompt"]["rendered"]["user"] = expected_prompt
+    success["output_processed"]["attempt"] = failures + 1
+    success["chapter_checkpoint"] = build_chapter_checkpoint(
+        record=success, identity=identity, result={"package_id": "p001"},
+        job_dir=job,
+    )
+    assert success["chapter_checkpoint"] is not None
+    if legacy:
+        success.pop("chapter_checkpoint")
+    return job, schema, prompt, identity, [*records, success]
+
+
+def test_chapter_checkpoint_revalidates_exact_frozen_identity(tmp_path):
+    (
+        job, package, schema, prompt, template, selection, identity, record,
+    ) = _checkpoint_contract(tmp_path)
+    assert _restore_contract(job, identity, schema, record) == {"package_id": "p001"}
+
+    prompt_drift = build_chapter_input_identity(
+        job_dir=job, package=package, prompt=prompt + " changed", schema=schema,
+        images=[job / "intermediate/figures/f001.png"], template=template,
+        selection=selection,
+    )
+    schema_drift = build_chapter_input_identity(
+        job_dir=job, package=package, prompt=prompt,
+        schema={**schema, "additionalProperties": False},
+        images=[job / "intermediate/figures/f001.png"], template=template,
+        selection=selection,
+    )
+    provider_drift = build_chapter_input_identity(
+        job_dir=job, package=package, prompt=prompt, schema=schema,
+        images=[job / "intermediate/figures/f001.png"], template=template,
+        selection={"tiers": [{
+            "provider": "claude-cli", "model": "opus5",
+            "reasoning_effort": "xhigh",
+        }]},
+    )
+    model_drift = build_chapter_input_identity(
+        job_dir=job, package=package, prompt=prompt, schema=schema,
+        images=[job / "intermediate/figures/f001.png"], template=template,
+        selection={"tiers": [{
+            "provider": "qoder-cli", "model": "cantus",
+            "reasoning_effort": "max",
+        }]},
+    )
+    effort_drift = build_chapter_input_identity(
+        job_dir=job, package=package, prompt=prompt, schema=schema,
+        images=[job / "intermediate/figures/f001.png"], template=template,
+        selection={"tiers": [{
+            "provider": "qoder-cli", "model": "ultimate",
+            "reasoning_effort": "high",
+        }]},
+    )
+    package_drift = build_chapter_input_identity(
+        job_dir=job, package={**package, "sources": ["s002"]}, prompt=prompt,
+        schema=schema, images=[job / "intermediate/figures/f001.png"],
+        template=template, selection=selection,
+    )
+    assert prompt_drift is not None
+    assert schema_drift is not None
+    assert provider_drift is not None
+    assert model_drift is not None
+    assert effort_drift is not None
+    assert package_drift is not None
+    assert _restore_contract(job, prompt_drift, schema, record) is None
+    assert _restore_contract(job, schema_drift, schema, record) is None
+    assert _restore_contract(job, provider_drift, schema, record) is None
+    assert _restore_contract(job, model_drift, schema, record) is None
+    assert _restore_contract(job, effort_drift, schema, record) is None
+    assert _restore_contract(job, package_drift, schema, record) is None
+
+    image = job / "intermediate/figures/f001.png"
+    image.write_bytes(b"figure-v2")
+    image_drift = build_chapter_input_identity(
+        job_dir=job, package=package, prompt=prompt, schema=schema,
+        images=[image], template=template, selection=selection,
+    )
+    assert image_drift is not None
+    assert _restore_contract(job, image_drift, schema, record) is None
+
+
+def test_chapter_checkpoint_rejects_corruption_and_failed_audit(tmp_path):
+    job, _package, schema, _prompt, _template, _selection, identity, record = (
+        _checkpoint_contract(tmp_path)
+    )
+    corrupted = deepcopy(record)
+    corrupted["output"]["content"] = '{"package_id":'
+    assert _restore_contract(job, identity, schema, corrupted) is None
+
+    failed = deepcopy(record)
+    failed.pop("chapter_checkpoint")
+    failed["ok"] = False
+    failed["output_processed"] = {"contract": "invalid"}
+    assert build_chapter_checkpoint(
+        record=failed, identity=identity, result={"package_id": "p001"},
+        job_dir=job,
+    ) is None
+    assert "chapter_checkpoint" not in failed
+
+
+def test_complete_legacy_chapter_record_is_revalidated_without_metadata(tmp_path):
+    job, _package, schema, _prompt, _template, _selection, identity, record = (
+        _checkpoint_contract(tmp_path)
+    )
+    record.pop("chapter_checkpoint")
+    record["prompt"]["images"][0]["path"] = (
+        f"/tmp/old-worker/{job.name}/intermediate/figures/f001.png"
+    )
+    assert restore_legacy_chapter_record(
+        record=record, identity=identity, schema=schema,
+        validator=lambda value: value, parser=parse_stage_result, job_dir=job,
+    ) == {"package_id": "p001"}
+    record["prompt"]["images"][0].pop("hash")
+    assert restore_legacy_chapter_record(
+        record=record, identity=identity, schema=schema,
+        validator=lambda value: value, parser=parse_stage_result, job_dir=job,
+    ) is None
+
+
+@pytest.mark.parametrize(("failures", "legacy"), (
+    (1, False), (2, False), (1, True), (2, True),
+))
+def test_retry_checkpoint_rebuilds_each_feedback_prompt(
+    tmp_path, failures, legacy,
+):
+    job, schema, prompt, identity, records = _retry_chain_contract(
+        tmp_path, failures, legacy=legacy,
+    )
+    assert restore_chapter_attempts(
+        records=records, identity=identity, base_prompt=prompt, schema=schema,
+        validator=lambda value: value, parser=parse_stage_result, job_dir=job,
+    ) == {"package_id": "p001"}
+
+
+@pytest.mark.parametrize(
+    "mutation", ("missing", "tampered", "reordered", "wrong_feedback"),
+)
+def test_retry_checkpoint_rejects_broken_attempt_history(tmp_path, mutation):
+    job, schema, prompt, identity, records = _retry_chain_contract(tmp_path, 2)
+    if mutation == "missing":
+        records = records[1:]
+    elif mutation == "tampered":
+        records[0]["output"]["content"] = '{"package_id":"p001"}'
+    elif mutation == "reordered":
+        records = [records[1], records[0], records[2]]
+    else:
+        records[1]["prompt"]["rendered"]["user"] += "tampered"
+    assert restore_chapter_attempts(
+        records=records, identity=identity, base_prompt=prompt, schema=schema,
+        validator=lambda value: value, parser=parse_stage_result, job_dir=job,
+    ) is None
+
+
+def test_checkpoint_flush_failure_removes_in_memory_authority(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    step = DocumentSmartStep("05_smart", job, config)
+    invocation = step.ai.fork("01-chapter-p001")
+    invocation.ai_log_records = [{"exec_id": "exec:p001"}]
+    monkeypatch.setattr(
+        invocation, "_flush_logs",
+        lambda: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    assert step._persist_chapter_checkpoint(
+        invocation, {"digest": "sha256:checkpoint"},
+    ) is False
+    assert "chapter_checkpoint" not in invocation.ai_log_records[-1]
+
+
 def test_layered_step_uses_original_once_and_publishes_folded_audit(
     tmp_path, monkeypatch,
 ):
@@ -242,6 +512,158 @@ def test_layered_step_uses_original_once_and_publishes_folded_audit(
     assert {item["producer_invocation_id"] for item in semantic["candidates"]} == {
         "session-03-final", "session-04-introduction",
     }
+
+
+@pytest.mark.parametrize(("legacy", "fragment", "chapter_failures"), (
+    (False, False, 1), (True, False, 2),
+    (False, True, 2), (True, True, 1),
+))
+def test_later_failure_reuses_verified_chapters_without_new_ai_calls(
+    tmp_path, monkeypatch, legacy, fragment, chapter_failures,
+):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["step"]["prompt_template"] = "05_smart_document"
+    config["ai"] = {
+        "primary": {"provider": "qoder-cli", "model": "ultimate"},
+    }
+    config["providers"] = {"providers": {
+        "qoder-cli": {
+            "model": "ultimate", "reasoning_effort": "max", "features": [],
+        },
+    }}
+    run = 1
+    calls: list[tuple[int, str | None]] = []
+    chapter_attempts = 0
+
+    def audited_call(self, prompt, images=None, **kwargs):
+        nonlocal chapter_attempts
+        calls.append((run, self.audit_name))
+        if self.audit_name and "chapter" in self.audit_name:
+            chapter_attempts += 1
+            value = (
+                _chapter(package_id="p999")
+                if run == 1 and chapter_attempts <= chapter_failures
+                else _chapter()
+            )
+        elif self.audit_name and "theme" in self.audit_name:
+            value = {"invalid": True} if run == 1 else _theme()
+        elif self.audit_name == "03-final":
+            value = _final()
+        elif self.audit_name == "04-introduction":
+            value = _introduction()
+        else:
+            raise AssertionError(f"unexpected audit stage: {self.audit_name}")
+        raw = json.dumps(value, ensure_ascii=False)
+        response = LLMResponse(
+            content=raw, model="ultimate", provider="qoder-cli",
+            session_id=f"session-{run}-{self.audit_name}-{self.call_index}",
+            tier_used="primary", reasoning_effort="max",
+            reasoning_effort_source="provider_default",
+        )
+        request = LLMRequest(
+            messages=[{"role": "user", "content": prompt}],
+            images=images or [], response_format=kwargs.get("response_format"),
+            temperature=kwargs.get("temperature", 0),
+            max_tokens=kwargs.get("max_tokens", 32768),
+        )
+        now = datetime.now()
+        record = self._build_log_record(
+            prompt, None, images or [], request, response, now, now, None,
+        )
+        record["phase"] = "final"
+        self.ai_log_records.append(record)
+        self.last_provider = response.provider
+        self.last_model = response.model
+        self.last_response = response
+        self.call_index += 1
+        self._flush_logs()
+        return raw
+
+    monkeypatch.setattr(AIInvocation, "call", audited_call)
+    monkeypatch.setenv("STEP_EXEC_ID", "exec-run-1")
+    first = DocumentSmartStep("05_smart", job, config)
+    with pytest.raises(ValueError):
+        first.execute()
+    first_audit = [
+        json.loads(line)
+        for line in (job / "output/ai_logs/05_smart.jsonl").read_text().splitlines()
+    ]
+    chapter_records = [
+        item for item in first_audit if item["audit_stage"] == "01-chapter-p001"
+    ]
+    chapter_record = next(
+        item for item in chapter_records if "chapter_checkpoint" in item
+    )
+    assert chapter_record["chapter_checkpoint"]["format"] == (
+        "flori-document-chapter-checkpoint"
+    )
+    if legacy:
+        chapter_record.pop("chapter_checkpoint")
+        (job / "output/ai_logs/05_smart.jsonl").write_text(
+            "".join(
+                json.dumps(item, ensure_ascii=False) + "\n"
+                for item in first_audit
+            ),
+            encoding="utf-8",
+        )
+    assert not (job / "output/smart_pipeline/manifest.json").exists()
+    assert chapter_attempts == chapter_failures + 1
+
+    run = 2
+    monkeypatch.setenv("STEP_EXEC_ID", "exec-run-2")
+    pulled = tmp_path / "new-worker" / job.name
+    for relative in (
+        "input", "intermediate", "assets", "output/provenance",
+        "output/provenance_candidates",
+    ):
+        source = job / relative
+        if source.exists():
+            shutil.copytree(source, pulled / relative, dirs_exist_ok=True)
+    pulled_log = pulled / "output/ai_logs/05_smart.jsonl"
+    pulled_log.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(job / "output/ai_logs/05_smart.jsonl", pulled_log)
+    if fragment:
+        records = [
+            json.loads(line) for line in pulled_log.read_text().splitlines()
+        ]
+        chapters = [
+            item for item in records if item["audit_stage"] == "01-chapter-p001"
+        ]
+        pulled_log.write_text(
+            "".join(
+                json.dumps(item, ensure_ascii=False) + "\n"
+                for item in records if item not in chapters
+            ),
+            encoding="utf-8",
+        )
+        (pulled_log.parent / "05_smart.01-chapter-p001.jsonl").write_text(
+            "".join(
+                json.dumps(item, ensure_ascii=False) + "\n" for item in chapters
+            ),
+            encoding="utf-8",
+        )
+    stale = pulled / "output/smart_pipeline/chapter-card-p999.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text('{"stale":true}', encoding="utf-8")
+    second_config = deepcopy(config)
+    second_config["paths"]["data_dir"] = str(pulled.parent)
+    second = DocumentSmartStep("05_smart", pulled, second_config)
+    result = second.execute()
+    assert result["chapter_packages"] == 1
+    assert not any(
+        attempt == 2 and stage == "01-chapter-p001"
+        for attempt, stage in calls
+    )
+    manifest = json.loads(
+        (pulled / "output/smart_pipeline/manifest.json").read_text()
+    )
+    assert not stale.exists()
+    assert all("p999" not in item["path"] for item in manifest["artifacts"])
+    assert all("checkpoint" not in item["path"] for item in manifest["artifacts"])
+    assert not (pulled_log.parent / "05_smart.01-chapter-p001.jsonl").exists()
 
 
 def test_layered_step_dry_run_contract_stays_schema_aware(tmp_path, monkeypatch):
