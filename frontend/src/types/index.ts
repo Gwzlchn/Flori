@@ -89,6 +89,7 @@ export interface AiLogAttempt {
 export interface AiLogCall {
   job_id?: string
   step?: string
+  audit_stage?: string | null
   content_type?: string | null
   domain?: string | null
   call_index?: number
@@ -101,7 +102,7 @@ export interface AiLogCall {
   call_meta?: { max_tokens?: number; temperature?: number; response_format?: string | null; allowed_tools?: string[] | null; max_turns?: number | null; images_count?: number }
   prompt?: { rendered?: { system?: string | null; user?: string }; template?: { source?: string }; values?: any; images?: { path: string; hash?: string; bytes?: number }[] }
   output?: { content?: string | null; num_turns?: number | null; finish_reason?: string | null }
-  output_processed?: { json_parse?: { ok?: boolean; salvaged?: boolean }; parse_failed?: boolean; extracted?: any } | null
+  output_processed?: { json_parse?: { ok?: boolean; salvaged?: boolean }; parse_failed?: boolean; extracted?: any; contract?: string; error?: string; attempt?: number } | null
   usage?: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
   cost?: { cost_usd?: number; credits?: number | null; basis?: string }
   raw?: any

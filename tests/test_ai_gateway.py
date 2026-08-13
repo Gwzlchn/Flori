@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -422,6 +423,22 @@ class TestUsageFile:
             AIUsage(exec_id="e2", provider="p", model="m", step="06_ocr"), sub)
         data = json.loads(f.read_text())
         assert [d["exec_id"] for d in data] == ["e1", "e2"]
+
+    def test_parallel_stage_usage_keeps_every_unique_exec(self, tmp_path):
+        def write(index: int) -> None:
+            record_usage_to_file(AIUsage(
+                exec_id=f"exec:chapter-{index}", provider="qoder-cli",
+                model="ultimate", step="05_smart", credits=float(index),
+            ), tmp_path)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(write, range(32)))
+
+        collected = collect_usage_from_file(tmp_path, "05_smart")
+        assert len(collected) == 32
+        assert {item.exec_id for item in collected} == {
+            f"exec:chapter-{index}" for index in range(32)
+        }
 
 
 class TestAnthropicProvider:

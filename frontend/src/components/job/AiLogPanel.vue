@@ -59,6 +59,7 @@ function pretty(v: any): string { try { return JSON.stringify(v, null, 2) } catc
             <div class="flex items-center gap-2 flex-wrap text-xs">
               <ChevronRight :size="13" class="call-caret text-blue-600 transition-transform" />
               <span class="font-semibold text-gray-700">调用 {{ (c.call_index ?? i) + 1 }}/{{ calls.length }}</span>
+              <span v-if="c.audit_stage" class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">{{ c.audit_stage }}</span>
               <component :is="c.ok === false ? X : Check" :size="13"
                          :class="c.ok === false ? 'text-red-500' : 'text-green-500'" />
               <span class="font-mono text-gray-800">{{ c.routing?.provider || '—' }}</span>

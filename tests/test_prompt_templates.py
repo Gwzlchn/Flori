@@ -25,16 +25,21 @@ def test_all_templates_present():
 
 
 def test_document_smart_note_preserves_source_internal_conflicts():
-    body = (TEMPLATES_DIR / "05_smart_document.md").read_text(encoding="utf-8")
-    assert "中性并列两侧原意" in body
-    assert "不得优先采信一侧" in body
-    assert "不得" in body and "确定性结论" in body
-    assert "不得仅因没有独立 marker" in body
-    assert "无可用来源坐标" in body
-    assert "无法合并时省略该细粒度事实" in body
-    assert "pdf_crosswalk_blocks>0" in body
-    assert "pdf_crosswalk_visuals>0" in body
-    assert "两个维度不得互相代替" in body
+    chapter = (TEMPLATES_DIR / "05_smart_document.md").read_text(encoding="utf-8")
+    final = (TEMPLATES_DIR / "05_smart_document.final.md").read_text(encoding="utf-8")
+    introduction = (TEMPLATES_DIR / "05_smart_document.introduction.md").read_text(encoding="utf-8")
+    assert "来源内部冲突" in chapter
+    assert "每段有一个短 source alias" in chapter
+    assert "不设统一字数、段落数或章节数限制" in final
+    assert "无法归因" in final
+    assert "caption 冲突" in final
+    assert "最小集合" in final
+    assert "不得自行写“模型综合”小节" in final
+    assert "来源内部未决矛盾" in final
+    assert "完整调用审计、哈希和覆盖清单不进入 note_markdown" in final
+    assert "论文导读：这篇论文要解决什么" in introduction
+    assert "背景与问题" in introduction and "解决思路" in introduction
+    assert "不得升级为因果解释" in introduction
 
 
 def test_semantic_attestation_template_uses_short_decision_refs():
@@ -132,6 +137,31 @@ def test_template_hash_changes_on_edit(tmp_path):
     f.write_text("v2", encoding="utf-8")
     assert s.ai.template_hash("foo") == h1  # 同一次执行固定同一字节快照
     assert _mk_step(tmp_path).ai.template_hash("foo") != h1
+
+
+def test_fork_inherits_frozen_template_and_override_snapshot(tmp_path):
+    s = _mk_step(tmp_path)
+    s.config["step"]["prompt_template"] = "foo"
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    template = templates / "foo.md"
+    template.write_text("frozen", encoding="utf-8")
+    (tmp_path / "job.json").write_text(
+        '{"prompt_overrides":{"x":{"content":"override-a","version":1}}}',
+        encoding="utf-8",
+    )
+    assert s.ai.load_prompt_template("foo") == "override-a"
+    forked = s.ai.fork("child")
+
+    template.write_text("changed", encoding="utf-8")
+    (tmp_path / "job.json").write_text(
+        '{"prompt_overrides":{"x":{"content":"override-b","version":2}}}',
+        encoding="utf-8",
+    )
+    assert forked.load_prompt_template("foo") == "override-a"
+    assert forked.job_prompt_overrides() == {
+        "x": {"content": "override-a", "version": 1},
+    }
 
 
 # 评审 prompt 白盒:build_review_prompt 骨架 + 运行期注入

@@ -1,0 +1,16 @@
+{
+  "type": "object", "additionalProperties": false,
+  "required": ["title", "subtitle", "note_markdown", "used_knowledge_refs", "theme_coverage_refs", "figure_placements", "synthesis", "audit_summary"],
+  "properties": {
+    "title": {"type": "string", "minLength": 1, "maxLength": 500},
+    "subtitle": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "note_markdown": {"type": "string", "minLength": 500, "maxLength": 500000},
+    "used_knowledge_refs": {"type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true, "items": {"type": "string"}},
+    "theme_coverage_refs": {"type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": {"type": "string"}},
+    "figure_placements": {"type": "array", "maxItems": 256, "items": {"type": "object", "additionalProperties": false, "required": ["figure_ref", "placement_reason", "reading_guide", "supports", "limits", "knowledge_refs"], "properties": {
+      "figure_ref": {"type": "string"}, "placement_reason": {"type": "string", "minLength": 1, "maxLength": 2000}, "reading_guide": {"type": "string", "minLength": 1, "maxLength": 8000}, "supports": {"type": "string", "minLength": 1, "maxLength": 4000}, "limits": {"type": "string", "minLength": 1, "maxLength": 4000}, "knowledge_refs": {"type": "array", "minItems": 1, "maxItems": 512, "uniqueItems": true, "items": {"type": "string"}}
+    }}},
+    "synthesis": {"type": "object", "additionalProperties": false, "required": ["analysis", "basis", "uncertainty", "knowledge_refs"], "properties": {"analysis": {"type": "string", "minLength": 1, "maxLength": 12000}, "basis": {"type": "string", "minLength": 1, "maxLength": 12000}, "uncertainty": {"type": "string", "minLength": 1, "maxLength": 12000}, "knowledge_refs": {"type": "array", "minItems": 1, "maxItems": 512, "uniqueItems": true, "items": {"type": "string"}}}},
+    "audit_summary": {"type": "object", "additionalProperties": false, "required": ["scope", "known_gaps", "evidence_note"], "properties": {"scope": {"type": "string", "minLength": 1, "maxLength": 4000}, "known_gaps": {"type": "array", "maxItems": 128, "items": {"type": "string", "maxLength": 4000}}, "evidence_note": {"type": "string", "minLength": 1, "maxLength": 4000}}}
+  }
+}

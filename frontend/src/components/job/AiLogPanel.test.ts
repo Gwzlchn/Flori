@@ -72,12 +72,14 @@ describe('AiLogPanel', () => {
   })
 
   it('多次调用只显示等高概览行,不默认铺开 prompt', async () => {
-    mockLogs([callFixture(), callFixture({ call_index: 1, cost: { cost_usd: 0.05 } })])
+    mockLogs([callFixture({ audit_stage: '01-chapter-p001' }), callFixture({ call_index: 1, audit_stage: '03-final', cost: { cost_usd: 0.05 } })])
     const w = await mountPanel()
 
     expect(w.text()).toContain('2 次调用概览')
     expect(w.findAll('details.audit-call')).toHaveLength(2)
     expect(w.findAll('details.audit-call').every(call => call.attributes('open') == null)).toBe(true)
+    expect(w.text()).toContain('01-chapter-p001')
+    expect(w.text()).toContain('03-final')
   })
 
   it('Qoder审计显示原生credits并区分null与0', async () => {

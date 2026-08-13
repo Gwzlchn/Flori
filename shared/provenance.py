@@ -1250,6 +1250,7 @@ def extract_attestable_markers(
     producer_component: str,
     producer_invocation_id: str,
     force_semantic: bool = False,
+    deduplicate_sources_by_anchor: bool = False,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """移除 marker,把 exact 与待下游证明的 semantic candidate 分流。"""
     from shared.note_text import markdown_to_index_text
@@ -1265,28 +1266,32 @@ def extract_attestable_markers(
         str(item["segment_id"]): item for item in validated_source["segments"]
     }
     marker_re = re.compile(r"\[\[source:([^\]]+)\]\]")
-    seen: set[str] = set()
+    seen: set[str | tuple[str, str]] = set()
     clean_lines: list[str] = []
     pending: list[tuple[str, list[str]]] = []
     for line in marked_text.splitlines():
         tokens = marker_re.findall(line)
-        refs: list[str] = []
-        for token in tokens:
-            if token not in known:
-                raise ValueError(f"{error_prefix} contains an unknown source marker")
-            if token in seen:
-                # 同一来源被模型重复引用时只保留首次 evidence 绑定。后续 marker 仍从正文移除,
-                # 但不生成第二条 mapping,避免把重复陈述伪装成独立已验证证据。
-                continue
-            seen.add(token)
-            refs.append(known[token])
         clean_line = marker_re.sub("", line)
         if "[[source:" in clean_line:
             raise ValueError(f"{error_prefix} contains a malformed source marker")
         clean_line = re.sub(r"[ \t]{2,}", " ", clean_line).rstrip()
+        anchor = markdown_to_index_text(clean_line).strip()
+        refs: list[str] = []
+        for token in tokens:
+            if token not in known:
+                raise ValueError(f"{error_prefix} contains an unknown source marker")
+            identity: str | tuple[str, str] = (
+                (token, anchor) if deduplicate_sources_by_anchor else token
+            )
+            if identity in seen:
+                # 同一来源被模型重复引用时只保留首次 evidence 绑定。后续 marker 仍从正文移除,
+                # 但不生成第二条 mapping,避免把相同陈述伪装成独立已验证证据。
+                continue
+            seen.add(identity)
+            refs.append(known[token])
         clean_lines.append(clean_line)
         if refs:
-            pending.append((markdown_to_index_text(clean_line).strip(), refs))
+            pending.append((anchor, refs))
 
     cleaned = "\n".join(clean_lines)
     normalized_body = markdown_to_index_text(cleaned)

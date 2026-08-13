@@ -130,6 +130,23 @@ class TestGatewayAttempts:
 # step_base:ai_logs 落盘
 
 class TestAiLogDump:
+    def test_merge_forks_keeps_fragments_when_canonical_flush_fails(
+        self, tmp_path, monkeypatch,
+    ):
+        step = _Step(tmp_path, {"ai": {}})
+        forked = step.ai.fork("chapter-p001")
+        forked.ai_log_records = [{"call_index": 0, "audit_stage": "chapter-p001"}]
+        forked._flush_logs()
+        fragment = forked._log_path()
+
+        monkeypatch.setattr(
+            step.ai, "_flush_logs",
+            lambda: (_ for _ in ()).throw(OSError("canonical write failed")),
+        )
+        with pytest.raises(OSError, match="canonical write failed"):
+            step.ai.merge_forks([forked])
+        assert fragment.is_file()
+
     def test_call_ai_writes_full_record(self, tmp_path):
         step = _Step(tmp_path, {
             "ai": {"primary": {"provider": "claude-cli", "model": "claude-opus-4-8[1m]"}},

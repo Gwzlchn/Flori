@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import threading
 from functools import lru_cache
 import time
 from datetime import datetime
@@ -310,6 +311,146 @@ class DryRunProvider:
     """DRY_RUN 模式:不调真实 API。"""
 
     @staticmethod
+    def _prompt_json(prompt: str, label: str):
+        match = re.search(rf"(?m)^{re.escape(label)}:\n([^\n]+)$", prompt)
+        return json.loads(match.group(1)) if match else None
+
+    @classmethod
+    def _document_smart_content(cls, prompt: str) -> str | None:
+        if "章节包的结构化学习卡" in prompt:
+            package = cls._prompt_json(prompt, "PACKAGE")
+            if not isinstance(package, dict):
+                return None
+            source_refs = list(package.get("source_aliases") or {})
+            if not source_refs:
+                return None
+            first_ref = source_refs[0]
+            figures = [{
+                "figure_alias": item["figure_alias"],
+                "visual_analysis": "DRY_RUN 已读取图片结构。" if item.get("media") else "",
+                "reading_guide": "先看结构和标注，再对照正文。",
+                "supported_claim": "图片用于解释本章节的核心论点。",
+                "limits": "图片不能独立证明超出正文的数据结论。",
+                "source_refs": [item["source_alias"]],
+            } for item in package.get("figures") or []]
+            return json.dumps({
+                "package_id": package["package_id"],
+                "overview": "DRY_RUN 章节卡覆盖问题、方法、结果与边界。",
+                "knowledge": [{
+                    "kind": "method", "topic": "DRY_RUN 方法",
+                    "claim": "来源描述了一个可验证的方法。",
+                    "explanation": "该方法从研究问题出发并由实验检查。",
+                    "why_it_matters": "它连接论文动机、实现与结论。",
+                    "author_claim": True, "source_refs": [first_ref],
+                }],
+                "cross_section_links": [], "figures": figures,
+                "unresolved": [], "coverage_refs": source_refs,
+                "synthesis": {
+                    "analysis": "章节论证形成问题到验证的局部闭环。",
+                    "basis": "本包全部来源分片。",
+                    "uncertainty": "DRY_RUN 只验证接线，不代表真实内容质量。",
+                },
+            }, ensure_ascii=False, separators=(",", ":"))
+        if "综合成供最终论文笔记写作的主题学习图" in prompt:
+            theme = cls._prompt_json(prompt, "THEME")
+            refs = cls._prompt_json(prompt, "EXPECTED_KNOWLEDGE_REFS")
+            figures = cls._prompt_json(prompt, "FIGURE_CATALOG")
+            if not isinstance(theme, dict) or not isinstance(refs, list) or not refs:
+                return None
+            figure_refs = list(figures or {})
+            sections = [{
+                "title": "问题、方法与验证",
+                "purpose": "恢复章节之间的论证关系。",
+                "explanation": "DRY_RUN 将章节知识连接为主题学习图。",
+                "knowledge_refs": refs[index:index + 512],
+                "figure_refs": figure_refs if index == 0 else [],
+            } for index in range(0, len(refs), 512)]
+            guides = [{
+                "figure_ref": ref, "placement_hint": "相关论点之后",
+                "reading_guide": "按标签和对比关系阅读。",
+                "supports": "支持主题中的对应论点。",
+                "limits": "不支持输入之外的因果推断。",
+                "knowledge_refs": [refs[0]],
+            } for ref in figure_refs]
+            return json.dumps({
+                "theme_id": theme["theme_id"], "overview": "DRY_RUN 主题综合。",
+                "learning_sections": sections, "cross_theme_links": [],
+                "tensions": [], "limitations": [], "figure_guides": guides,
+                "coverage_refs": refs,
+                "synthesis": {
+                    "analysis": "主题内的知识已建立关系。",
+                    "basis": "全部章节知识引用。",
+                    "uncertainty": "DRY_RUN 不评价真实论文质量。",
+                },
+            }, ensure_ascii=False, separators=(",", ":"))
+        if "撰写完整中文智能笔记" in prompt:
+            theme_refs = cls._prompt_json(prompt, "EXPECTED_THEME_REFS")
+            knowledge_refs = cls._prompt_json(prompt, "EXPECTED_KNOWLEDGE_REFS")
+            figures = cls._prompt_json(prompt, "FIGURE_CATALOG")
+            if not isinstance(theme_refs, list) or not isinstance(knowledge_refs, list) or not knowledge_refs:
+                return None
+            selected = list(figures or {})[:256]
+            body = (
+                "论文从一个明确的研究问题出发，给出方法、验证设计和主要结论。"
+                "阅读时应区分作者主张、实验支持与仍需保留的不确定性。"
+            ) * 16
+            placements = [{
+                "figure_ref": ref, "placement_reason": "帮助理解论文论证。",
+                "reading_guide": "先看结构，再对照正文结论。",
+                "supports": "支持对应方法或结果。",
+                "limits": "不能推出目录之外的结论。",
+                "knowledge_refs": [knowledge_refs[0]],
+            } for ref in selected]
+            figure_markdown = "\n\n".join(f"{{{{FIGURE:{ref}}}}}" for ref in selected)
+            return json.dumps({
+                "title": "DRY_RUN 论文智能笔记", "subtitle": "接线验收输出",
+                "note_markdown": (
+                    f"## 问题、方法与验证\n\n{body}[证据: {knowledge_refs[0]}]"
+                    + ("\n\n" + figure_markdown if figure_markdown else "")
+                ),
+                "used_knowledge_refs": sorted({
+                    knowledge_refs[0],
+                    *(
+                        ref
+                        for placement in placements
+                        for ref in placement["knowledge_refs"]
+                    ),
+                }),
+                "theme_coverage_refs": theme_refs,
+                "figure_placements": placements,
+                "synthesis": {
+                    "analysis": "论文主线已按主题重建。",
+                    "basis": "全部主题学习图。",
+                    "uncertainty": "DRY_RUN 只用于接线验收。",
+                    "knowledge_refs": [knowledge_refs[0]],
+                },
+                "audit_summary": {
+                    "scope": "全部主题已审阅。", "known_gaps": [],
+                    "evidence_note": "完整调用审计由系统单独展示。",
+                },
+            }, ensure_ascii=False, separators=(",", ":"))
+        if "论文精读笔记的导读编辑" in prompt:
+            refs = cls._prompt_json(prompt, "VALID_REFS")
+            if not isinstance(refs, list) or not refs:
+                return None
+            paragraph = (
+                "论文首先说明研究背景与现有方法的缺口，再提出解决方案，"
+                "并通过实验检验方法能否回答最初的问题。"
+            ) * 5
+            markdown = (
+                "## 论文导读：这篇论文要解决什么\n\n"
+                f"### 背景与问题\n\n背景：{paragraph}[证据: {refs[0]}]\n\n"
+                f"### 解决思路\n\n方案：{paragraph}\n\n"
+                f"### 如何验证\n\n验证：{paragraph}\n\n"
+                f"### 主要结论与阅读边界\n\n边界：{paragraph}"
+            )
+            return json.dumps({
+                "introduction_markdown": markdown,
+                "used_knowledge_refs": [refs[0]],
+            }, ensure_ascii=False, separators=(",", ":"))
+        return None
+
+    @staticmethod
     def _content(request: LLMRequest) -> str:
         prompt = "\n".join(
             str(message.get("content") or "")
@@ -317,6 +458,10 @@ class DryRunProvider:
             if isinstance(message, dict)
         )
         marker = "\nINPUT="
+        if request.response_format == "json":
+            document_smart = DryRunProvider._document_smart_content(prompt)
+            if document_smart is not None:
+                return document_smart
         if (
             request.response_format == "json"
             and "Document 流水线的忠实翻译器" in prompt
@@ -1538,30 +1683,34 @@ class AIGateway:
 # Usage 文件读写
 
 
+_USAGE_FILE_LOCK = threading.Lock()
+
+
 def record_usage_to_file(usage: AIUsage, log_dir: Path) -> None:
     """步骤进程调用:追加到 .{step}.usage.json。"""
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f".{usage.step}.usage.json"
-    entries = json.loads(path.read_text()) if path.exists() else []
-    entries.append({
-        "exec_id": usage.exec_id,
-        "provider": usage.provider,
-        "model": usage.model,
-        "job_id": usage.job_id,
-        "step": usage.step,
-        "worker_id": usage.worker_id,
-        "input_tokens": usage.input_tokens,
-        "output_tokens": usage.output_tokens,
-        "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-        "cache_read_input_tokens": usage.cache_read_input_tokens,
-        "cost_usd": usage.cost_usd,
-        "credits": usage.credits,
-        "duration_sec": usage.duration_sec,
-        "num_turns": usage.num_turns,
-        "cached": usage.cached,
-        "created_at": usage.created_at.isoformat(),
-    })
-    path.write_text(json.dumps(entries, ensure_ascii=False, indent=2))
+    with _USAGE_FILE_LOCK:
+        entries = json.loads(path.read_text()) if path.exists() else []
+        entries.append({
+            "exec_id": usage.exec_id,
+            "provider": usage.provider,
+            "model": usage.model,
+            "job_id": usage.job_id,
+            "step": usage.step,
+            "worker_id": usage.worker_id,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+            "cache_read_input_tokens": usage.cache_read_input_tokens,
+            "cost_usd": usage.cost_usd,
+            "credits": usage.credits,
+            "duration_sec": usage.duration_sec,
+            "num_turns": usage.num_turns,
+            "cached": usage.cached,
+            "created_at": usage.created_at.isoformat(),
+        })
+        path.write_text(json.dumps(entries, ensure_ascii=False, indent=2))
 
 
 def collect_usage_from_file(log_dir: Path, step: str) -> list[AIUsage]:

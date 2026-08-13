@@ -35,7 +35,7 @@ graph LR
 | 02_parse | 原始 source | `intermediate/document.json`、`quality.json` | 所有 profile 输出同一个 Document Model；HTML/PDF crosswalk 只接受唯一高置信匹配 |
 | 03_structure | Document Model | `source_segments.json`、PDF support | 稳定 block id 投影到既有 provenance；低置信 OCR 不发布逐字支持 |
 | 04_translate | blocks + glossary | `translation.json`、`translated.html` | 默认阅读分支；支持 1:1、1:N、N:1 对齐；不进入知识链输入 |
-| 05_smart | 原始 Document + quality + source segments | 版本化智能笔记 + 确定性来源质量提示 + immutable exact provenance + candidate provenance | 不做逐段翻译；标题由程序固定；只引用原始来源 marker |
+| 05_smart | 原始 Document + quality + source segments + Figure/Table assets | 唯一覆盖的章节包与知识卡 + 主题综合 + 独立导读 + 版本化智能笔记 + immutable exact/candidate provenance | 章节卡并发4路且单包≤46 KiB/5图；四阶段 Prompt 在开工时冻结；导读/正文 provenance 各绑真实调用；模型综合由结构化字段确定性渲染；译文不参与；完整审计不进入正文 |
 | 07_concepts | 智能笔记 + 原始 source segments | `concepts.json` | 模型 refs 全部丢弃；每个概念由原始 support text 逐字绑定 |
 | 08_review | 智能笔记、exact provenance、Document、quality、concepts | 最终 smart provenance、semantic batch、content-addressed 有界 Document/quality 审查包、review | exact baseline 由 05 独占在 `output/provenance_exact/`;quality 先规范化再按内容地址持久化,reader 从原始报告复算;Document 审查包绑定完整摘要并优先保留全部 evidence blocks;supported quote 修复后仍不逐字命中时只降级该 issue 为 insufficient;08 可独立失效和重跑 |
 | 09_publish | review、concepts、smart provenance | `publication.json` | 重验可靠性和质量阈值；通过后才允许 FTS、canonical evidence 与 glossary side effect |

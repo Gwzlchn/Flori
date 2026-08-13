@@ -344,11 +344,11 @@ document:
       extends: .ai-step
       run: steps.document.step_05_smart
       prompt_template: 05_smart_document
-      version: "4"
+      version: "5"
       needs: ["03_structure"]
-      # marker 反馈最多追加一次完整 CLI 调用:2 x 1800s + 300s 收尾余量。
-      timeout: 3900
-      tags: []
+      # 章节卡并发4路，随后主题综合、正文和导读；长论文给完整六小时执行窗口。
+      timeout: 21600
+      tags: [vision]
       rules:
         - if_flag: smart_note
           when: on
@@ -356,7 +356,7 @@ document:
       ai:
         allowed_providers: [claude-cli, codex-cli, qoder-cli]
       outputs: ["output/versions/notes_smart_*", "output/provenance_exact/smart.json", "output/provenance_candidates/smart.json",
-                "output/ai_logs/05_smart.jsonl", "output/ai_logs/05_smart.turns.*.jsonl"]
+                "output/smart_pipeline/*", "output/ai_logs/05_smart.jsonl", "output/ai_logs/05_smart.*.jsonl"]
 
     "07_concepts":
       label: "概念 + 摘要"

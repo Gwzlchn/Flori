@@ -399,6 +399,7 @@ def extract_attestable_document_markers(
     *,
     ai,
     force_semantic: bool = False,
+    deduplicate_sources_by_anchor: bool = False,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """无独立 producer session 时只发布 exact quote；有 session 时分流语义候选。"""
     invocation_id = producer_invocation_id(ai)
@@ -414,7 +415,52 @@ def extract_attestable_document_markers(
         producer_component=ai.step_name,
         producer_invocation_id=invocation_id,
         force_semantic=force_semantic,
+        deduplicate_sources_by_anchor=deduplicate_sources_by_anchor,
     )
+
+
+def require_complete_document_marker_coverage(
+    marked_text: str,
+    exact: Sequence[Mapping[str, Any]],
+    semantic: Sequence[Mapping[str, Any]],
+) -> None:
+    """确保每个证据行都产生映射，不把 extractor 的拒绝静默当成成功。"""
+    from shared.note_text import markdown_to_index_text
+
+    marker_re = re.compile(r"\[\[source:[^\]]+\]\]")
+    expected = [
+        markdown_to_index_text(marker_re.sub("", line)).strip()
+        for line in marked_text.splitlines() if marker_re.search(line)
+    ]
+    if (
+        not expected
+        or any(not anchor for anchor in expected)
+        or len(expected) != len(set(expected))
+        or set(expected) != {
+            str(item["anchor"]) for item in [*exact, *semantic]
+        }
+    ):
+        raise ValueError("document note evidence mapping coverage is incomplete")
+
+
+def require_unique_document_provenance_anchors(
+    job_dir: Path,
+    note_artifact: str,
+    candidates: Sequence[Mapping[str, Any]],
+) -> None:
+    """在最终笔记字节上拒绝跨导读/正文的重复锚点。"""
+    from shared.note_text import markdown_to_index_text
+
+    normalized = markdown_to_index_text(
+        (job_dir / note_artifact).read_text(encoding="utf-8")
+    )
+    anchors = [str(item["anchor"]) for item in candidates]
+    if (
+        not anchors
+        or len(anchors) != len(set(anchors))
+        or any(normalized.count(anchor) != 1 for anchor in anchors)
+    ):
+        raise ValueError("document note provenance anchors are not globally unique")
 
 
 def persist_document_note_provenance(

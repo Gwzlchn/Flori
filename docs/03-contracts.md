@@ -385,6 +385,9 @@ GET /api/jobs/j_xxx/parts/pt_a1b2/steps/08_punctuate/log → 指定 Part
 响应每项携带 `scope_key`、`part_id`、`step`，不做跨 scope 隐式聚合。`?step={step}` 在选定 scope 内过滤。
 每条记录含:路由(provider/api/model/tier_used + 逐 tier `attempts` 尝试链)、延迟、prompt、输出、
 `transcript`、用量、成本、原始返回、溯源与 `ok/error`。模板元数据和 `rendered` 来自同一解析快照。
+同一步内部存在并发子调用时,记录额外带 `audit_stage`;服务端按阶段名合并为唯一
+`output/ai_logs/{step}.jsonl`,重新编号展示用 `call_index`,而 usage `exec_id` 保持分片唯一。
+前端只显示折叠概览,完整 prompt、输出、raw 和 transcript 仍需逐条展开。
 
 > **AI worker 接入方式 / provider 审计对齐**:`claude-cli`、`codex-cli`、`qoder-cli` 都归 `ai` worker,但任务与审计只记录实际认领的具体 provider,不存在虚拟 provider。审计必须保留具体 `provider`、`requested_model`、`effective_model`(可解析时)、`worker_id`、`worker_tags`、`ai_access_method` 与 `credential_kind`。`pool=ai` 只表示资源池,不能推断接入方式。三类 CLI provider 都按各自格式回收 transcript sidecar;不可得时写 `{"file": null, "reason": ...}`,其它 prompt/response/usage/cost 字段保持同形。
 
@@ -3036,7 +3039,8 @@ video:
   - `intermediate/document.json` 保存 canonical metadata、blocks、Figure/Table registry、sources 与 locator；`quality.json` 保存 complete/degraded/rejected 及缺失原因；不生成或读取 `output/original.md`、`output/translated.md`、`intermediate/figures.json`。
   - `04_translate` 按稳定 block ID 翻译自然语言，冻结公式、代码、数字、单位和引用，发布 `translation.json + translated.html`。schema 支持 1:1、1:N、N:1 对齐；违反 segment/cardinality/表格结构不变量时重试后拒绝发布。该步骤 `allow_failure=true`，但仍先耗尽正常重试；最终失败保留错误与失败统计并签发当前 lifecycle generation 的 `allowed_failure` skipped manifest，不终止知识分支。配置加载期禁止任何 `needs/fan_in` 指向 `allow_failure` 步骤，避免把可选失败伪装成完成前提。并发 rerun 后迟到的旧代 manifest 不参与恢复；有效 manifest 可同时修复 Redis 与 DB 的终态投影。
   - 原文 HTML 通过 CSP/sandbox 安全副本展示，PDF 由 PDF.js 保留原始版式并按 page+bbox 高亮；Figure/Table 使用稳定 visual ID、分组目录、结构表或 source crop 降级。
-  - `05_smart` 消费 `document.json + quality.json + source_segments.json`,不因译文存在而换正文或失效指纹。Quality schema 只接受枚举原因码和有界浅层指标,单文件上限 64 KiB；历史 v1 的 `scanned_pdf_ocr_error:<ExceptionName>` 只在后缀满足安全标识符时归一为 `scanned_pdf_ocr_failed`。每次 AI 调用前都重验最终 prompt 的 4 MiB 上限。解析状态不是 `complete` 时,程序确定性写入来源质量提示,并同时投影成功 crosswalk 数和歧义/失败数。`pdf_crosswalk_blocks>0`只证明部分正文块保留页码/bbox,`pdf_crosswalk_visuals>0`只证明部分视觉项保留映射；两者不得互相代替或把 partial 退化夸大成对应维度全部缺失。来源冲突必须明确标成“来源内部未决矛盾”。它把 exact baseline 独占发布到 `output/provenance_exact/smart.json`。`08_review` 读取该不可变基线并把 semantic final 发布到 `output/provenance/smart.json`,因此单独 rerun 08 只删除自身 final,不会删除必需输入。
+  - `05_smart` 消费 `document.json + quality.json + source_segments.json`,不因译文存在而换正文或失效指纹。Quality schema 只接受枚举原因码和有界浅层指标,单文件上限 64 KiB；历史 v1 的 `scanned_pdf_ocr_error:<ExceptionName>` 只在后缀满足安全标识符时归一为 `scanned_pdf_ocr_failed`。原始来源按章节顺序唯一分配,单包正文不超过 46 KiB；单段过长按 UTF-8 完整边界拆分,参考文献目录确定性排除并写覆盖回执。单执行包最多附 5 张真实图片,超限时按来源顺序拆包,同一图片只归入来源的首个 part。章节卡最多 4 路并发,随后最多三份主题综合、一次完整正文和一次独立论文导读；步骤开始时冻结四份 Prompt 快照,每阶段最终 prompt 不超过 1 MiB,响应不超过 2 MiB,结构或引用闭包失败只允许完整重试一次。章节卡必须覆盖背景、问题、方法、结果、限制与读图边界,主题层显式恢复前后关联；最终正文不设统一字数、段落或章节数限制。作者正文只能使用已验证知识引用；结构化模型综合由服务端确定性渲染分析、依据、不确定性和最小证据集。导读从跨章节的有界证据 catalog 固定回答背景与问题、解决思路、验证方法、主要结论与阅读边界。
+    章节包、知识卡、主题、catalog、覆盖回执、最终 JSON 与导读 JSON 都发布到 `output/smart_pipeline/*`;重跑先清空步骤独占目录并只授权本次精确文件集合,不得把旧 package/theme JSON、临时文件或其它遗留物混进新 manifest。完整调用审计仍在折叠的 `05_smart` AI log 中,不写进笔记正文；导读和最终正文分别绑定各自实际 AI session。每个声明证据的自然段必须在服务端解析为一个 source;跨 source 比较必须拆成多个各自可证的自然段,不得把联合支持伪写成每条 source 都可独立支持。同一 source 可因不同 anchor 分别进入多段证明,只去重相同 source+anchor,不得统一伪绑最后一次调用、让先处理的导读抢占正文 mapping,或让正文早先引用抢占后续图解与模型综合。extractor 返回后再用声明证据段与 exact/semantic anchor 做精确集合对账,任一静默丢弃都会拒绝发布。模型不得直接写 Markdown/HTML 图片、资源路径或 source marker；标题只接受单行文本。图片占位符由服务端映射回已验证的 `assets/` 路径,图解的知识引用也由服务端确定性写成证据 marker,再统一映射为原始 source marker；未知、重复或跨包引用 fail-closed。解析状态不是 `complete` 时,程序确定性写入来源质量提示,并同时投影成功 crosswalk 数和歧义/失败数。`pdf_crosswalk_blocks>0`只证明部分正文块保留页码/bbox,`pdf_crosswalk_visuals>0`只证明部分视觉项保留映射；两者不得互相代替或把 partial 退化夸大成对应维度全部缺失。来源冲突必须明确标成“来源内部未决矛盾”。它把 exact baseline 独占发布到 `output/provenance_exact/smart.json`。`08_review` 读取该不可变基线并把 semantic final 发布到 `output/provenance/smart.json`,因此单独 rerun 08 只删除自身 final,不会删除必需输入。同一论文的 Qoder/Claude 对照必须使用两个独立 Job,禁止对同一 Job 并发 `rerun-smart`；两次换代会互相撤销且共享 canonical 输出,不能作为 A/B。
     `07_concepts` 从智能笔记选择概念,但模型自报 refs 一律清空,由服务端按原始 source segment 的
     `support_text` 逐字绑定每个概念。`08_review` 先把 smart semantic candidates 核验为最终 provenance,
     再统一评审原始 Document、解析质量、智能笔记和概念清单。质量报告先经 schema 校验和旧字段归一,
@@ -3401,7 +3405,7 @@ v2 manifest 顶层字段必须精确为 `schema_version / job_id / ocr_refs / ev
   解析失败、结构非法、空 key_terms 或任一概念没有绑定会把
   机器可读 JSON 反馈给同一输入快照并且只重试一次；第二次仍部分未绑定时，服务端只保留已绑定项并
   删除指向被拒项的 related 边。第二次仍无任何绑定，或结构仍非法时以 `input_invalid` 失败，不得发布
-  新的 `concepts.json` 或完成 manifest。三条 concepts 步骤的执行窗口统一为 3900 秒,覆盖两次各 1800 秒的完整 CLI 调用和 300 秒收尾余量。Document `05_smart` 使用相同两轮预算；`08_review` 可执行一轮 semantic attestation 和两轮评审,总窗口为 5700 秒。
+  新的 `concepts.json` 或完成 manifest。三条 concepts 步骤的执行窗口统一为 3900 秒,覆盖两次各 1800 秒的完整 CLI 调用和 300 秒收尾余量。Document `05_smart` 的分层多调用总窗口为 21600 秒；`08_review` 可执行一轮 semantic attestation 和两轮评审,总窗口为 5700 秒。
   通过完整验证但 `segments=[]` 的 provenance 可诚实退化为空绑定。
   Scheduler 在 canonical
   index 完成后把 `(job,note_type,source_segment_id)` 映射为当前 evidence ID，并按整 job 原子替换

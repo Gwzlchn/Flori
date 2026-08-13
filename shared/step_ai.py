@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
+import re
 import socket
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +46,7 @@ class AIInvocation:
         input_hashes: Callable[[], dict[str, str]],
         artifacts: ArtifactIO,
         structured: StructuredOutputParser,
+        audit_name: str | None = None,
     ):
         self.step_name = step_name
         self.job_dir = job_dir
@@ -52,6 +55,9 @@ class AIInvocation:
         self.input_hashes = input_hashes
         self.artifacts = artifacts
         self.structured = structured
+        if audit_name is not None and re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,95}", audit_name) is None:
+            raise ValueError("AI audit name is invalid")
+        self.audit_name = audit_name
         self.gateway: AIGateway | None = None
         self.call_index = 0
         self.last_provider: str | None = None
@@ -70,6 +76,43 @@ class AIInvocation:
         if provider == "claude-cli" and model in ("unknown", ""):
             model = DEFAULT_AI_MODEL
         return provider, model
+
+    def fork(self, audit_name: str) -> "AIInvocation":
+        """复用当前路由建立独立审计分片，供同一步内的并发调用使用。"""
+        forked = AIInvocation(
+            step_name=self.step_name,
+            job_dir=self.job_dir,
+            config=copy.deepcopy(self.config),
+            log=self.log,
+            input_hashes=self.input_hashes,
+            artifacts=self.artifacts,
+            structured=self.structured,
+            audit_name=audit_name,
+        )
+        forked.resolved_prompts = dict(self.resolved_prompts)
+        forked.prompt_overrides_snapshot = copy.deepcopy(
+            self.prompt_overrides_snapshot
+        )
+        return forked
+
+    def merge_forks(self, invocations: list["AIInvocation"]) -> None:
+        """按分片名合并调用审计；transcript 仍保留各自的唯一文件名。"""
+        records = list(self.ai_log_records)
+        fragment_paths: list[Path] = []
+        for invocation in sorted(invocations, key=lambda item: item.audit_name or ""):
+            records.extend(invocation.ai_log_records)
+            fragment_paths.append(invocation._log_path())
+            if invocation.last_response is not None:
+                self.last_provider = invocation.last_provider
+                self.last_model = invocation.last_model
+                self.last_response = invocation.last_response
+        for index, record in enumerate(records):
+            record["call_index"] = index
+        self.ai_log_records = records
+        self.call_index = len(records)
+        self._flush_logs()
+        for path in fragment_paths:
+            path.unlink(missing_ok=True)
 
     def _load_job_document(self):
         """job.json 缺失回哨兵;不可读或非法 JSON fail-closed,不让脏覆盖静默失效。"""
@@ -244,6 +287,8 @@ class AIInvocation:
         step_exec_id = os.environ.get(
             "STEP_EXEC_ID", f"{self.job_dir.name}:{self.step_name}",
         )
+        if self.audit_name:
+            step_exec_id = f"{step_exec_id}:{self.audit_name}"
         job_id = os.environ.get("STEP_JOB_ID", self.job_dir.name)
         record_usage_to_file(
             AIUsage(
@@ -304,7 +349,8 @@ class AIInvocation:
         return result, parse_failed
 
     def _log_path(self) -> Path:
-        return self.job_dir / f"{SEMANTIC_AI_LOG_PREFIX}{self.step_name}.jsonl"
+        suffix = f".{self.audit_name}" if self.audit_name else ""
+        return self.job_dir / f"{SEMANTIC_AI_LOG_PREFIX}{self.step_name}{suffix}.jsonl"
 
     def _load_existing_logs(self) -> None:
         try:
@@ -424,6 +470,7 @@ class AIInvocation:
             data = Path(source).read_bytes()
             rel = (
                 f"{SEMANTIC_AI_LOG_PREFIX}{self.step_name}"
+                f"{'.' + self.audit_name if self.audit_name else ''}"
                 f".turns.{self.call_index}.jsonl"
             )
             destination = self.job_dir / rel
@@ -523,12 +570,14 @@ class AIInvocation:
         return {
             "job_id": os.environ.get("STEP_JOB_ID", self.job_dir.name),
             "step": self.step_name,
+            "audit_stage": self.audit_name,
             "content_type": content_type,
             "pipeline": content_type,
             "domain": domain,
             "call_index": self.call_index,
             "exec_id": (
                 f"{os.environ.get('STEP_EXEC_ID', self.job_dir.name + ':' + self.step_name)}"
+                f"{':' + self.audit_name if self.audit_name else ''}"
                 f":{self.call_index}"
             ),
             "session_id": getattr(response, "session_id", None),
