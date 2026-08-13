@@ -12,10 +12,17 @@ from shared.step_artifacts import file_hash
 
 CHECKPOINT_FORMAT = "flori-document-chapter-checkpoint"
 CHECKPOINT_VERSION = 1
+STAGE_CHECKPOINT_FORMAT = "flori-document-stage-checkpoint"
+STAGE_CHECKPOINT_VERSION = 1
 MAX_STAGE_ATTEMPTS = 3
-_RETRY_INSTRUCTION = (
+_JSON_RETRY_INSTRUCTION = (
     "\n\n上一次输出未通过确定性结构与证据闭包校验。"
     "重新生成完整 JSON，不要返回补丁或解释。校验反馈="
+)
+_FRAMED_RETRY_INSTRUCTION = (
+    "\n\n上一次输出未通过确定性结构与证据闭包校验。"
+    "重新生成完整的 metadata JSON、Markdown 起止标记和原始 Markdown 正文，"
+    "不要返回补丁或解释。校验反馈="
 )
 
 
@@ -33,10 +40,13 @@ def _text_digest(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def build_stage_retry_prompt(base_prompt: str, validation_error: str) -> str:
+def build_stage_retry_prompt(
+    base_prompt: str, validation_error: str, *, framed: bool = False,
+) -> str:
     """从基础 prompt 和本地校验错误重建下一次调用；执行与恢复必须同源。"""
     feedback = _canonical_json({"validation_error": validation_error})
-    return base_prompt + _RETRY_INSTRUCTION + feedback
+    instruction = _FRAMED_RETRY_INSTRUCTION if framed else _JSON_RETRY_INSTRUCTION
+    return base_prompt + instruction + feedback
 
 
 def _route_identity(selection: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -106,6 +116,55 @@ def build_chapter_input_identity(
         "step": "05_smart",
         "package_id": package_id,
         "package_sha256": _digest(package),
+        "prompt_sha256": _text_digest(prompt),
+        "schema_sha256": _digest(schema),
+        "images": image_records,
+        "template": template_identity,
+        "routing": route,
+    }
+
+
+def build_stage_input_identity(
+    *,
+    job_dir: Path,
+    stage: str,
+    prompt: str,
+    schema: Mapping[str, Any],
+    images: list[Path],
+    template: Any,
+    selection: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """冻结非章节阶段的完整调用输入；prompt 已包含全部 canonical 上游。"""
+    route = _route_identity(selection)
+    if not isinstance(stage, str) or not stage or route is None:
+        return None
+    image_records = []
+    try:
+        root = job_dir.resolve()
+        for image in images:
+            resolved = image.resolve(strict=True)
+            image_records.append({
+                "path": resolved.relative_to(root).as_posix(),
+                "bytes": resolved.stat().st_size,
+                "sha256": file_hash(resolved),
+            })
+    except (OSError, ValueError):
+        return None
+    template_identity = {
+        "name": getattr(template, "name", None),
+        "source": getattr(template, "source", None),
+        "sha256": getattr(template, "sha256", None),
+        "version": getattr(template, "version", None),
+    }
+    if not all(
+        isinstance(template_identity[key], str) and template_identity[key]
+        for key in ("name", "source", "sha256")
+    ):
+        return None
+    return {
+        "job_id": job_dir.name,
+        "step": "05_smart",
+        "stage": stage,
         "prompt_sha256": _text_digest(prompt),
         "schema_sha256": _digest(schema),
         "images": image_records,
@@ -215,6 +274,39 @@ def _record_matches_static_input(
     return all(routing.get(key) == value for key, value in expected_routing.items())
 
 
+def _record_matches_stage_input(
+    record: Mapping[str, Any], identity: Mapping[str, Any], job_dir: Path,
+) -> bool:
+    if record.get("phase") != "final" or record.get("ok") is not True:
+        return False
+    if record.get("job_id") != identity.get("job_id"):
+        return False
+    if record.get("step") != identity.get("step"):
+        return False
+    if record.get("audit_stage") != identity.get("stage"):
+        return False
+    prompt = record.get("prompt")
+    rendered = prompt.get("rendered") if isinstance(prompt, dict) else None
+    template = prompt.get("template") if isinstance(prompt, dict) else None
+    if not isinstance(rendered, dict) or not isinstance(template, dict):
+        return False
+    expected_template = identity.get("template")
+    if not isinstance(expected_template, dict):
+        return False
+    if any(template.get(key) != expected_template.get(key) for key in expected_template):
+        return False
+    expected_images = identity.get("images")
+    if _normalized_audit_images(
+        job_dir, prompt.get("images"), expected_images,
+    ) != expected_images:
+        return False
+    routing = record.get("routing")
+    expected_routing = identity.get("routing")
+    if not isinstance(routing, dict) or not isinstance(expected_routing, dict):
+        return False
+    return all(routing.get(key) == value for key, value in expected_routing.items())
+
+
 def _record_prompt(record: Mapping[str, Any]) -> str | None:
     prompt = record.get("prompt")
     rendered = prompt.get("rendered") if isinstance(prompt, dict) else None
@@ -242,6 +334,35 @@ def build_chapter_checkpoint(
     body = {
         "format": CHECKPOINT_FORMAT,
         "version": CHECKPOINT_VERSION,
+        "input": dict(identity),
+        "audit": audit,
+        "attempt_prompt_sha256": _text_digest(actual_prompt),
+        "output_sha256": _text_digest(output["content"]),
+        "result_sha256": _digest(result),
+    }
+    return {**body, "digest": _digest(body)}
+
+
+def build_stage_checkpoint(
+    *, record: Mapping[str, Any], identity: Mapping[str, Any],
+    result: Mapping[str, Any], job_dir: Path,
+) -> dict[str, Any] | None:
+    """只为严格验证成功的非章节阶段签出审计断点。"""
+    audit = _audit_identity(record)
+    output = record.get("output")
+    processed = record.get("output_processed")
+    actual_prompt = _record_prompt(record)
+    if audit is None or not _record_matches_stage_input(record, identity, job_dir):
+        return None
+    if not isinstance(processed, dict) or processed.get("contract") != "valid":
+        return None
+    if actual_prompt is None:
+        return None
+    if not isinstance(output, dict) or not isinstance(output.get("content"), str):
+        return None
+    body = {
+        "format": STAGE_CHECKPOINT_FORMAT,
+        "version": STAGE_CHECKPOINT_VERSION,
         "input": dict(identity),
         "audit": audit,
         "attempt_prompt_sha256": _text_digest(actual_prompt),
@@ -286,6 +407,36 @@ def _checkpoint_matches_result(
     if checkpoint.get("result_sha256") != _digest(result):
         return False
     return True
+
+
+def _stage_checkpoint_matches_result(
+    *, record: Mapping[str, Any], identity: Mapping[str, Any],
+    actual_prompt: str, raw: str, result: Mapping[str, Any],
+) -> bool:
+    checkpoint = record.get("stage_checkpoint")
+    if not isinstance(checkpoint, dict):
+        return False
+    if set(checkpoint) != {
+        "format", "version", "input", "audit", "attempt_prompt_sha256",
+        "output_sha256", "result_sha256", "digest",
+    }:
+        return False
+    if checkpoint.get("format") != STAGE_CHECKPOINT_FORMAT:
+        return False
+    if checkpoint.get("version") != STAGE_CHECKPOINT_VERSION:
+        return False
+    if checkpoint.get("input") != identity:
+        return False
+    audit = _audit_identity(record)
+    if audit is None or checkpoint.get("audit") != audit:
+        return False
+    body = {key: checkpoint[key] for key in checkpoint if key != "digest"}
+    return (
+        checkpoint.get("digest") == _digest(body)
+        and checkpoint.get("attempt_prompt_sha256") == _text_digest(actual_prompt)
+        and checkpoint.get("output_sha256") == _text_digest(raw)
+        and checkpoint.get("result_sha256") == _digest(result)
+    )
 
 
 def _attempt_chain_key(record: Mapping[str, Any]) -> tuple[str, int] | None:
@@ -373,6 +524,64 @@ def restore_chapter_attempts(
                 ):
                     break
             return result
+    return None
+
+
+def restore_stage_attempts(
+    *,
+    records: list[Mapping[str, Any]],
+    identity: Mapping[str, Any],
+    base_prompt: str,
+    schema: Mapping[str, Any],
+    validator: Callable[[dict[str, Any]], dict[str, Any]],
+    parser: Callable[[str, Mapping[str, Any]], dict[str, Any]],
+    job_dir: Path,
+    framed: bool = False,
+) -> tuple[dict[str, Any], str] | None:
+    """重验非章节阶段并返回结果与原始 provider session；不制造新响应身份。"""
+    if identity.get("prompt_sha256") != _text_digest(base_prompt):
+        return None
+    stage = identity.get("stage")
+    if not isinstance(stage, str):
+        return None
+    for chain in reversed(_ordered_attempt_chains(records, stage)):
+        expected_prompt = base_prompt
+        for position, record in enumerate(chain):
+            audit = _audit_identity(record)
+            if audit is None:
+                break
+            if not _record_matches_stage_input(record, identity, job_dir):
+                break
+            if _record_prompt(record) != expected_prompt:
+                break
+            output = record.get("output")
+            raw = output.get("content") if isinstance(output, dict) else None
+            processed = record.get("output_processed")
+            if not isinstance(raw, str) or not isinstance(processed, dict):
+                break
+            if processed.get("attempt") != position + 1:
+                break
+            try:
+                result = validator(parser(raw, schema))
+            except (KeyError, TypeError, ValueError) as exc:
+                if processed.get("contract") != "invalid":
+                    break
+                if position + 1 == len(chain):
+                    break
+                expected_prompt = build_stage_retry_prompt(
+                    base_prompt, str(exc), framed=framed,
+                )
+                continue
+            if processed.get("contract") != "valid" or position + 1 != len(chain):
+                break
+            if "stage_checkpoint" not in record:
+                break
+            if not _stage_checkpoint_matches_result(
+                record=record, identity=identity, actual_prompt=expected_prompt,
+                raw=raw, result=result,
+            ):
+                break
+            return result, audit["session_id"]
     return None
 
 

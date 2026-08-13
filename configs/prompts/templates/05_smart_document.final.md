@@ -5,9 +5,9 @@
 - 结构跟随论文的论证逻辑，不机械复刻目录，也不把知识卡逐条拼接。
 - 不设统一字数、段落数或章节数限制；使用清晰标题、自然段、列表和局部总结，避免一整页只有一个巨型段落。
 - 区分作者主张与模型综合。后者必须有依据、有限定、可反驳，不得冒充作者原话。
-- note_markdown 不得自行写“模型综合”小节；把跨章判断写进结构化 synthesis，并用 knowledge_refs 列出最小依据集，服务端会确定性渲染分析、依据和不确定性。
+- Markdown 正文不得自行写“模型综合”小节；把跨章判断写进 metadata 的 synthesis，并用 knowledge_refs 列出最小依据集，服务端会确定性渲染分析、依据和不确定性。
 - 相关性、规模门槛、代理指标或跨模型差异不得改写成因果结论；输入不能区分的解释必须明确写“无法归因”。
-- 完整调用审计、哈希和覆盖清单不进入 note_markdown，它们由系统单独折叠展示。
+- 完整调用审计、哈希和覆盖清单不进入 Markdown 正文，它们由系统单独折叠展示。
 
 内容要求：
 - 正文先展开论证，不要用一句摘要替代背景、问题和方法。
@@ -24,14 +24,17 @@
 
 证据规则：
 - 重要段落末尾用 `[证据: p001-k001]`，只列足以支持该段的最小集合。同一证据段的所有知识 ID 必须在 KNOWLEDGE_SOURCE_MAP 中解析到同一 source；跨 source 比较必须拆成多个各自可证的自然段，不得把联合支持伪写成单条证明。
-- 只能使用 EXPECTED_KNOWLEDGE_REFS；used_knowledge_refs 只列正文实际使用的 ID。
+- 只能使用 EXPECTED_KNOWLEDGE_REFS；服务端会从正文、图解和模型综合确定性计算 used_knowledge_refs，不要输出该字段。
 - theme_coverage_refs 必须精确包含全部 EXPECTED_THEME_REFS。
 
-输出严格符合 OUTPUT_SCHEMA 的 JSON，不要 Markdown fence 或额外说明。
-输出前检查 JSON 字符串转义：换行写成 `\n`，字面反斜杠写成 `\\`，不得输出未转义换行或 `\ ` 等非法 escape。
+输出必须严格分成以下三段，不要 Markdown fence 或额外说明：
+1. 首先输出一个严格符合 METADATA_SCHEMA 的完整 JSON 对象。JSON 只包含 metadata，不含正文。
+2. 下一行只输出 `---FLORI-FINAL-MARKDOWN-BEGIN---`。
+3. 然后输出原始 Markdown 正文；正文结束后另起一行只输出 `---FLORI-FINAL-MARKDOWN-END---`，其后不得有其它内容。
+metadata JSON 仍必须遵守 RFC 8259 转义；Markdown 正文不需要 JSON 转义。起止标记都只能出现一次，正文内不得复用保留标记。
 
-OUTPUT_SCHEMA:
-{{OUTPUT_SCHEMA}}
+METADATA_SCHEMA:
+{{METADATA_SCHEMA}}
 
 PAPER_MAP:
 {{PAPER_MAP}}

@@ -19,6 +19,8 @@ MAX_IMAGE_ATTACHMENTS = 5
 MAX_PACKAGE_SOURCE_ALIASES = 32
 MAX_PACKAGES = 64
 MAX_KNOWLEDGE_ITEMS = 128
+FINAL_MARKDOWN_BEGIN = "---FLORI-FINAL-MARKDOWN-BEGIN---"
+FINAL_MARKDOWN_END = "---FLORI-FINAL-MARKDOWN-END---"
 _BIBLIOGRAPHY_RE = re.compile(
     r"^(?:(?:\d+(?:\.\d+)*[.)]?)\s+)?(?:references|bibliography|参考文献|参考书目)(?:\s|$)",
     re.I,
@@ -466,6 +468,45 @@ def parse_stage_result(raw: str, schema: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def parse_final_stage_result(
+    raw: str, metadata_schema: Mapping[str, Any], full_schema: Mapping[str, Any],
+) -> dict[str, Any]:
+    """解析小型 JSON metadata 与原始 Markdown；起止标记使截断 fail-closed。"""
+    data = raw.encode("utf-8")
+    if len(data) > MAX_STAGE_RESULT_BYTES:
+        raise ValueError("AI stage result exceeds byte limit")
+    if raw.count(FINAL_MARKDOWN_BEGIN) != 1 or raw.count(FINAL_MARKDOWN_END) != 1:
+        raise ValueError("final response must contain one complete Markdown frame")
+    prefix, remainder = raw.split(FINAL_MARKDOWN_BEGIN, 1)
+    body, suffix = remainder.split(FINAL_MARKDOWN_END, 1)
+    if suffix.strip():
+        raise ValueError("final response contains content after Markdown frame")
+    markdown = body.strip()
+    if not markdown:
+        raise ValueError("final Markdown body is empty")
+    metadata = parse_stage_result(prefix.strip(), metadata_schema)
+    evidence = [
+        value.strip()
+        for group in _EVIDENCE_RE.findall(markdown)
+        for value in group.split(",") if value.strip()
+    ]
+    used = list(dict.fromkeys([
+        *evidence,
+        *(
+            ref for placement in metadata["figure_placements"]
+            for ref in placement["knowledge_refs"]
+        ),
+        *metadata["synthesis"]["knowledge_refs"],
+    ]))
+    result = {
+        **metadata,
+        "note_markdown": markdown,
+        "used_knowledge_refs": used,
+    }
+    validate_schema(result, full_schema)
+    return result
+
+
 def validate_chapter_card(
     result: dict[str, Any], package: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -623,6 +664,8 @@ def validate_final(
         label="final markdown",
     )
     _reject_direct_images(result["note_markdown"], label="final markdown")
+    if "[[source:" in result["note_markdown"]:
+        raise ValueError("final markdown must not contain source markers")
     _validate_note_title(result["title"])
     if re.search(r"(?m)^#{2,4}\s+[^\n]*模型综合", result["note_markdown"]) is not None:
         raise ValueError("final markdown must leave model synthesis to the renderer")
@@ -747,6 +790,8 @@ def validate_introduction(
     if "{{FIGURE:" in markdown:
         raise ValueError("paper introduction must not contain figures")
     _reject_direct_images(markdown, label="paper introduction")
+    if "[[source:" in markdown:
+        raise ValueError("paper introduction must not contain source markers")
     return result
 
 

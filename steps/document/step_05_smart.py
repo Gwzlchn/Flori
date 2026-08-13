@@ -32,7 +32,10 @@ from steps.document.smart_checkpoint import (
     build_stage_retry_prompt,
     build_chapter_checkpoint,
     build_chapter_input_identity,
+    build_stage_checkpoint,
+    build_stage_input_identity,
     restore_chapter_attempts,
+    restore_stage_attempts,
 )
 from steps.document.smart_pipeline import (
     MAX_STAGE_PROMPT_BYTES,
@@ -42,6 +45,7 @@ from steps.document.smart_pipeline import (
     enrich_cards,
     inject_source_markers,
     parse_stage_result,
+    parse_final_stage_result,
     project_theme_card,
     render_figures,
     render_model_synthesis,
@@ -60,7 +64,7 @@ _TEMPLATES = (
     "05_smart_document.final",
     "05_smart_document.introduction",
 )
-_SCHEMAS = ("chapter", "theme", "final", "introduction")
+_SCHEMAS = ("chapter", "theme", "final", "final_metadata", "introduction")
 _MAX_STAGE_ATTEMPTS = 3
 _QUALITY_NOTE_METRIC_KEYS = (
     "pdf_source_quality", "pdf_crosswalk_blocks", "pdf_crosswalk_visuals",
@@ -127,69 +131,87 @@ class DocumentSmartStep(StepBase):
         for name in _TEMPLATES:
             self.ai.resolve_prompt_template(name)
         invocations: list[AIInvocation] = []
+        rel: str | None = None
         try:
-            cards = self._run_chapters(
-                paper_map, packages, quality, schemas["chapter"], invocations,
-            )
-            enriched, knowledge, figures, source_map = enrich_cards(packages, cards)
-            themes = build_themes(packages)
-            theme_results = self._run_themes(
-                paper_map, themes, enriched, knowledge, figures,
-                schemas["theme"], invocations,
-            )
-            final_result, final_figures, final_invocation = self._run_final(
-                paper_map, theme_results, knowledge, figures,
-                schemas["final"], invocations,
-            )
-            introduction, introduction_invocation = self._run_introduction(
-                paper_map, knowledge, schemas["introduction"], invocations,
-            )
-        finally:
-            self.ai.merge_forks(invocations)
+            try:
+                cards = self._run_chapters(
+                    paper_map, packages, quality, schemas["chapter"], invocations,
+                )
+                enriched, knowledge, figures, source_map = enrich_cards(packages, cards)
+                themes = build_themes(packages)
+                theme_results = self._run_themes(
+                    paper_map, themes, enriched, knowledge, figures,
+                    schemas["theme"], invocations,
+                )
+                final_result, final_figures, final_invocation = self._run_final(
+                    paper_map, theme_results, knowledge, figures,
+                    schemas["final"], schemas["final_metadata"], invocations,
+                )
+                final_markdown = render_figures(
+                    render_model_synthesis(final_result),
+                    final_result["figure_placements"], final_figures, self.job_dir,
+                )
+                marked_final = inject_source_markers(
+                    final_markdown, knowledge, source_map,
+                    deduplicate_sources_by_evidence=False,
+                )
+                clean_final, final_exact, final_semantic = (
+                    extract_attestable_document_markers(
+                        marked_final, source_manifest, ai=final_invocation,
+                        deduplicate_sources_by_anchor=True,
+                        producer_session_id=getattr(
+                            final_invocation, "_restored_session_id", None,
+                        ),
+                    )
+                )
+                require_complete_document_marker_coverage(
+                    marked_final, final_exact, final_semantic,
+                )
+                self._persist_pending_stage_checkpoint(final_invocation)
 
-        final_markdown = render_figures(
-            render_model_synthesis(final_result), final_result["figure_placements"],
-            final_figures, self.job_dir,
-        )
-        marked_introduction = inject_source_markers(
-            introduction["introduction_markdown"], knowledge, source_map,
-            deduplicate_sources_by_evidence=False,
-        )
-        clean_introduction, intro_exact, intro_semantic = (
-            extract_attestable_document_markers(
-                marked_introduction, source_manifest, ai=introduction_invocation,
-                deduplicate_sources_by_anchor=True,
-            )
-        )
-        require_complete_document_marker_coverage(
-            marked_introduction, intro_exact, intro_semantic,
-        )
-        marked_final = inject_source_markers(
-            final_markdown, knowledge, source_map,
-            deduplicate_sources_by_evidence=False,
-        )
-        clean_final, final_exact, final_semantic = extract_attestable_document_markers(
-            marked_final, source_manifest, ai=final_invocation,
-            deduplicate_sources_by_anchor=True,
-        )
-        require_complete_document_marker_coverage(
-            marked_final, final_exact, final_semantic,
-        )
-        result = clean_introduction.strip() + "\n\n" + clean_final.strip()
-        exact = intro_exact + final_exact
-        semantic = intro_semantic + final_semantic
-        quality_notice = self._quality_notice(quality)
-        if quality_notice:
-            result = f"{quality_notice}\n\n{result}"
-        note_title = str(final_result["title"]).strip()
-        rel = self.review.write_smart_note(result, title=note_title)
-        try:
+                introduction, introduction_invocation = self._run_introduction(
+                    paper_map, knowledge, schemas["introduction"], invocations,
+                )
+                marked_introduction = inject_source_markers(
+                    introduction["introduction_markdown"], knowledge, source_map,
+                    deduplicate_sources_by_evidence=False,
+                )
+                clean_introduction, intro_exact, intro_semantic = (
+                    extract_attestable_document_markers(
+                        marked_introduction, source_manifest,
+                        ai=introduction_invocation,
+                        deduplicate_sources_by_anchor=True,
+                        producer_session_id=getattr(
+                            introduction_invocation, "_restored_session_id", None,
+                        ),
+                    )
+                )
+                require_complete_document_marker_coverage(
+                    marked_introduction, intro_exact, intro_semantic,
+                )
+                result = clean_introduction.strip() + "\n\n" + clean_final.strip()
+                exact = intro_exact + final_exact
+                semantic = intro_semantic + final_semantic
+                quality_notice = self._quality_notice(quality)
+                if quality_notice:
+                    result = f"{quality_notice}\n\n{result}"
+                note_title = str(final_result["title"]).strip()
+            finally:
+                self.ai.merge_forks(invocations)
+
+            rel = self.review.write_smart_note(result, title=note_title)
             require_unique_document_provenance_anchors(
                 self.job_dir, rel, [*exact, *semantic],
             )
+            self._persist_pending_stage_checkpoint(
+                introduction_invocation, log_owner=self.ai,
+            )
         except Exception:
-            (self.job_dir / rel).unlink(missing_ok=True)
+            if rel is not None:
+                (self.job_dir / rel).unlink(missing_ok=True)
             raise
+
+        assert rel is not None
         provenance = persist_document_note_provenance(
             self.job_dir,
             note_type="smart",
@@ -302,6 +324,7 @@ class DocumentSmartStep(StepBase):
                 figure_refs=figure_refs: validate_theme(
                     value, theme, knowledge_refs, figure_refs,
                 ),
+                "stage",
             ))
         results = self._parallel_validated(tasks, schema)
         return [results[str(theme["theme_id"])] for theme in themes]
@@ -309,7 +332,8 @@ class DocumentSmartStep(StepBase):
     def _run_final(
         self, paper_map: Mapping[str, Any], themes: list[dict[str, Any]],
         knowledge: Mapping[str, Any], figures: Mapping[str, Any],
-        schema: Mapping[str, Any], invocations: list[AIInvocation],
+        schema: Mapping[str, Any], metadata_schema: Mapping[str, Any],
+        invocations: list[AIInvocation],
     ) -> tuple[dict[str, Any], dict[str, Any], AIInvocation]:
         theme_refs = [str(item["theme_id"]) for item in themes]
         selected_figures = {
@@ -326,10 +350,11 @@ class DocumentSmartStep(StepBase):
         }
         invocation = self.ai.fork("03-final")
         invocations.append(invocation)
-        result = self._call_validated(
+        schema_bundle = {"metadata": metadata_schema, "full": schema}
+        result = self._call_stage_validated(
             invocation, "05_smart_document.final",
             {
-                "OUTPUT_SCHEMA": canonical_json(schema),
+                "METADATA_SCHEMA": canonical_json(metadata_schema),
                 "PAPER_MAP": canonical_json(paper_map),
                 "EXPECTED_THEME_REFS": canonical_json(theme_refs),
                 "EXPECTED_KNOWLEDGE_REFS": canonical_json(sorted(knowledge)),
@@ -342,10 +367,14 @@ class DocumentSmartStep(StepBase):
                     for theme in themes
                 ]),
             },
-            schema,
+            schema_bundle,
             lambda value: validate_final(
                 value, theme_refs, knowledge, list(final_figures),
             ),
+            parser=lambda raw, bundle: parse_final_stage_result(
+                raw, bundle["metadata"], bundle["full"],
+            ),
+            response_format="text", defer_checkpoint=True,
         )
         return result, final_figures, invocation
 
@@ -379,7 +408,7 @@ class DocumentSmartStep(StepBase):
         catalog = list(selected_catalog.values())
         invocation = self.ai.fork("04-introduction")
         invocations.append(invocation)
-        result = self._call_validated(
+        result = self._call_stage_validated(
             invocation, "05_smart_document.introduction",
             {
                 "OUTPUT_SCHEMA": canonical_json(schema),
@@ -389,6 +418,7 @@ class DocumentSmartStep(StepBase):
             },
             schema,
             lambda value: validate_introduction(value, selected_catalog),
+            defer_checkpoint=True,
         )
         return result, invocation
 
@@ -408,14 +438,16 @@ class DocumentSmartStep(StepBase):
             task = tasks[next_task]
             task_id, invocation, template, values, images, validator = task[:6]
             next_task += 1
-            runner = (
-                self._call_chapter_validated
-                if len(task) == 7 else self._call_validated
-            )
+            runner = self._call_validated
+            if len(task) == 7:
+                runner = (
+                    self._call_stage_validated
+                    if task[6] == "stage" else self._call_chapter_validated
+                )
             args = (
                 invocation, template, values, schema, validator, images,
             )
-            if len(task) == 7:
+            if len(task) == 7 and task[6] != "stage":
                 args += (task[6],)
             future = pool.submit(
                 runner, *args,
@@ -475,6 +507,9 @@ class DocumentSmartStep(StepBase):
         values: Mapping[str, str], schema: Mapping[str, Any],
         validator: Callable[[dict[str, Any]], dict[str, Any]],
         images: list[Path] | None = None,
+        *,
+        parser: Callable[[str, Mapping[str, Any]], dict[str, Any]] = parse_stage_result,
+        response_format: str = "json",
     ) -> dict[str, Any]:
         template = invocation.load_prompt_template(template_name)
         prompt = self._render_stage_prompt(template, values)
@@ -483,16 +518,16 @@ class DocumentSmartStep(StepBase):
             attempt_prompt = prompt
             if last_error is not None:
                 attempt_prompt = build_stage_retry_prompt(
-                    prompt, str(last_error),
+                    prompt, str(last_error), framed=response_format == "text",
                 )
             if len(attempt_prompt.encode("utf-8")) > MAX_STAGE_PROMPT_BYTES:
                 raise InputInvalidError("document smart stage prompt exceeds byte limit")
             raw = invocation.call(
-                attempt_prompt, images=images or [], response_format="json",
+                attempt_prompt, images=images or [], response_format=response_format,
                 temperature=0, max_tokens=32768,
             )
             try:
-                result = validator(parse_stage_result(raw, schema))
+                result = validator(parser(raw, schema))
                 invocation._amend_last_log({
                     "output_processed": {
                         "json_parse": {"ok": True, "salvaged": False},
@@ -511,6 +546,61 @@ class DocumentSmartStep(StepBase):
                 })
         assert last_error is not None
         raise last_error
+
+    def _call_stage_validated(
+        self, invocation: AIInvocation, template_name: str,
+        values: Mapping[str, str], schema: Mapping[str, Any],
+        validator: Callable[[dict[str, Any]], dict[str, Any]],
+        images: list[Path] | None = None,
+        *,
+        parser: Callable[[str, Mapping[str, Any]], dict[str, Any]] = parse_stage_result,
+        response_format: str = "json",
+        defer_checkpoint: bool = False,
+    ) -> dict[str, Any]:
+        """严格重验主题、终稿和导读断点；恢复时保留原 provider session。"""
+        template_text = invocation.load_prompt_template(template_name)
+        prompt = self._render_stage_prompt(template_text, values)
+        resolved = invocation.resolved_prompts.get(template_name)
+        identity = build_stage_input_identity(
+            job_dir=self.job_dir,
+            stage=str(invocation.audit_name),
+            prompt=prompt,
+            schema=schema,
+            images=images or [],
+            template=resolved,
+            selection=invocation.selection(),
+        )
+        if identity is not None:
+            records = [*self.ai.ai_log_records, *invocation.ai_log_records]
+            restored = restore_stage_attempts(
+                records=[record for record in records if isinstance(record, dict)],
+                identity=identity,
+                base_prompt=prompt,
+                schema=schema,
+                validator=validator,
+                parser=parser,
+                job_dir=self.job_dir,
+                framed=response_format == "text",
+            )
+            if restored is not None:
+                result, session_id = restored
+                invocation._restored_session_id = session_id
+                return result
+        result = self._call_validated(
+            invocation, template_name, values, schema, validator, images,
+            parser=parser, response_format=response_format,
+        )
+        if identity is None or not invocation.ai_log_records:
+            return result
+        checkpoint = build_stage_checkpoint(
+            record=invocation.ai_log_records[-1], identity=identity,
+            result=result, job_dir=self.job_dir,
+        )
+        if checkpoint is not None:
+            invocation._pending_stage_checkpoint = checkpoint
+            if not defer_checkpoint:
+                self._persist_pending_stage_checkpoint(invocation)
+        return result
 
     def _call_chapter_validated(
         self, invocation: AIInvocation, template_name: str,
@@ -584,6 +674,74 @@ class DocumentSmartStep(StepBase):
             pass
         record.pop("chapter_checkpoint", None)
         return False
+
+    @staticmethod
+    def _persist_stage_checkpoint(
+        invocation: AIInvocation, checkpoint: Mapping[str, Any],
+    ) -> bool:
+        """阶段断点只在对应审计分片落盘；失败时撤销内存元数据。"""
+        record = invocation.ai_log_records[-1]
+        exec_id = record.get("exec_id")
+        invocation._amend_last_log({"stage_checkpoint": dict(checkpoint)})
+        try:
+            persisted = [
+                json.loads(line)
+                for line in invocation._log_path().read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if any(
+                item.get("exec_id") == exec_id
+                and item.get("stage_checkpoint") == checkpoint
+                for item in persisted if isinstance(item, dict)
+            ):
+                return True
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+            pass
+        record.pop("stage_checkpoint", None)
+        return False
+
+    @classmethod
+    def _persist_pending_stage_checkpoint(
+        cls, invocation: AIInvocation, *, log_owner: AIInvocation | None = None,
+    ) -> bool:
+        checkpoint = getattr(invocation, "_pending_stage_checkpoint", None)
+        if not isinstance(checkpoint, Mapping):
+            return False
+        try:
+            if log_owner is None:
+                return cls._persist_stage_checkpoint(invocation, checkpoint)
+            exec_id = invocation.ai_log_records[-1].get("exec_id")
+            target = next(
+                (
+                    record for record in log_owner.ai_log_records
+                    if record.get("exec_id") == exec_id
+                ),
+                None,
+            )
+            if target is None:
+                return False
+            target["stage_checkpoint"] = dict(checkpoint)
+            try:
+                log_owner._flush_logs()
+                persisted = [
+                    json.loads(line)
+                    for line in log_owner._log_path().read_text(
+                        encoding="utf-8",
+                    ).splitlines()
+                    if line.strip()
+                ]
+                if any(
+                    item.get("exec_id") == exec_id
+                    and item.get("stage_checkpoint") == checkpoint
+                    for item in persisted if isinstance(item, dict)
+                ):
+                    return True
+            except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+                pass
+            target.pop("stage_checkpoint", None)
+            return False
+        finally:
+            del invocation._pending_stage_checkpoint
 
     @staticmethod
     def _render_stage_prompt(template: str, values: Mapping[str, str]) -> str:

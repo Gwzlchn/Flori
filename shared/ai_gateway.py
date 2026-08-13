@@ -464,20 +464,8 @@ class DryRunProvider:
                 "knowledge_refs": [knowledge_refs[0]],
             } for ref in selected]
             figure_markdown = "\n\n".join(f"{{{{FIGURE:{ref}}}}}" for ref in selected)
-            return json.dumps({
+            result = {
                 "title": "DRY_RUN 论文智能笔记", "subtitle": "接线验收输出",
-                "note_markdown": (
-                    f"## 问题、方法与验证\n\n{body}[证据: {knowledge_refs[0]}]"
-                    + ("\n\n" + figure_markdown if figure_markdown else "")
-                ),
-                "used_knowledge_refs": sorted({
-                    knowledge_refs[0],
-                    *(
-                        ref
-                        for placement in placements
-                        for ref in placement["knowledge_refs"]
-                    ),
-                }),
                 "theme_coverage_refs": theme_refs,
                 "figure_placements": placements,
                 "synthesis": {
@@ -490,7 +478,17 @@ class DryRunProvider:
                     "scope": "全部主题已审阅。", "known_gaps": [],
                     "evidence_note": "完整调用审计由系统单独展示。",
                 },
-            }, ensure_ascii=False, separators=(",", ":"))
+            }
+            markdown = (
+                f"## 问题、方法与验证\n\n{body}[证据: {knowledge_refs[0]}]"
+                + ("\n\n" + figure_markdown if figure_markdown else "")
+            )
+            return (
+                json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+                + "\n---FLORI-FINAL-MARKDOWN-BEGIN---\n"
+                + markdown
+                + "\n---FLORI-FINAL-MARKDOWN-END---"
+            )
         if "论文精读笔记的导读编辑" in prompt:
             refs = cls._prompt_json(prompt, "VALID_REFS")
             if not isinstance(refs, list) or not refs:
@@ -520,10 +518,9 @@ class DryRunProvider:
             if isinstance(message, dict)
         )
         marker = "\nINPUT="
-        if request.response_format == "json":
-            document_smart = DryRunProvider._document_smart_content(prompt)
-            if document_smart is not None:
-                return document_smart
+        document_smart = DryRunProvider._document_smart_content(prompt)
+        if document_smart is not None:
+            return document_smart
         if (
             request.response_format == "json"
             and "Document 流水线的忠实翻译器" in prompt

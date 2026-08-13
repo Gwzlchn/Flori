@@ -400,9 +400,14 @@ def extract_attestable_document_markers(
     ai,
     force_semantic: bool = False,
     deduplicate_sources_by_anchor: bool = False,
+    producer_session_id: str | None = None,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """无独立 producer session 时只发布 exact quote；有 session 时分流语义候选。"""
-    invocation_id = producer_invocation_id(ai)
+    invocation_id = producer_session_id or producer_invocation_id(ai)
+    if producer_session_id is not None and (
+        not producer_session_id.strip() or len(producer_session_id) > 128
+    ):
+        raise ValueError("restored producer invocation id is invalid")
     if invocation_id is None:
         cleaned, exact = extract_exact_quote_markers(
             marked_text, source_manifest, error_prefix="note",

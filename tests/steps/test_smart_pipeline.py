@@ -19,25 +19,33 @@ from shared.ai_gateway import DryRunProvider
 from shared.models import LLMRequest, LLMResponse
 from shared.step_ai import AIInvocation
 from steps.document.smart_pipeline import (
+    FINAL_MARKDOWN_BEGIN,
+    FINAL_MARKDOWN_END,
     MAX_IMAGE_ATTACHMENTS,
     MAX_PACKAGE_SOURCE_ALIASES,
     MAX_PACKAGES,
     MAX_STAGE_PROMPT_BYTES,
     build_chapter_packages,
+    canonical_json,
     parse_stage_result,
+    parse_final_stage_result,
     inject_source_markers,
     render_figures,
     render_model_synthesis,
     validate_chapter_card,
     validate_final,
+    validate_introduction,
 )
 from steps.document.smart_checkpoint import (
     build_stage_retry_prompt,
     build_chapter_checkpoint,
     build_chapter_input_identity,
+    build_stage_checkpoint,
+    build_stage_input_identity,
     restore_chapter_attempts,
     restore_chapter_checkpoint,
     restore_legacy_chapter_record,
+    restore_stage_attempts,
 )
 from steps.document.step_05_smart import DocumentSmartStep
 from steps.document.provenance import (
@@ -130,6 +138,16 @@ def _final() -> dict:
     }
 
 
+def _framed_final(value: dict | None = None) -> str:
+    result = deepcopy(value or _final())
+    markdown = result.pop("note_markdown")
+    result.pop("used_knowledge_refs")
+    return (
+        json.dumps(result, ensure_ascii=False)
+        + f"\n{FINAL_MARKDOWN_BEGIN}\n{markdown}\n{FINAL_MARKDOWN_END}"
+    )
+
+
 def _introduction() -> dict:
     body = (
         "这篇论文从现实中的测量缺口出发，说明为什么需要一个可复查的研究方案。"
@@ -162,6 +180,17 @@ def _fake_layered_call_with_value(
         "ok": True,
     })
     self.call_index += 1
+    if self.audit_name == "03-final":
+        metadata = {
+            key: item for key, item in value.items()
+            if key not in {"note_markdown", "used_knowledge_refs"}
+        }
+        return (
+            json.dumps(metadata, ensure_ascii=False)
+            + f"\n{FINAL_MARKDOWN_BEGIN}\n"
+            + value["note_markdown"]
+            + f"\n{FINAL_MARKDOWN_END}"
+        )
     return json.dumps(value, ensure_ascii=False)
 
 
@@ -384,6 +413,293 @@ def test_complete_legacy_chapter_record_is_revalidated_without_metadata(tmp_path
     ) is None
 
 
+def test_stage_checkpoint_restores_result_and_original_session(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["ok"], "properties": {"ok": {"type": "boolean"}},
+    }
+    prompt = "frozen theme prompt"
+    template = SimpleNamespace(
+        name="05_smart_document.theme", source="image",
+        sha256="sha256:template", version=1,
+    )
+    selection = {"tiers": [{
+        "provider": "qoder-cli", "model": "ultimate",
+        "reasoning_effort": "max",
+    }]}
+    identity = build_stage_input_identity(
+        job_dir=job, stage="02-theme-t01", prompt=prompt, schema=schema,
+        images=[], template=template, selection=selection,
+    )
+    assert identity is not None
+    raw = '{"ok":true}'
+    record = {
+        "phase": "final", "ok": True, "job_id": job.name,
+        "step": "05_smart", "audit_stage": "02-theme-t01",
+        "exec_id": "exec:02-theme-t01:0", "session_id": "real-session-t01",
+        "prompt": {
+            "rendered": {"user": prompt}, "images": [],
+            "template": {
+                "name": template.name, "source": template.source,
+                "sha256": template.sha256, "version": template.version,
+            },
+        },
+        "routing": dict(identity["routing"]),
+        "output": {"content": raw},
+        "output_processed": {"contract": "valid", "attempt": 1},
+    }
+    record["stage_checkpoint"] = build_stage_checkpoint(
+        record=record, identity=identity, result={"ok": True}, job_dir=job,
+    )
+    assert record["stage_checkpoint"] is not None
+    assert restore_stage_attempts(
+        records=[record], identity=identity, base_prompt=prompt, schema=schema,
+        validator=lambda value: value, parser=parse_stage_result, job_dir=job,
+    ) == ({"ok": True}, "real-session-t01")
+    record["session_id"] = "tampered-session"
+    assert restore_stage_attempts(
+        records=[record], identity=identity, base_prompt=prompt, schema=schema,
+        validator=lambda value: value, parser=parse_stage_result, job_dir=job,
+    ) is None
+
+
+def test_stage_restore_rejects_legacy_record_without_checkpoint(tmp_path):
+    job = tmp_path / "job"
+    job.mkdir()
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["ok"], "properties": {"ok": {"type": "boolean"}},
+    }
+    prompt = "frozen theme prompt"
+    template = SimpleNamespace(
+        name="05_smart_document.theme", source="image",
+        sha256="sha256:template", version=1,
+    )
+    identity = build_stage_input_identity(
+        job_dir=job, stage="02-theme-t01", prompt=prompt, schema=schema,
+        images=[], template=template,
+        selection={"tiers": [{
+            "provider": "qoder-cli", "model": "ultimate",
+            "reasoning_effort": "max",
+        }]},
+    )
+    assert identity is not None
+    record = {
+        "phase": "final", "ok": True, "job_id": job.name,
+        "step": "05_smart", "audit_stage": "02-theme-t01",
+        "exec_id": "exec:02-theme-t01:0", "session_id": "legacy-session",
+        "prompt": {
+            "rendered": {"user": prompt}, "images": [],
+            "template": {
+                "name": template.name, "source": template.source,
+                "sha256": template.sha256, "version": template.version,
+            },
+        },
+        "routing": dict(identity["routing"]),
+        "output": {"content": '{"ok":true}'},
+        "output_processed": {"contract": "valid", "attempt": 1},
+    }
+    assert restore_stage_attempts(
+        records=[record], identity=identity, base_prompt=prompt, schema=schema,
+        validator=lambda value: value, parser=parse_stage_result, job_dir=job,
+    ) is None
+
+
+def test_stage_checkpoint_skips_ai_across_new_step_instance(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["ai"] = {"primary": {"provider": "qoder-cli", "model": "ultimate"}}
+    config["providers"] = {"providers": {"qoder-cli": {
+        "model": "ultimate", "reasoning_effort": "max", "features": [],
+    }}}
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["ok"], "properties": {"ok": {"type": "boolean"}},
+    }
+
+    def audited_call(self, prompt, images=None, **kwargs):
+        raw = '{"ok":true}'
+        response = LLMResponse(
+            content=raw, model="ultimate", provider="qoder-cli",
+            session_id="original-theme-session", tier_used="primary",
+            reasoning_effort="max", reasoning_effort_source="provider_default",
+        )
+        request = LLMRequest(
+            messages=[{"role": "user", "content": prompt}], images=images or [],
+            response_format=kwargs.get("response_format"), temperature=0,
+            max_tokens=32768,
+        )
+        now = datetime.now()
+        record = self._build_log_record(
+            prompt, None, images or [], request, response, now, now, None,
+        )
+        record["phase"] = "final"
+        self.ai_log_records.append(record)
+        self.last_provider = response.provider
+        self.last_model = response.model
+        self.last_response = response
+        self.call_index += 1
+        self._flush_logs()
+        return raw
+
+    monkeypatch.setattr(AIInvocation, "call", audited_call)
+    monkeypatch.setenv("STEP_EXEC_ID", "deferred-run-1")
+    first = DocumentSmartStep("05_smart", job, config)
+    invocation = first.ai.fork("02-theme-t01")
+    assert first._call_stage_validated(
+        invocation, "05_smart_document.theme",
+        {
+            "OUTPUT_SCHEMA": canonical_json(schema), "THEME": "{}",
+            "PAPER_MAP": "{}", "EXPECTED_KNOWLEDGE_REFS": "[]",
+            "FIGURE_CATALOG": "{}", "CHAPTER_CARDS": "[]",
+        },
+        schema, lambda value: value,
+    ) == {"ok": True}
+    assert "stage_checkpoint" in invocation.ai_log_records[-1]
+
+    second = DocumentSmartStep("05_smart", job, deepcopy(config))
+    restored_invocation = second.ai.fork("02-theme-t01")
+    monkeypatch.setattr(
+        AIInvocation, "call",
+        lambda *_args, **_kwargs: pytest.fail("verified stage must not call AI"),
+    )
+    assert second._call_stage_validated(
+        restored_invocation, "05_smart_document.theme",
+        {
+            "OUTPUT_SCHEMA": canonical_json(schema), "THEME": "{}",
+            "PAPER_MAP": "{}", "EXPECTED_KNOWLEDGE_REFS": "[]",
+            "FIGURE_CATALOG": "{}", "CHAPTER_CARDS": "[]",
+        },
+        schema, lambda value: value,
+    ) == {"ok": True}
+    assert restored_invocation._restored_session_id == "original-theme-session"
+
+
+def test_deferred_stage_checkpoint_is_not_restored_until_evidence_gate_persists_it(
+    tmp_path, monkeypatch,
+):
+    job = _fixture(tmp_path)
+    config = make_step_config(
+        tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+    )
+    config["ai"] = {"primary": {"provider": "qoder-cli", "model": "ultimate"}}
+    config["providers"] = {"providers": {"qoder-cli": {
+        "model": "ultimate", "reasoning_effort": "max", "features": [],
+    }}}
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["ok"], "properties": {"ok": {"type": "boolean"}},
+    }
+    calls = 0
+
+    def audited_call(self, prompt, images=None, **kwargs):
+        nonlocal calls
+        calls += 1
+        raw = '{"ok":true}'
+        response = LLMResponse(
+            content=raw, model="ultimate", provider="qoder-cli",
+            session_id=f"session-{calls}", tier_used="primary",
+            reasoning_effort="max", reasoning_effort_source="provider_default",
+        )
+        request = LLMRequest(
+            messages=[{"role": "user", "content": prompt}], images=images or [],
+            response_format=kwargs.get("response_format"), temperature=0,
+            max_tokens=32768,
+        )
+        now = datetime.now()
+        record = self._build_log_record(
+            prompt, None, images or [], request, response, now, now, None,
+        )
+        record["phase"] = "final"
+        self.ai_log_records.append(record)
+        self.last_provider = response.provider
+        self.last_model = response.model
+        self.last_response = response
+        self.call_index += 1
+        self._flush_logs()
+        return raw
+
+    monkeypatch.setattr(AIInvocation, "call", audited_call)
+    first = DocumentSmartStep("05_smart", job, config)
+    invocation = first.ai.fork("04-introduction")
+    assert first._call_stage_validated(
+        invocation, "05_smart_document.introduction",
+        {
+            "OUTPUT_SCHEMA": canonical_json(schema), "ABSTRACT": "{}",
+            "INTRODUCTION_CATALOG": "[]", "VALID_REFS": "[]",
+        },
+        schema, lambda value: value, defer_checkpoint=True,
+    ) == {"ok": True}
+    assert "stage_checkpoint" not in invocation.ai_log_records[-1]
+    first.ai.merge_forks([invocation])
+
+    monkeypatch.setenv("STEP_EXEC_ID", "deferred-run-2")
+    second = DocumentSmartStep("05_smart", job, deepcopy(config))
+    second_invocation = second.ai.fork("04-introduction")
+    assert second._call_stage_validated(
+        second_invocation, "05_smart_document.introduction",
+        {
+            "OUTPUT_SCHEMA": canonical_json(schema), "ABSTRACT": "{}",
+            "INTRODUCTION_CATALOG": "[]", "VALID_REFS": "[]",
+        },
+        schema, lambda value: value, defer_checkpoint=True,
+    ) == {"ok": True}
+    assert calls == 2
+    assert second._persist_pending_stage_checkpoint(second_invocation)
+    second.ai.merge_forks([second_invocation])
+
+    monkeypatch.setenv("STEP_EXEC_ID", "deferred-run-3")
+    third = DocumentSmartStep("05_smart", job, deepcopy(config))
+    third_invocation = third.ai.fork("04-introduction")
+    assert third._call_stage_validated(
+        third_invocation, "05_smart_document.introduction",
+        {
+            "OUTPUT_SCHEMA": canonical_json(schema), "ABSTRACT": "{}",
+            "INTRODUCTION_CATALOG": "[]", "VALID_REFS": "[]",
+        },
+        schema, lambda value: value, defer_checkpoint=True,
+    ) == {"ok": True}
+    assert calls == 2
+    assert third_invocation._restored_session_id == "session-2"
+
+
+def test_framed_stage_retry_uses_framed_feedback(tmp_path, monkeypatch):
+    job = _fixture(tmp_path)
+    step = DocumentSmartStep(
+        "05_smart", job,
+        make_step_config(
+            tmp_path, step_name="05_smart", pool="ai", pipeline="document",
+        ),
+    )
+    prompts = []
+    responses = iter(("broken", _framed_final()))
+
+    def call(prompt, **_kwargs):
+        prompts.append(prompt)
+        return next(responses)
+
+    monkeypatch.setattr(step.ai, "load_prompt_template", lambda _name: "fixed")
+    monkeypatch.setattr(step.ai, "call", call)
+    full_schema = step._schema("final")
+    metadata_schema = step._schema("final_metadata")
+    bundle = {"metadata": metadata_schema, "full": full_schema}
+    result = step._call_validated(
+        step.ai, "final", {}, bundle, lambda value: value,
+        parser=lambda raw, schemas: parse_final_stage_result(
+            raw, schemas["metadata"], schemas["full"],
+        ),
+        response_format="text",
+    )
+    assert result["note_markdown"]
+    assert len(prompts) == 2
+    assert "重新生成完整的 metadata JSON" in prompts[1]
+    assert "重新生成完整 JSON" not in prompts[1]
+
+
 @pytest.mark.parametrize(("failures", "legacy"), (
     (1, False), (2, False), (1, True), (2, True),
 ))
@@ -490,8 +806,8 @@ def test_layered_step_uses_original_once_and_publishes_folded_audit(
     )
     assert len({item["exec_id"] for item in audit}) == 4
     assert provenance_sessions == [
-        ("04-introduction", "session-04-introduction"),
         ("03-final", "session-03-final"),
+        ("04-introduction", "session-04-introduction"),
     ]
     assert (job / "output/smart_pipeline/manifest.json").is_file()
     pipeline_manifest = json.loads(
@@ -556,7 +872,10 @@ def test_later_failure_reuses_verified_chapters_without_new_ai_calls(
             value = _introduction()
         else:
             raise AssertionError(f"unexpected audit stage: {self.audit_name}")
-        raw = json.dumps(value, ensure_ascii=False)
+        raw = _fake_layered_call_with_value(self, prompt, value)
+        # helper 已追加审计记录；本测试需要走真实 record builder。
+        self.ai_log_records.pop()
+        self.call_index -= 1
         response = LLMResponse(
             content=raw, model="ultimate", provider="qoder-cli",
             session_id=f"session-{run}-{self.audit_name}-{self.call_index}",
@@ -960,6 +1279,40 @@ def test_final_contract_rejects_model_written_synthesis_heading():
         )
 
 
+def test_framed_final_keeps_raw_markdown_and_derives_used_refs():
+    full_schema = json.loads((
+        Path(__file__).parents[2]
+        / "configs/prompts/schemas/05_smart_document.final.json"
+    ).read_text())
+    metadata_schema = json.loads((
+        Path(__file__).parents[2]
+        / "configs/prompts/schemas/05_smart_document.final_metadata.json"
+    ).read_text())
+    raw = _framed_final().replace("一个需要测量的问题", "一个包含 `x\\y` 和 \"引号\" 的问题")
+    parsed = parse_final_stage_result(raw, metadata_schema, full_schema)
+    assert "`x\\y`" in parsed["note_markdown"]
+    assert parsed["used_knowledge_refs"] == ["p001-k001", "p001-k002"]
+
+
+@pytest.mark.parametrize("mutate", (
+    lambda raw: raw.replace(FINAL_MARKDOWN_END, ""),
+    lambda raw: raw + f"\n{FINAL_MARKDOWN_END}",
+    lambda raw: "preamble\n" + raw,
+    lambda raw: raw + "\ntrailing",
+))
+def test_framed_final_rejects_truncation_duplicates_and_extra_content(mutate):
+    full_schema = json.loads((
+        Path(__file__).parents[2]
+        / "configs/prompts/schemas/05_smart_document.final.json"
+    ).read_text())
+    metadata_schema = json.loads((
+        Path(__file__).parents[2]
+        / "configs/prompts/schemas/05_smart_document.final_metadata.json"
+    ).read_text())
+    with pytest.raises(ValueError):
+        parse_final_stage_result(mutate(_framed_final()), metadata_schema, full_schema)
+
+
 def test_model_synthesis_is_rendered_with_basis_uncertainty_and_evidence():
     rendered = render_model_synthesis(_final())
     section = rendered.split("## 模型综合", 1)[1]
@@ -984,6 +1337,7 @@ def test_final_contract_rejects_unused_or_untracked_evidence_refs():
     [
         ("markdown", "\n\n![track](https://attacker.example/pixel)", "direct images"),
         ("markdown", "\n\n<img src=https://attacker.example/pixel>", "direct images"),
+        ("markdown", "\n\n[[source:S1.P1]]", "source markers"),
         ("title", "Safe\n![track](https://attacker.example/pixel)", "single line"),
         ("title", "[证据: p001-k001]", "evidence markup"),
     ],
@@ -1011,6 +1365,13 @@ def test_final_contract_rejects_joint_source_evidence_before_marker_extraction()
         validate_final(
             result, ["t01"], _knowledge_catalog("p001-k001", "p001-k002"), [],
         )
+
+
+def test_introduction_contract_rejects_model_source_marker():
+    result = _introduction()
+    result["introduction_markdown"] += "\n\n[[source:S1.P1]]"
+    with pytest.raises(ValueError, match="source markers"):
+        validate_introduction(result, _knowledge_catalog("p001-k001"))
 
 
 def test_figure_renderer_adds_placement_evidence_for_provenance(tmp_path):

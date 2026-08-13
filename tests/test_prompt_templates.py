@@ -36,7 +36,9 @@ def test_document_smart_note_preserves_source_internal_conflicts():
     assert "最小集合" in final
     assert "不得自行写“模型综合”小节" in final
     assert "来源内部未决矛盾" in final
-    assert "完整调用审计、哈希和覆盖清单不进入 note_markdown" in final
+    assert "完整调用审计、哈希和覆盖清单不进入 Markdown 正文" in final
+    assert "FLORI-FINAL-MARKDOWN-BEGIN" in final
+    assert "FLORI-FINAL-MARKDOWN-END" in final
     assert "论文导读：这篇论文要解决什么" in introduction
     assert "背景与问题" in introduction and "解决思路" in introduction
     assert "不得升级为因果解释" in introduction
