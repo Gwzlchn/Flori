@@ -14,6 +14,7 @@ from shared.models import LLMRequest, LLMResponse
 from shared.step_ai import AIInvocation
 from steps.document.smart_pipeline import (
     MAX_IMAGE_ATTACHMENTS,
+    MAX_PACKAGE_SOURCE_ALIASES,
     MAX_PACKAGES,
     MAX_STAGE_PROMPT_BYTES,
     build_chapter_packages,
@@ -338,6 +339,110 @@ def test_long_segment_attaches_visual_only_to_first_part():
         if figure["visual_id"] == "fig-1"
     ]
     assert len(occurrences) == 1
+
+
+def test_chapter_builder_splits_source_aliases_at_output_contract_limit():
+    blocks = [{
+        "block_id": "S1", "order": 0, "kind": "heading", "level": 1,
+        "text": "Method",
+    }]
+    segments = []
+    for index in range(MAX_PACKAGE_SOURCE_ALIASES + 1):
+        block_id = f"B{index:02d}"
+        text = f"source {index}"
+        blocks.append({
+            "block_id": block_id, "order": index + 1,
+            "kind": "paragraph", "text": text,
+        })
+        segments.append({
+            "segment_id": block_id, "section": "S1", "support_text": text,
+        })
+    document = {
+        "job_id": "job", "metadata": {"titles": {"original": "Paper"}},
+        "blocks": blocks, "figures": [], "tables": [],
+    }
+
+    _, packages, receipt = build_chapter_packages(
+        document, {"segments": segments},
+    )
+
+    assert [item["package_id"] for item in packages] == ["p001", "p002"]
+    assert [item["logical_parent"] for item in packages] == ["p001", "p002"]
+    assert [len(item["source_aliases"]) for item in packages] == [32, 1]
+    identities = [
+        (item["segment_id"], item["part"]) for item in receipt["assignments"]
+    ]
+    assert len(identities) == len(set(identities)) == 33
+
+
+def test_chapter_builder_caps_short_sources_before_child_package_suffixes():
+    total = MAX_PACKAGE_SOURCE_ALIASES * 26 + 1
+    blocks = [{
+        "block_id": "S1", "order": 0, "kind": "heading", "level": 1,
+        "text": "Method",
+    }]
+    segments = []
+    for index in range(total):
+        block_id = f"B{index:03d}"
+        blocks.append({
+            "block_id": block_id, "order": index + 1,
+            "kind": "paragraph", "text": "x",
+        })
+        segments.append({
+            "segment_id": block_id, "section": "S1", "support_text": "x",
+        })
+    document = {
+        "job_id": "job", "metadata": {"titles": {"original": "Paper"}},
+        "blocks": blocks, "figures": [], "tables": [],
+    }
+
+    _, packages, receipt = build_chapter_packages(
+        document, {"segments": segments},
+    )
+
+    assert len(packages) == 27
+    assert max(len(item["source_aliases"]) for item in packages) == 32
+    identities = [
+        (item["segment_id"], item["part"]) for item in receipt["assignments"]
+    ]
+    assert len(identities) == len(set(identities)) == total
+
+
+def test_image_split_supports_more_than_single_letter_package_suffixes():
+    blocks = [{
+        "block_id": "S1", "order": 0, "kind": "heading", "level": 1,
+        "text": "Method",
+    }]
+    segments = []
+    figures = []
+    for index in range(27):
+        block_id = f"B{index:02d}"
+        blocks.append({
+            "block_id": block_id, "order": index + 1,
+            "kind": "paragraph", "text": "x",
+        })
+        segments.append({
+            "segment_id": block_id, "section": "S1", "support_text": "x",
+        })
+        for image in range(MAX_IMAGE_ATTACHMENTS):
+            figures.append({
+                "figure_id": f"fig-{index}-{image}", "block_id": block_id,
+                "label": "Figure", "caption": "caption",
+                "media": [{"artifact": f"assets/{index}-{image}.png"}],
+            })
+    document = {
+        "job_id": "job", "metadata": {"titles": {"original": "Paper"}},
+        "blocks": blocks, "figures": figures, "tables": [],
+    }
+
+    _, packages, receipt = build_chapter_packages(
+        document, {"segments": segments},
+    )
+
+    assert len(packages) == 27
+    assert packages[-1]["package_id"] == "p001aa"
+    assert all(len(item["source_aliases"]) == 1 for item in packages)
+    assert len(receipt["assignments"]) == 27
 
 
 def test_image_split_rechecks_final_package_limit():

@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import re
-import string
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,6 +16,7 @@ MAX_SEGMENT_PART_BYTES = 30 * 1024
 MAX_STAGE_PROMPT_BYTES = 1024 * 1024
 MAX_STAGE_RESULT_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_ATTACHMENTS = 5
+MAX_PACKAGE_SOURCE_ALIASES = 32
 MAX_PARALLEL_CALLS = 4
 MAX_PACKAGES = 64
 MAX_KNOWLEDGE_ITEMS = 128
@@ -77,6 +77,16 @@ def _image_paths(figures: list[dict[str, Any]]) -> list[str]:
         for media in figure["media"]
         if media.get("artifact_path")
     })
+
+
+def _package_suffix(index: int) -> str:
+    """把零起点序号编码为 a..z,aa..，覆盖单父包内的合法拆分数。"""
+    value = index + 1
+    parts: list[str] = []
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        parts.append(chr(ord("a") + remainder))
+    return "".join(reversed(parts))
 
 
 def _figure_media(item: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -181,7 +191,10 @@ def build_chapter_packages(
     for unit in units:
         for item in unit["items"]:
             size = len(item["text"].encode("utf-8"))
-            if current and current_bytes + size > MAX_CHAPTER_TEXT_BYTES:
+            if current and (
+                current_bytes + size > MAX_CHAPTER_TEXT_BYTES
+                or len(current) >= MAX_PACKAGE_SOURCE_ALIASES
+            ):
                 grouped.append(current)
                 current, current_bytes = [], 0
             current.append({**item, "section_id": unit["section_id"]})
@@ -239,19 +252,19 @@ def build_chapter_packages(
             }
             if len(attached) > MAX_IMAGE_ATTACHMENTS:
                 raise ValueError("a single source segment exceeds image attachment limit")
-            if split_current and len(split_paths | attached) > MAX_IMAGE_ATTACHMENTS:
+            if split_current and (
+                len(split_current) >= MAX_PACKAGE_SOURCE_ALIASES
+                or len(split_paths | attached) > MAX_IMAGE_ATTACHMENTS
+            ):
                 split_groups.append(split_current)
                 split_current, split_paths = [], set()
             split_current.append(content)
             split_paths |= attached
         if split_current:
             split_groups.append(split_current)
-        if len(split_groups) > len(string.ascii_lowercase):
-            raise ValueError("chapter package split count exceeds limit")
-
         for group_index, split_contents in enumerate(split_groups):
             package_id = parent_id if len(split_groups) == 1 else (
-                parent_id + string.ascii_lowercase[group_index]
+                parent_id + _package_suffix(group_index)
             )
             old_to_new = {
                 item["source_alias"]: f"s{index:03d}"
@@ -285,6 +298,8 @@ def build_chapter_packages(
             }
             if len(_image_paths(child_figures)) > MAX_IMAGE_ATTACHMENTS:
                 raise ValueError("chapter package image split failed")
+            if len(package["source_aliases"]) > MAX_PACKAGE_SOURCE_ALIASES:
+                raise ValueError("chapter package source alias split failed")
             packages.append(package)
             for alias, identity in package["source_aliases"].items():
                 assignments.append({
