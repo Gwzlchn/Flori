@@ -39,7 +39,8 @@ def _evidence(db, jid: str, body: str, *, domain="finance", title=None) -> str:
             (jid,),
         ).fetchall()
         assert chunks
-        now = datetime.now(timezone.utc).isoformat()
+        note_sha = hashlib.sha256(body.encode()).hexdigest()
+        records = []
         evidence_ids = []
         for chunk in chunks:
             chunk_body = str(chunk["body"])
@@ -47,29 +48,66 @@ def _evidence(db, jid: str, body: str, *, domain="finance", title=None) -> str:
             seed = hashlib.sha256(
                 f"{jid}:{chunk['chunk_id']}:{body_sha}".encode(),
             ).hexdigest()
-            evidence_id = "ce_" + seed
+            evidence_fingerprint = hashlib.sha256(
+                f"evidence:{seed}".encode(),
+            ).hexdigest()
+            source_fingerprint = hashlib.sha256(
+                f"source:{seed}".encode(),
+            ).hexdigest()
+            source_group_fingerprint = hashlib.sha256(json.dumps(
+                [source_fingerprint],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()).hexdigest()
+            evidence_id = "ce_" + hashlib.sha256(json.dumps(
+                {
+                    "schema_version": 2,
+                    "job_id": jid,
+                    "note_type": "smart",
+                    "chunk_id": chunk["chunk_id"],
+                    "source_group_fingerprint": source_group_fingerprint,
+                    "evidence_fingerprint": evidence_fingerprint,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()).hexdigest()
             evidence_ids.append(evidence_id)
-            db._conn.execute(
-                """INSERT INTO canonical_evidence
-                   (evidence_id,schema_version,job_id,note_type,chunk_id,section,
-                    source_ref,source_segment_id,source_path,source_sha256,source_revision,
-                    note_path,note_sha256,provenance_path,provenance_sha256,
-                    chunk_body_sha256,chunk_char_start,chunk_char_end,locator_kind,
-                    locator_json,evidence_fingerprint,source_fingerprint,status,
-                    invalid_reason,validated_at,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'valid',NULL,?,?,?)""",
-                (
-                    evidence_id, 1, jid, "smart", chunk["chunk_id"], chunk["section"],
-                    "source", f"segment-{seed[:12]}", f"input/{jid}.txt", "a" * 64, None,
-                    "output/notes.md", hashlib.sha256(body.encode()).hexdigest(),
-                    "output/provenance/smart.json", "b" * 64, body_sha,
-                    chunk["char_start"], chunk["char_end"], "text",
-                    json.dumps({"kind": "text"}, sort_keys=True, separators=(",", ":")),
-                    hashlib.sha256(f"evidence:{seed}".encode()).hexdigest(),
-                    hashlib.sha256(f"source:{seed}".encode()).hexdigest(),
-                    now, now, now,
-                ),
-            )
+            records.append({
+                "evidence_id": evidence_id,
+                "schema_version": 2,
+                "job_id": jid,
+                "note_type": "smart",
+                "chunk_id": chunk["chunk_id"],
+                "section": chunk["section"],
+                "note_path": "output/notes.md",
+                "note_sha256": note_sha,
+                "provenance_path": "output/provenance/smart.json",
+                "provenance_sha256": "b" * 64,
+                "chunk_body_sha256": body_sha,
+                "chunk_char_start": chunk["char_start"],
+                "chunk_char_end": chunk["char_end"],
+                "evidence_fingerprint": evidence_fingerprint,
+                "source_group_fingerprint": source_group_fingerprint,
+                "sources": [{
+                    "ordinal": 0,
+                    "source_ref": "source",
+                    "source_segment_id": f"segment-{seed[:12]}",
+                    "source_path": f"input/{jid}.txt",
+                    "source_sha256": "a" * 64,
+                    "source_revision": None,
+                    "locator_kind": "text",
+                    "locator_json": json.dumps(
+                        {"kind": "text"}, sort_keys=True, separators=(",", ":"),
+                    ),
+                    "source_fingerprint": source_fingerprint,
+                }],
+            })
+        db._replace_canonical_evidence_locked(
+            job_id=jid,
+            note_type="smart",
+            records=records,
+        )
         db._conn.commit()
     return evidence_ids[0]
 
@@ -172,6 +210,14 @@ class TestRadarService:
         assert "量化交易" in user and "JEPQ" in user
         assert '"recent_job_count":4' in user
         assert manifest["sources"] and manifest["sources"][0]["source_id"] in user
+        first = manifest["sources"][0]
+        with db._lock:
+            row = db._conn.execute(
+                "SELECT source_group_fingerprint FROM canonical_evidence WHERE evidence_id=?",
+                (first["source_id"],),
+            ).fetchone()
+        assert row is not None
+        assert first["source_fingerprint"] == row["source_group_fingerprint"]
 
     def test_window_has_no_500_row_truncation_and_is_half_open(self, db):
         from api.services.radar import radar

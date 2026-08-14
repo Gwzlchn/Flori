@@ -1590,7 +1590,7 @@ Response `200`：
 
 先算同款雷达，再从窗口内 current/done job 的 canonical note chunks 冻结 `digest_sources` manifest，最后用 `digest` builder 拼 prompt → **投递独立 AI task（`queue:ai`，§3.1）给 ai-worker** 异步生成中文周报。任务声明 `allowed_providers: [claude-cli, codex-cli, qoder-cli]`,由满足能力门的绑定 Worker 原子认领并物化具体 provider。**API 进程不调用 CLI**（用量 `ai_usage`/白盒审计 `ai_task_logs` 在 worker 侧记）。与 GET radar 分离：页面先秒开雷达，用户点「生成本周摘要」再触发本端点。`window_days` 同 radar（`1..90`，越界 `422`）。
 
-`digest_sources` 清单绑定 `task_id/domain/window`，每条绑定 canonical `source_id/job_id/note_type/chunk_id`、excerpt/chunk hash 和 source fingerprint，清单再签 `manifest_sha256`。硬上限为 16 个 source、每 job 2 个 source、单 excerpt 1200 字符、excerpt 总计 12000 字符，最终 system+user prompt 按 UTF-8 不得超过 32 KiB。候选顺序按 job 公平分配，超界只在 manifest 记 `selection_truncated=true`，不会改变雷达窗口统计或静默伪装成全量证据。title/section/excerpt 全部按不可信 JSON 数据渲染，生成温度固定为 0。
+`digest_sources` 清单绑定 `task_id/domain/window`，每条绑定 canonical `source_id/job_id/note_type/chunk_id`、excerpt/chunk hash 和完整 source group fingerprint，清单再签 `manifest_sha256`。清单中的兼容字段名仍为 `source_fingerprint`，值绑定整个不可拆分来源组，不代表其中任一成员。硬上限为 16 个 source、每 job 2 个 source、单 excerpt 1200 字符、excerpt 总计 12000 字符，最终 system+user prompt 按 UTF-8 不得超过 32 KiB。候选顺序按 job 公平分配，超界只在 manifest 记 `selection_truncated=true`，不会改变雷达窗口统计或静默伪装成全量证据。title/section/excerpt 全部按不可信 JSON 数据渲染，生成温度固定为 0。
 
 ```
 POST /api/domains/finance/digest?window_days=7
