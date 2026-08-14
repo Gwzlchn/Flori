@@ -219,6 +219,26 @@ class TestRadarService:
         assert row is not None
         assert first["source_fingerprint"] == row["source_group_fingerprint"]
 
+    def test_digest_excerpt_truncation_canonicalizes_boundary_whitespace(self, db):
+        from api.services.radar import build_digest_source_manifest, radar
+
+        now = datetime.now(timezone.utc)
+        _job(db, "boundary-space", now - timedelta(hours=1))
+        _evidence(db, "boundary-space", "甲" * 1199 + " " + "尾")
+
+        manifest = build_digest_source_manifest(
+            db,
+            task_id="at_boundary_space",
+            radar_data=radar(db, "finance", 7, now=now),
+        )
+        assert len(manifest["sources"]) == 1
+        source = manifest["sources"][0]
+        assert source["excerpt"] == "甲" * 1199
+        assert source["truncated"] is True
+        assert source["excerpt_sha256"] == hashlib.sha256(
+            source["excerpt"].encode(),
+        ).hexdigest()
+
     def test_window_has_no_500_row_truncation_and_is_half_open(self, db):
         from api.services.radar import radar
 

@@ -263,7 +263,9 @@ def build_digest_source_manifest(
             if remaining <= 0:
                 break
             excerpt_limit = min(MAX_DIGEST_EXCERPT_CHARS, remaining)
-            excerpt = body[:excerpt_limit]
+            # 截断点可能落在空格或换行上。manifest validator 会按文本字段
+            # 去除边界空白,因此 builder 必须在签 hash 前使用同一规范形。
+            excerpt = body[:excerpt_limit].rstrip()
             if not excerpt.strip():
                 continue
             was_truncated = len(body) > len(excerpt)
