@@ -47,6 +47,7 @@ from steps.document.smart_pipeline import (
     inject_source_markers,
     parse_stage_result,
     parse_final_stage_result,
+    project_attestable_theme,
     project_theme_card,
     render_figures,
     render_model_synthesis,
@@ -343,13 +344,7 @@ class DocumentSmartStep(StepBase):
         theme_refs = [str(item["theme_id"]) for item in themes]
         valid_knowledge = set(knowledge)
         final_themes = [
-            {
-                **theme,
-                "figure_guides": [
-                    guide for guide in theme["figure_guides"]
-                    if set(guide["knowledge_refs"]) <= valid_knowledge
-                ],
-            }
+            project_attestable_theme(theme, valid_knowledge)
             for theme in themes
         ]
         selected_figures = {

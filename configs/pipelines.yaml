@@ -344,7 +344,7 @@ document:
       extends: .ai-step
       run: steps.document.step_05_smart
       prompt_template: 05_smart_document
-      version: "10"
+      version: "11"
       needs: ["03_structure"]
       # 章节卡并发4路，随后主题综合、framed正文和导读；长论文给完整六小时执行窗口。
       timeout: 21600

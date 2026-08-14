@@ -184,7 +184,7 @@ class TestVariables:
         pipelines = load_pipelines(configs_dir / "pipelines.yaml")
         expected = {
             "video": {"08_punctuate": "4", "11_smart": "7"},
-            "document": {"02_parse": "4", "04_translate": "1", "05_smart": "10"},
+            "document": {"02_parse": "4", "04_translate": "1", "05_smart": "11"},
             "audio": {"03_transcript_parse": "3", "04_smart_podcast": "5"},
         }
         for pipeline, versions in expected.items():
@@ -259,7 +259,7 @@ class TestSemanticAttestationPipeline:
         assert jobs["04_translate"]["allow_failure"] is True
         assert jobs["05_smart"]["needs"] == ["03_structure"]
         assert jobs["05_smart"]["timeout"] == 21600
-        assert jobs["05_smart"]["version"] == "10"
+        assert jobs["05_smart"]["version"] == "11"
         assert jobs["05_smart"]["tags"] == ["vision"]
         assert "output/smart_pipeline/*" in jobs["05_smart"]["outputs"]
         assert jobs["07_concepts"]["needs"] == ["05_smart"]

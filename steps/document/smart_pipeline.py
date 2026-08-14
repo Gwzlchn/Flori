@@ -7,6 +7,7 @@ import json
 import math
 import re
 from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -723,6 +724,38 @@ def filter_attestable_knowledge(
     return selected
 
 
+def project_attestable_theme(
+    theme: Mapping[str, Any], valid_knowledge: set[str],
+) -> dict[str, Any]:
+    """只向终稿暴露完整依赖当前可证明知识的主题子项。"""
+    projected: dict[str, Any] = {"theme_id": str(theme["theme_id"])}
+    for name in (
+        "learning_sections", "cross_theme_links", "tensions", "limitations",
+        "figure_guides",
+    ):
+        items = theme.get(name)
+        if not isinstance(items, list):
+            raise ValueError("theme evidence items are invalid")
+        selected = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise ValueError("theme evidence item is invalid")
+            refs = item.get("knowledge_refs")
+            if (
+                not isinstance(refs, list)
+                or not refs
+                or any(not isinstance(ref, str) or not ref for ref in refs)
+                or len(refs) != len(set(refs))
+            ):
+                raise ValueError("theme evidence refs are invalid")
+            if set(refs) <= valid_knowledge:
+                selected.append(deepcopy(dict(item)))
+        projected[name] = selected
+    if not projected["learning_sections"]:
+        raise ValueError("theme has no attestable learning section")
+    return projected
+
+
 def project_theme_card(card: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "package_id": card["package_id"], "logical_parent": card["logical_parent"],
@@ -784,8 +817,21 @@ def validate_final(
     if set(result["theme_coverage_refs"]) != valid_themes:
         raise ValueError("final theme coverage is not exact")
     used = result["used_knowledge_refs"]
-    if not used or len(used) != len(set(used)) or not set(used) <= valid_knowledge:
-        raise ValueError("final used knowledge refs are invalid")
+    if not used:
+        raise ValueError("final used knowledge refs are empty")
+    if len(used) != len(set(used)):
+        raise ValueError("final used knowledge refs contain duplicates")
+    unknown_used = sorted(set(used) - valid_knowledge)
+    if unknown_used:
+        safe_unknown = [
+            ref for ref in unknown_used
+            if re.fullmatch(r"p[0-9]{3}[a-z]{0,2}-k[0-9]{3}", ref)
+        ][:16]
+        detail = canonical_json(safe_unknown) if safe_unknown else "[]"
+        raise ValueError(
+            "final used knowledge refs contain unknown ids "
+            f"{detail}; total={len(unknown_used)}"
+        )
     _validate_evidence_group_lines(result["note_markdown"], label="final markdown")
     evidence = {
         value.strip()
@@ -880,7 +926,10 @@ def _require_bounded_source_evidence(
             for source_ref in knowledge_catalog[knowledge_ref]["source_refs"]
         }
         if not 1 <= len(source_refs) <= max_sources:
-            raise ValueError(f"{label} evidence source group is outside limit")
+            raise ValueError(
+                f"{label} evidence source group has {len(source_refs)} sources; "
+                f"maximum is {max_sources}"
+            )
 
 
 def _validate_evidence_group_lines(value: str, *, label: str) -> None:

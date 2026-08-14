@@ -25,6 +25,7 @@
 证据规则：
 - 重要段落末尾用 `[证据: p001-k001]`，只列足以支持该段的最小集合，形成最小联合来源组。证据组必须与它支持的正文处于同一物理行，不得单独占一行。每个可见行最多一个证据组；组内知识 ID 可解析到 1..32 个来源片段，超过上限必须拆成多个各自可证的自然段。
 - 只能使用 EXPECTED_KNOWLEDGE_REFS；服务端会从正文、已验证图解和模型综合确定性计算 used_knowledge_refs。
+- THEME_SYNTHESES 已由服务端投影为完整依赖 EXPECTED_KNOWLEDGE_REFS 的子项；不得补写被排除的主题细节或知识 ID。
 - 服务端会从冻结输入确定标题和完整主题覆盖，不要输出 title、subtitle、theme_coverage_refs、figure_placements、audit_summary 或其它 metadata。
 
 输出只能是以下纯文本 wire，不要 JSON、Markdown fence、前言或额外说明。每个保留标记必须独占一行且只出现一次：
