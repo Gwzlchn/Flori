@@ -19,6 +19,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from .provenance import (
     DIRECT_LOCATOR_POLICY,
     EXACT_QUOTE_POLICY,
+    GROUPED_SEMANTIC_ATTESTATION_POLICY,
     MAX_SEMANTIC_AI_LOG_BYTES,
     MAX_SEMANTIC_AI_LOG_RECORDS,
     SEMANTIC_ATTESTATION_POLICY,
@@ -30,7 +31,7 @@ from .provenance import (
     SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
     canonical_json,
     canonical_json_bytes,
-    select_semantic_attestation_batch,
+    select_semantic_attestation_batches,
     semantic_attestation_decision_refs,
     semantic_attestation_batch_id,
     sha256_bytes,
@@ -50,7 +51,7 @@ from .storage import read_path_bounded, write_path_atomic
 
 EVIDENCE_SCHEMA_VERSION = 2
 # canonical_evidence 的 DB 契约仍是 v1;provenance sidecar 可独立演进。
-CANONICAL_EVIDENCE_SCHEMA_VERSION = 1
+CANONICAL_EVIDENCE_SCHEMA_VERSION = 2
 MAX_CANONICAL_SIDECAR_BYTES = MAX_PROVENANCE_BYTES
 MAX_CANONICAL_SOURCE_ARTIFACTS = MAX_SOURCE_ARTIFACTS
 MAX_CANONICAL_SEGMENTS = min(MAX_SOURCE_SEGMENTS, MAX_NOTE_MAPPINGS)
@@ -129,7 +130,7 @@ def canonical_evidence_id(identity: dict[str, Any]) -> str:
     """生成可复算 ID；validation 状态与服务端派生链接不进入身份。"""
     expected = {
         "schema_version", "job_id", "note_type", "chunk_id",
-        "source_ref", "source_segment_id", "evidence_fingerprint",
+        "source_group_fingerprint", "evidence_fingerprint",
     }
     if not isinstance(identity, dict) or set(identity) != expected:
         raise CanonicalEvidenceError("canonical evidence identity fields are invalid")
@@ -1293,7 +1294,7 @@ def canonical_evidence_content_identity(
     chunk_char_end: int,
     anchor_start: int,
     anchor_end: int,
-    source_fingerprint: str,
+    source_group_fingerprint: str,
     provenance_schema_version: int,
     verification_policy: str,
 ) -> dict[str, Any]:
@@ -1310,7 +1311,7 @@ def canonical_evidence_content_identity(
         "chunk_char_end": chunk_char_end,
         "anchor_start": anchor_start,
         "anchor_end": anchor_end,
-        "source_fingerprint": source_fingerprint,
+        "source_group_fingerprint": source_group_fingerprint,
     }
     if provenance_schema_version >= 2:
         identity["verification_policy"] = verification_policy
@@ -1410,139 +1411,138 @@ async def _verify_semantic_attestation_batch(
             raise CanonicalEvidenceError("semantic batch provenance is incomplete")
 
     try:
-        selection = select_semantic_attestation_batch(
+        selections = select_semantic_attestation_batches(
             candidate_manifests,
             source_manifest,
             protocol=attestation_protocol(),
         )
     except ValueError as exc:
         raise CanonicalEvidenceError(str(exc)) from exc
-    selected_candidate_ids = selection["selected_candidate_ids"]
-    selected_candidate_id_set = set(selected_candidate_ids)
-    ai_log_binding = commit.get("ai_log")
+    ai_log_bindings = commit.get("ai_logs")
+    if not isinstance(ai_log_bindings, list) or len(ai_log_bindings) != len(selections):
+        raise CanonicalEvidenceError("semantic batch attestor log set changed")
     expected_batch_id = semantic_attestation_batch_id(
         job_id=job_id,
         pipeline=pipeline,
         attestor_component=commit["attestor_component"],
         candidate_manifests=commit["candidate_manifests"],
-        ai_log=ai_log_binding,
+        ai_logs=ai_log_bindings,
     )
     if expected_batch_id != commit["batch_id"]:
         raise CanonicalEvidenceError("semantic batch identity changed")
-    if not selected_candidate_ids:
-        if ai_log_binding is not None:
-            raise CanonicalEvidenceError("semantic batch has an unexpected attestor log")
-        if any(
-            mapping.get("verification_policy") == SEMANTIC_ATTESTATION_POLICY
-            for mapping in mappings
-        ):
-            raise CanonicalEvidenceError("unselected semantic candidate was materialized")
-        return
-    if not isinstance(ai_log_binding, dict):
-        raise CanonicalEvidenceError("semantic batch has no attestor log")
-    log_data = await read_file(ai_log_binding["path"], MAX_SEMANTIC_AI_LOG_BYTES)
-    if not isinstance(log_data, bytes) or len(log_data) > MAX_SEMANTIC_AI_LOG_BYTES:
-        raise CanonicalEvidenceError("semantic attestor ai_log is missing or exceeds size limit")
-    lines = [line for line in log_data.splitlines() if line.strip()]
-    if len(lines) > MAX_SEMANTIC_AI_LOG_RECORDS:
-        raise CanonicalEvidenceError("semantic attestor ai_log has too many records")
-    matched: list[dict[str, Any]] = []
-    for line in lines:
-        try:
-            record = json.loads(line)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            raise CanonicalEvidenceError("semantic attestor ai_log is invalid JSONL") from exc
-        if not isinstance(record, dict):
-            raise CanonicalEvidenceError("semantic attestor ai_log record is invalid")
-        if record.get("call_index") == ai_log_binding["call_index"]:
-            matched.append(record)
-    if len(matched) != 1:
-        raise CanonicalEvidenceError("semantic attestor ai_log record is not unique")
-    record = matched[0]
-    if _sha256_hex(canonical_json_bytes(record)) != ai_log_binding["record_sha256"]:
-        raise CanonicalEvidenceError("semantic attestor ai_log record changed")
-    routing = record.get("routing") or {}
-    prompt = (record.get("prompt") or {}).get("rendered", {}).get("user")
-    response_content = (record.get("output") or {}).get("content")
-    if (
-        record.get("ok") is not True
-        or record.get("job_id") != job_id
-        or record.get("step") != commit["attestor_component"]
-        or record.get("session_id") != ai_log_binding["session_id"]
-        or routing.get("provider") != ai_log_binding["provider"]
-        or routing.get("model") != ai_log_binding["model"]
-        or type(prompt) is not str
-        or _sha256_hex(prompt.encode("utf-8")) != ai_log_binding["prompt_user_sha256"]
-        or type(response_content) is not str
-        or _sha256_hex(response_content.encode("utf-8"))
-        != ai_log_binding["response_content_sha256"]
-    ):
-        raise CanonicalEvidenceError("semantic attestor ai_log identity changed")
-    # 用 reader 自己信任的协议文本复算期望 prompt,防被篡改的渲染混入决策;协议文本
-    # 与 attestor 同源(tracked 模板,无覆盖),模板变更会使旧 batch 复验失败(须重跑核验步)。
-    expected_prompt = selection["prompt"]
-    if not isinstance(expected_prompt, str):
-        raise CanonicalEvidenceError("semantic attestation selection has no prompt")
-    if prompt != expected_prompt:
-        raise CanonicalEvidenceError("semantic attestor rendered prompt changed")
-    try:
-        response = json.loads(response_content)
-        response_schema = response["schema_version"]
-        decisions = response["decisions"]
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise CanonicalEvidenceError("semantic attestor response is invalid") from exc
-    if (
-        not isinstance(response, dict)
-        or set(response) != {"schema_version", "decisions"}
-        or type(response_schema) is not int
-        or response_schema != SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION
-        or type(decisions) is not list
-        or _sha256_hex(canonical_json_bytes(decisions))
-        != ai_log_binding["response_decision_sha256"]
-    ):
-        raise CanonicalEvidenceError("semantic attestor decisions changed")
-    if response_schema == SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION:
-        identity_key = "decision_id"
-        expected_decision_ids = [
-            ref[identity_key]
-            for ref in semantic_attestation_decision_refs(selected_candidate_ids)
-        ]
-    else:
-        identity_key = "candidate_id"
-        expected_decision_ids = selected_candidate_ids
-    actual_decision_ids = [
-        item.get(identity_key) if isinstance(item, dict) else None
-        for item in decisions
-    ]
-    expected_decision_fields = {
-        identity_key, "decision", "confidence_ppm", "reason_codes",
-    }
-    if (
-        actual_decision_ids != expected_decision_ids
-        or any(
-            not isinstance(item, dict) or set(item) != expected_decision_fields
-            for item in decisions
-        )
-    ):
-        raise CanonicalEvidenceError("semantic attestor decision set changed")
-    decision_by_id = dict(zip(selected_candidate_ids, decisions, strict=True))
 
+    decisions_by_candidate: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for selection, ai_log_binding in zip(selections, ai_log_bindings, strict=True):
+        selected_candidate_ids = selection["selected_candidate_ids"]
+        log_data = await read_file(
+            ai_log_binding["path"], MAX_SEMANTIC_AI_LOG_BYTES,
+        )
+        if not isinstance(log_data, bytes) or len(log_data) > MAX_SEMANTIC_AI_LOG_BYTES:
+            raise CanonicalEvidenceError(
+                "semantic attestor ai_log is missing or exceeds size limit"
+            )
+        lines = [line for line in log_data.splitlines() if line.strip()]
+        if len(lines) > MAX_SEMANTIC_AI_LOG_RECORDS:
+            raise CanonicalEvidenceError("semantic attestor ai_log has too many records")
+        matched: list[dict[str, Any]] = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                raise CanonicalEvidenceError(
+                    "semantic attestor ai_log is invalid JSONL"
+                ) from exc
+            if not isinstance(record, dict):
+                raise CanonicalEvidenceError("semantic attestor ai_log record is invalid")
+            if record.get("call_index") == ai_log_binding["call_index"]:
+                matched.append(record)
+        if len(matched) != 1:
+            raise CanonicalEvidenceError("semantic attestor ai_log record is not unique")
+        record = matched[0]
+        routing = record.get("routing") or {}
+        prompt = (record.get("prompt") or {}).get("rendered", {}).get("user")
+        response_content = (record.get("output") or {}).get("content")
+        if (
+            _sha256_hex(canonical_json_bytes(record)) != ai_log_binding["record_sha256"]
+            or record.get("ok") is not True
+            or record.get("job_id") != job_id
+            or record.get("step") != commit["attestor_component"]
+            or record.get("session_id") != ai_log_binding["session_id"]
+            or routing.get("provider") != ai_log_binding["provider"]
+            or routing.get("model") != ai_log_binding["model"]
+            or type(prompt) is not str
+            or prompt != selection["prompt"]
+            or _sha256_hex(prompt.encode("utf-8"))
+            != ai_log_binding["prompt_user_sha256"]
+            or type(response_content) is not str
+            or _sha256_hex(response_content.encode("utf-8"))
+            != ai_log_binding["response_content_sha256"]
+        ):
+            raise CanonicalEvidenceError("semantic attestor ai_log identity changed")
+        try:
+            response = json.loads(response_content)
+            decisions = response["decisions"]
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise CanonicalEvidenceError("semantic attestor response is invalid") from exc
+        expected_decision_ids = [
+            item["decision_id"]
+            for item in semantic_attestation_decision_refs(selected_candidate_ids)
+        ]
+        if (
+            not isinstance(response, dict)
+            or set(response) != {"schema_version", "decisions"}
+            or response.get("schema_version") != SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION
+            or not isinstance(decisions, list)
+            or _sha256_hex(canonical_json_bytes(decisions))
+            != ai_log_binding["response_decision_sha256"]
+            or [
+                item.get("decision_id") if isinstance(item, dict) else None
+                for item in decisions
+            ] != expected_decision_ids
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {
+                    "decision_id", "decision", "confidence_ppm", "reason_codes",
+                }
+                for item in decisions
+            )
+        ):
+            raise CanonicalEvidenceError("semantic attestor decision set changed")
+        for candidate_id, decision in zip(
+            selected_candidate_ids, decisions, strict=True,
+        ):
+            if candidate_id in decisions_by_candidate:
+                raise CanonicalEvidenceError("semantic candidate was selected twice")
+            decisions_by_candidate[candidate_id] = (decision, ai_log_binding)
+
+    if set(decisions_by_candidate) != set(candidates_by_id):
+        raise CanonicalEvidenceError("semantic candidate selection is incomplete")
     source_sha = _sha256_hex(canonical_json_bytes(source_manifest))
     for mapping in mappings:
-        if mapping.get("verification_policy") != SEMANTIC_ATTESTATION_POLICY:
+        if mapping.get("verification_policy") not in {
+            SEMANTIC_ATTESTATION_POLICY, GROUPED_SEMANTIC_ATTESTATION_POLICY,
+        }:
             continue
         attestation = mapping.get("attestation") or {}
         candidate_id = attestation.get("candidate_id")
-        if candidate_id not in selected_candidate_id_set:
-            raise CanonicalEvidenceError("unselected semantic candidate was materialized")
         bound = candidates_by_id.get(candidate_id)
-        if bound is None:
+        proof = decisions_by_candidate.get(candidate_id)
+        if bound is None or proof is None:
             raise CanonicalEvidenceError("semantic attestation candidate is missing")
         manifest, candidate = bound
-        decision = decision_by_id[candidate_id]
+        decision, ai_log_binding = proof
         per_log = attestation.get("ai_log") or {}
-        common_log = {key: value for key, value in per_log.items() if key != "response_decision_sha256"}
-        expected_common = {key: value for key, value in ai_log_binding.items() if key != "response_decision_sha256"}
+        common_log = {
+            key: value for key, value in per_log.items()
+            if key != "response_decision_sha256"
+        }
+        expected_common = {
+            key: value for key, value in ai_log_binding.items()
+            if key != "response_decision_sha256"
+        }
+        candidate_refs = candidate.get("source_segment_ids")
+        if candidate_refs is None and "source_segment_id" in candidate:
+            candidate_refs = [candidate["source_segment_id"]]
         if (
             attestation.get("batch_id") != commit["batch_id"]
             or attestation.get("job_id") != job_id
@@ -1554,7 +1554,7 @@ async def _verify_semantic_attestation_batch(
             or candidate["prefix"] != mapping.get("prefix")
             or candidate["suffix"] != mapping.get("suffix")
             or candidate["section"] != mapping.get("section")
-            or candidate["source_segment_id"] not in mapping.get("source_segment_ids", [])
+            or candidate_refs != mapping.get("source_segment_ids")
             or candidate["transform_kind"] != attestation.get("transform_kind")
             or candidate["producer_component"] != attestation.get("producer_component")
             or candidate["producer_invocation_id"] != attestation.get("producer_invocation_id")
@@ -1564,9 +1564,6 @@ async def _verify_semantic_attestation_batch(
             or decision.get("decision") != "supported"
             or decision.get("confidence_ppm") != attestation.get("confidence_ppm")
             or decision.get("reason_codes") != attestation.get("reason_codes")
-            or set(decision) != {
-                identity_key, "decision", "confidence_ppm", "reason_codes",
-            }
         ):
             raise CanonicalEvidenceError("semantic attestation binding changed")
 
@@ -1684,7 +1681,9 @@ async def build_canonical_evidence_records_with_reader(
         raise CanonicalEvidenceError("note provenance identity is invalid")
     raw_mappings = provenance["segments"]
     if any(
-        mapping.get("verification_policy") == SEMANTIC_ATTESTATION_POLICY
+        mapping.get("verification_policy") in {
+            SEMANTIC_ATTESTATION_POLICY, GROUPED_SEMANTIC_ATTESTATION_POLICY,
+        }
         for mapping in raw_mappings
         if isinstance(mapping, dict)
     ):
@@ -1781,7 +1780,9 @@ async def build_canonical_evidence_records_with_reader(
         if (
             provenance["schema_version"] >= 3
             and isinstance(mapping, dict)
-            and mapping.get("verification_policy") == SEMANTIC_ATTESTATION_POLICY
+            and mapping.get("verification_policy") in {
+                SEMANTIC_ATTESTATION_POLICY, GROUPED_SEMANTIC_ATTESTATION_POLICY,
+            }
         ):
             expected_mapping_fields.add("attestation")
         if not isinstance(mapping, dict) or set(mapping) != expected_mapping_fields:
@@ -1807,6 +1808,7 @@ async def build_canonical_evidence_records_with_reader(
             DIRECT_LOCATOR_POLICY,
             EXACT_QUOTE_POLICY,
             SEMANTIC_ATTESTATION_POLICY,
+            GROUPED_SEMANTIC_ATTESTATION_POLICY,
         }:
             raise CanonicalEvidenceError("verification_policy is invalid")
         if verification_policy == EXACT_QUOTE_POLICY:
@@ -1825,6 +1827,8 @@ async def build_canonical_evidence_records_with_reader(
         ]
         if not overlapping:
             raise CanonicalEvidenceError("note provenance anchor does not overlap a chunk")
+        sources: list[dict[str, Any]] = []
+        source_fingerprints: list[str] = []
         for segment_id in refs:
             source_segment = source_segments.get(segment_id)
             if source_segment is None:
@@ -1853,61 +1857,69 @@ async def build_canonical_evidence_records_with_reader(
                     "support_artifact"
                 )
             source_fingerprint = canonical_source_fingerprint(source_identity)
-            for chunk in overlapping:
-                body_sha256 = _sha256_hex(chunk["body"].encode("utf-8"))
-                evidence_identity = canonical_evidence_content_identity(
-                    job_id=job_id,
-                    note_type=note_type,
-                    note_path=note_path,
-                    note_sha256=note_sha256,
-                    provenance_sha256=provenance_sha256,
-                    chunk_id=chunk["chunk_id"],
-                    chunk_body_sha256=body_sha256,
-                    chunk_char_start=chunk["char_start"],
-                    chunk_char_end=chunk["char_end"],
-                    anchor_start=anchor_start,
-                    anchor_end=anchor_end,
-                    source_fingerprint=source_fingerprint,
-                    provenance_schema_version=provenance["schema_version"],
-                    verification_policy=verification_policy,
-                )
-                evidence_fingerprint = canonical_evidence_fingerprint(evidence_identity)
-                identity = {
-                    "schema_version": CANONICAL_EVIDENCE_SCHEMA_VERSION,
-                    "job_id": job_id,
-                    "note_type": note_type,
-                    "chunk_id": chunk["chunk_id"],
-                    "source_ref": source_ref,
-                    "source_segment_id": segment_id,
-                    "evidence_fingerprint": evidence_fingerprint,
-                }
-                evidence_id = canonical_evidence_id(identity)
-                record = {
-                    "evidence_id": evidence_id,
-                    "schema_version": CANONICAL_EVIDENCE_SCHEMA_VERSION,
-                    "job_id": job_id,
-                    "note_type": note_type,
-                    "chunk_id": chunk["chunk_id"],
-                    "section": chunk["section"],
-                    "source_ref": source_ref,
-                    "source_segment_id": segment_id,
-                    "source_path": artifact["path"],
-                    "source_sha256": artifact["sha256"],
-                    "source_revision": artifact["revision"],
-                    "note_path": note_path,
-                    "note_sha256": note_sha256,
-                    "provenance_path": provenance_path,
-                    "provenance_sha256": provenance_sha256,
-                    "chunk_body_sha256": body_sha256,
-                    "chunk_char_start": chunk["char_start"],
-                    "chunk_char_end": chunk["char_end"],
-                    "locator_kind": locator["kind"],
-                    "locator_json": _canonical_json(locator),
-                    "evidence_fingerprint": evidence_fingerprint,
-                    "source_fingerprint": source_fingerprint,
-                }
-                previous = records.get(evidence_id)
-                if previous is not None and previous != record:
-                    raise CanonicalEvidenceError("canonical evidence id collision")
-                records[evidence_id] = record
+            source_fingerprints.append(source_fingerprint)
+            sources.append({
+                "ordinal": len(sources),
+                "source_ref": source_ref,
+                "source_segment_id": segment_id,
+                "source_path": artifact["path"],
+                "source_sha256": artifact["sha256"],
+                "source_revision": artifact["revision"],
+                "locator_kind": locator["kind"],
+                "locator_json": _canonical_json(locator),
+                "source_fingerprint": source_fingerprint,
+            })
+        source_group_fingerprint = _sha256_hex(_canonical_json(
+            source_fingerprints,
+        ).encode("utf-8"))
+        for chunk in overlapping:
+            body_sha256 = _sha256_hex(chunk["body"].encode("utf-8"))
+            evidence_identity = canonical_evidence_content_identity(
+                job_id=job_id,
+                note_type=note_type,
+                note_path=note_path,
+                note_sha256=note_sha256,
+                provenance_sha256=provenance_sha256,
+                chunk_id=chunk["chunk_id"],
+                chunk_body_sha256=body_sha256,
+                chunk_char_start=chunk["char_start"],
+                chunk_char_end=chunk["char_end"],
+                anchor_start=anchor_start,
+                anchor_end=anchor_end,
+                source_group_fingerprint=source_group_fingerprint,
+                provenance_schema_version=provenance["schema_version"],
+                verification_policy=verification_policy,
+            )
+            evidence_fingerprint = canonical_evidence_fingerprint(evidence_identity)
+            identity = {
+                "schema_version": CANONICAL_EVIDENCE_SCHEMA_VERSION,
+                "job_id": job_id,
+                "note_type": note_type,
+                "chunk_id": chunk["chunk_id"],
+                "source_group_fingerprint": source_group_fingerprint,
+                "evidence_fingerprint": evidence_fingerprint,
+            }
+            evidence_id = canonical_evidence_id(identity)
+            record = {
+                "evidence_id": evidence_id,
+                "schema_version": CANONICAL_EVIDENCE_SCHEMA_VERSION,
+                "job_id": job_id,
+                "note_type": note_type,
+                "chunk_id": chunk["chunk_id"],
+                "section": chunk["section"],
+                "note_path": note_path,
+                "note_sha256": note_sha256,
+                "provenance_path": provenance_path,
+                "provenance_sha256": provenance_sha256,
+                "chunk_body_sha256": body_sha256,
+                "chunk_char_start": chunk["char_start"],
+                "chunk_char_end": chunk["char_end"],
+                "evidence_fingerprint": evidence_fingerprint,
+                "source_group_fingerprint": source_group_fingerprint,
+                "sources": sources,
+            }
+            previous = records.get(evidence_id)
+            if previous is not None and previous != record:
+                raise CanonicalEvidenceError("canonical evidence id collision")
+            records[evidence_id] = record
     return [records[key] for key in sorted(records)]

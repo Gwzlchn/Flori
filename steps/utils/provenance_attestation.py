@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from shared.config import (
+    DEFAULT_DOCUMENT_SMART_PARALLELISM,
+    MAX_DOCUMENT_SMART_PARALLELISM,
+)
 from shared.errors import AIProviderError
 from shared.note_text import markdown_to_index_text
 from shared.provenance import (
+    GROUPED_SEMANTIC_ATTESTATION_POLICY,
     MAX_SEMANTIC_AI_LOG_BYTES,
     SEMANTIC_ATTESTATION_POLICY,
     SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
@@ -20,9 +26,10 @@ from shared.provenance import (
     canonical_json_bytes,
     materialize_semantic_attestations,
     semantic_attestation_batch_id,
-    select_semantic_attestation_batch,
+    select_semantic_attestation_batches,
     validate_provenance_candidate_manifest,
     validate_provenance_manifest,
+    validate_semantic_attestor_response,
     validate_semantic_batch_commit,
     validate_source_manifest,
     write_json_atomic,
@@ -40,6 +47,156 @@ def producer_invocation_id(ai) -> str | None:
     if type(value) is not str or not value.strip() or len(value) > 128:
         return None
     return value
+
+
+def _semantic_attestation_parallelism(ai, batch_count: int) -> int:
+    if (
+        batch_count <= 1
+        or not callable(getattr(ai, "fork", None))
+        or not callable(getattr(ai, "merge_forks", None))
+    ):
+        return 1
+    selection = ai.selection()
+    provider = (selection.get("override") or {}).get("provider")
+    if not provider:
+        tiers = selection.get("tiers") or []
+        if len(tiers) == 1:
+            provider = tiers[0].get("provider")
+    if not isinstance(provider, str) or not provider:
+        return 1
+    providers = (ai.config.get("providers") or {}).get("providers") or {}
+    provider_config = providers.get(provider)
+    value = (
+        provider_config.get(
+            "document_smart_parallelism", DEFAULT_DOCUMENT_SMART_PARALLELISM,
+        )
+        if isinstance(provider_config, dict)
+        else DEFAULT_DOCUMENT_SMART_PARALLELISM
+    )
+    if (
+        type(value) is not int
+        or not 1 <= value <= MAX_DOCUMENT_SMART_PARALLELISM
+    ):
+        raise ValueError(
+            "semantic attestation parallelism must be an integer from 1 to "
+            f"{MAX_DOCUMENT_SMART_PARALLELISM}"
+        )
+    return min(value, batch_count)
+
+
+def _invoke_semantic_attestation(ai, selection: Mapping[str, Any]) -> dict[str, Any]:
+    selected_candidate_ids = selection["selected_candidate_ids"]
+    prompt = selection["prompt"]
+    assert selected_candidate_ids and isinstance(prompt, str)
+    response_text = ai.call(prompt, response_format="json", temperature=0)
+    response = ai.last_response
+    invocation_id = producer_invocation_id(ai)
+    record = ai.ai_log_records[-1] if ai.ai_log_records else None
+    exec_id = record.get("exec_id") if isinstance(record, dict) else None
+    if response is None or invocation_id is None:
+        raise ValueError("semantic attestor invocation identity is unavailable")
+    validate_semantic_attestor_response(
+        response_text, selected_candidate_ids,
+        required_response_schema=SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
+    )
+    return {
+        "selected_candidate_ids": selected_candidate_ids,
+        "prompt": prompt,
+        "response_text": response_text,
+        "response": response,
+        "record": record,
+        "exec_id": exec_id,
+    }
+
+
+def _run_semantic_attestation_batches(
+    job_dir: Path, ai, selections: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    parallelism = _semantic_attestation_parallelism(ai, len(selections))
+    if parallelism == 1:
+        completed: list[dict[str, Any]] = []
+        for selection in selections:
+            expected_call_index = ai.call_index
+            item = _invoke_semantic_attestation(ai, selection)
+            item["ai_log_binding"] = _capture_ai_log_binding(
+                job_dir,
+                step_name=ai.step_name,
+                prompt=item["prompt"],
+                response_text=item["response_text"],
+                response=item["response"],
+                record=item["record"],
+                expected_call_index=expected_call_index,
+                next_call_index=ai.call_index,
+            )
+            completed.append(item)
+        return completed
+
+    completed_by_index: dict[int, dict[str, Any]] = {}
+    invocations: dict[int, Any] = {}
+    futures: dict[Future, int] = {}
+    next_batch = 0
+    pool = ThreadPoolExecutor(max_workers=parallelism)
+
+    def submit_one() -> None:
+        nonlocal next_batch
+        index = next_batch
+        next_batch += 1
+        invocation = ai.fork(f"semantic-{index:04d}")
+        invocations[index] = invocation
+        futures[pool.submit(
+            _invoke_semantic_attestation, invocation, selections[index],
+        )] = index
+
+    for _ in range(parallelism):
+        submit_one()
+    try:
+        while futures:
+            finished, _ = wait(tuple(futures), return_when=FIRST_COMPLETED)
+            failed = next(
+                (future for future in finished if future.exception() is not None),
+                None,
+            )
+            if failed is not None:
+                for future in futures:
+                    if future not in finished:
+                        future.cancel()
+                failed.result()
+            for future in finished:
+                completed_by_index[futures.pop(future)] = future.result()
+            while next_batch < len(selections) and len(futures) < parallelism:
+                submit_one()
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+    ordered_invocations = [invocations[index] for index in sorted(invocations)]
+    ai.merge_forks(ordered_invocations)
+    records_by_exec_id = {
+        record.get("exec_id"): record
+        for record in ai.ai_log_records
+        if isinstance(record.get("exec_id"), str) and record["exec_id"]
+    }
+    completed = []
+    for index in range(len(selections)):
+        item = completed_by_index[index]
+        exec_id = item["exec_id"]
+        if not isinstance(exec_id, str) or not exec_id:
+            raise ValueError("semantic attestor ai_log exec_id is unavailable")
+        record = records_by_exec_id.get(exec_id)
+        if record is None:
+            raise ValueError("semantic attestor ai_log merge is incomplete")
+        call_index = record.get("call_index")
+        item["ai_log_binding"] = _capture_ai_log_binding(
+            job_dir,
+            step_name=ai.step_name,
+            prompt=item["prompt"],
+            response_text=item["response_text"],
+            response=item["response"],
+            record=record,
+            expected_call_index=call_index,
+            next_call_index=call_index + 1 if type(call_index) is int else -1,
+        )
+        completed.append(item)
+    return completed
 
 
 def persist_semantic_candidates(
@@ -209,89 +366,63 @@ def finalize_pending_semantic_provenance(
         for item in loaded
         for candidate in item["manifest"]["candidates"]
     ]
-    response_text: str | None = None
-    response = None
-    selection = {
-        "selected_candidate_ids": [],
-        "budget_rejected_candidate_ids": [],
-        "prompt": None,
-    }
+    selections: list[dict[str, Any]] = []
     if candidates:
-        selection = select_semantic_attestation_batch(
+        selections = select_semantic_attestation_batches(
             [item["manifest"] for item in loaded],
             source_manifest,
             protocol=ai.load_prompt_template("semantic_attestation"),
         )
-    selected_candidate_ids = selection["selected_candidate_ids"]
-    budget_rejected_candidate_ids = selection["budget_rejected_candidate_ids"]
-    prompt = selection["prompt"]
-    ai_log_binding: dict[str, Any] | None = None
-    calls = 0
-    if selected_candidate_ids:
-        assert isinstance(prompt, str)
-        try:
-            expected_call_index = ai.call_index
-            response_text = ai.call(prompt, response_format="json", temperature=0)
-            calls = 1
-            response = ai.last_response
-            invocation_id = producer_invocation_id(ai)
-            if response is None or invocation_id is None:
-                raise ValueError("semantic attestor invocation identity is unavailable")
-            ai_log_binding = _capture_ai_log_binding(
-                job_dir,
-                step_name=ai.step_name,
-                prompt=prompt,
-                response_text=response_text,
-                response=response,
-                record=(ai.ai_log_records[-1] if ai.ai_log_records else None),
-                expected_call_index=expected_call_index,
-                next_call_index=ai.call_index,
-            )
-        except Exception as exc:
-            ai.log.warning(
-                "semantic_attestation_failed",
-                error_class=type(exc).__name__,
-                error=str(exc)[:300],
-            )
-            if isinstance(exc, AIProviderError):
-                raise
-            raise AIProviderError(f"semantic attestation failed: {exc}") from exc
+    try:
+        completed = _run_semantic_attestation_batches(job_dir, ai, selections)
+    except Exception as exc:
+        ai.log.warning(
+            "semantic_attestation_failed",
+            error_class=type(exc).__name__,
+            error=str(exc)[:300],
+        )
+        if isinstance(exc, AIProviderError):
+            raise
+        raise AIProviderError(f"semantic attestation failed: {exc}") from exc
 
+    ai_log_bindings = [item["ai_log_binding"] for item in completed]
     batch_id = semantic_attestation_batch_id(
         job_id=job_dir.name,
         pipeline=pipeline,
         attestor_component=ai.step_name,
         candidate_manifests=candidate_artifacts,
-        ai_log=ai_log_binding,
+        ai_logs=ai_log_bindings,
     )
     accepted_total = 0
-    rejected_total = len(budget_rejected_candidate_ids)
-    selected_candidate_id_set = set(selected_candidate_ids)
+    rejected_total = 0
     pending: list[dict[str, Any]] = []
     for item in loaded:
         manifest = item["manifest"]
         accepted: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
-        if any(
-            candidate["candidate_id"] in selected_candidate_id_set
-            for candidate in manifest["candidates"]
-        ):
-            assert response_text is not None and response is not None
-            assert prompt is not None and ai_log_binding is not None
-            accepted, rejected = materialize_semantic_attestations(
-                manifest,
-                source_manifest,
-                response_text=response_text,
+        for completed_batch in completed:
+            selected_candidate_ids = completed_batch["selected_candidate_ids"]
+            if not any(
+                candidate["candidate_id"] in set(selected_candidate_ids)
+                for candidate in manifest["candidates"]
+            ):
+                continue
+            response = completed_batch["response"]
+            batch_accepted, batch_rejected = materialize_semantic_attestations(
+                manifest, source_manifest,
+                response_text=completed_batch["response_text"],
                 attestor_component=ai.step_name,
                 attestor_invocation_id=response.session_id,
                 attestor_provider=response.provider,
                 attestor_model=response.model,
-                attestor_prompt=prompt,
-                ai_log_binding=ai_log_binding,
+                attestor_prompt=completed_batch["prompt"],
+                ai_log_binding=completed_batch["ai_log_binding"],
                 batch_id=batch_id,
                 response_candidate_ids=selected_candidate_ids,
                 required_response_schema=SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
             )
+            accepted.extend(batch_accepted)
+            rejected.extend(batch_rejected)
         exact_provenance_path = job_dir / exact_provenance_dir / f"{item['note_type']}.json"
         provenance_path = job_dir / "output" / "provenance" / f"{item['note_type']}.json"
         provenance = validate_provenance_manifest(
@@ -309,7 +440,10 @@ def finalize_pending_semantic_provenance(
             raise ValueError("semantic attestor provenance identity is invalid")
         exact = [
             mapping for mapping in provenance["segments"]
-            if mapping.get("verification_policy") != SEMANTIC_ATTESTATION_POLICY
+            if mapping.get("verification_policy") not in {
+                SEMANTIC_ATTESTATION_POLICY,
+                GROUPED_SEMANTIC_ATTESTATION_POLICY,
+            }
         ]
         final = build_provenance_manifest(
             job_id=job_dir.name,
@@ -342,17 +476,17 @@ def finalize_pending_semantic_provenance(
         attestor_component=ai.step_name,
         candidate_manifests=candidate_artifacts,
         provenance_manifests=provenance_artifacts,
-        ai_log=ai_log_binding,
+        ai_logs=ai_log_bindings,
     )
     _publish_batch(job_dir, pending, commit, source_manifest)
     return {
         "note_types": len(pending),
         "accepted": accepted_total,
         "rejected": rejected_total,
-        "budget_rejected": len(budget_rejected_candidate_ids),
-        "degraded": bool(budget_rejected_candidate_ids),
+        "budget_rejected": 0,
+        "degraded": False,
         "failed": 0,
-        "calls": calls,
+        "calls": len(completed),
         "batch_id": batch_id,
     }
 

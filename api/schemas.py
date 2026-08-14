@@ -238,6 +238,17 @@ CanonicalEvidenceLocator = Annotated[
 ]
 
 
+class CanonicalEvidenceSourceProjection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ordinal: int = Field(ge=0)
+    source_ref: str
+    source_segment_id: str
+    source_fingerprint: str
+    locator: CanonicalEvidenceLocator
+    link: CanonicalEvidenceLink
+
+
 class CanonicalEvidenceProjection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -250,6 +261,8 @@ class CanonicalEvidenceProjection(BaseModel):
     section: str | None = None
     evidence_fingerprint: str | None = None
     source_fingerprint: str | None = None
+    source_group_fingerprint: str | None = None
+    sources: list["CanonicalEvidenceSourceProjection"] = Field(default_factory=list)
     locator: CanonicalEvidenceLocator | None = None
     link: CanonicalEvidenceLink | None = None
     validated_at: str | None = None
@@ -573,6 +586,8 @@ class ConceptEvidenceResponse(BaseModel):
     content_type: str
     document_kind: str | None = None
     source_fingerprint: str | None = None
+    source_group_fingerprint: str | None = None
+    sources: list[CanonicalEvidenceSourceProjection] = Field(default_factory=list)
     note_type: str | None = None
     chunk_id: str | None = None
     section: str | None = None

@@ -1,7 +1,7 @@
 {
   "format": "flori-sqlite-migrations",
   "minimum_supported_version": 0,
-  "current_version": 12,
+  "current_version": 13,
   "ledger_version": 2,
   "migrations": [
     {
@@ -63,6 +63,11 @@
       "version": 12,
       "name": "concept-projector-version",
       "checksum": "db8a970b6325df264c75e39ce8e2196e0a49351e5283c4683b1f26002acf6d35"
+    },
+    {
+      "version": 13,
+      "name": "canonical-evidence-source-groups",
+      "checksum": "1804551e9e7f60ae9c3278cee90ecdbec91fac834627e2baa80224c93138e4e7"
     }
   ]
 }

@@ -317,8 +317,13 @@ async def project_concept_attestation(
             "content_type": occurrence.get("content_type") or "",
             "document_kind": occurrence.get("document_kind") or None,
             "source_fingerprint": (
-                projection.get("source_fingerprint")
+                projection.get("source_group_fingerprint")
+                or projection.get("source_fingerprint")
                 if projection is not None else occurrence.get("source_fingerprint")
+            ),
+            "source_group_fingerprint": (
+                projection.get("source_group_fingerprint")
+                if projection is not None else None
             ),
         }
         if status == "valid" and reason is None:
@@ -330,6 +335,7 @@ async def project_concept_attestation(
                 "excerpt": occurrence["evidence_excerpt"],
                 "locator": projection.get("locator"),
                 "link": projection.get("link"),
+                "sources": projection.get("sources") or [],
             })
         else:
             excluded.append({
@@ -337,6 +343,7 @@ async def project_concept_attestation(
                 "reason": reason or f"evidence_{status}",
                 "locator": None,
                 "link": None,
+                "sources": [],
             })
 
     included.sort(key=lambda item: (item["evidence_id"], item["job_id"]))

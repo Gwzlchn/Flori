@@ -12,7 +12,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AsyncIterable, AsyncIterator
+from typing import Any, AsyncIterable, AsyncIterator, Mapping
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
@@ -887,6 +887,7 @@ async def is_job_expired(storage: StorageBackend, config: AppConfig, job: Job) -
 async def _reissue_step_manifests(
     storage: StorageBackend, *, parent_id: str, new_id: str,
     by_name: dict, reset_steps: set[str], part_ids: list[str],
+    rebound_outputs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     """fork 播种的 manifest 重签发:不字节复制旧 manifest,以新 job_id 重新校验签发。
 
@@ -896,6 +897,7 @@ async def _reissue_step_manifests(
     from shared.step_manifest import manifest_relative_path, validate_manifest
     from shared.step_scope import part_scope
 
+    replacements = dict(rebound_outputs or {})
     for name, cfg in by_name.items():
         if name in reset_steps:
             continue
@@ -907,24 +909,48 @@ async def _reissue_step_manifests(
             manifest = await read_valid_manifest(storage, parent_id, scope_key, name)
             if manifest is None:
                 continue
+            prefix = f"parts/{scope_key.split(':', 1)[1]}/" if scope_key != "job" else ""
+            has_rebound_output = any(
+                f"{prefix}{entry['path']}" in replacements
+                for entry in manifest["outputs"]
+            )
             # 不盲信父声明:对子 job 实际克隆文件流式重算 SHA-256+size,任一不符
             # 拒绝该步重签发(留给对账降级),防同长度篡改被披上新权威。
             from shared.storage import sha256_file
 
-            prefix = f"parts/{scope_key.split(':', 1)[1]}/" if scope_key != "job" else ""
             verified = True
             for entry in manifest["outputs"]:
                 rel = f"{prefix}{entry['path']}"
                 size = await storage.file_size(new_id, rel)
                 sha = await sha256_file(storage, new_id, rel)
-                if (
-                    size != entry["size_bytes"]
-                    or sha is None
-                    or f"sha256:{sha}" != entry["sha256"]
+                replacement = replacements.get(rel)
+                if replacement is not None:
+                    expected_old = (
+                        replacement.get("old_size_bytes"),
+                        replacement.get("old_sha256"),
+                    )
+                    expected_new = (
+                        replacement.get("size_bytes"),
+                        replacement.get("sha256"),
+                    )
+                    if (
+                        (entry["size_bytes"], entry["sha256"]) != expected_old
+                        or (size, f"sha256:{sha}" if sha is not None else None)
+                        != expected_new
+                    ):
+                        verified = False
+                        break
+                    continue
+                if size != entry["size_bytes"] or sha is None or (
+                    f"sha256:{sha}" != entry["sha256"]
                 ):
                     verified = False
                     break
             if not verified:
+                if has_rebound_output:
+                    raise HTTPException(
+                        409, "rebound document outputs failed manifest validation",
+                    )
                 continue
             reissued = json.loads(json.dumps(manifest))
             reissued["job_id"] = new_id
@@ -933,13 +959,139 @@ async def _reissue_step_manifests(
                 f"clone:{parent_id}:{original_exec}"[:200]
             )
             reissued["producer"]["kind"] = "clone_reissue"
+            for entry in reissued["outputs"]:
+                rel = f"{prefix}{entry['path']}"
+                replacement = replacements.get(rel)
+                if replacement is not None:
+                    entry["size_bytes"] = replacement["size_bytes"]
+                    entry["sha256"] = replacement["sha256"]
             try:
                 encoded = validate_manifest(reissued)
-            except Exception:
+            except Exception as exc:
+                if has_rebound_output:
+                    raise HTTPException(
+                        409, "rebound document manifest cannot be reissued",
+                    ) from exc
                 continue  # 身份改写后不再合法(极端):不发布伪权威
             await storage.write_file(
                 new_id, manifest_relative_path(scope_key, name), encoded,
             )
+
+
+async def _rebind_document_snapshot_artifacts(
+    storage: StorageBackend, *, parent_id: str, new_id: str,
+) -> dict[str, dict[str, Any]]:
+    """把机械文档快照的身份与原始证据闭包重签到子 Job。"""
+    from shared.document_contract import validate_document, validate_quality
+    from shared.note_text import markdown_to_index_text
+    from shared.provenance import (
+        build_provenance_manifest,
+        canonical_json_bytes,
+        sha256_bytes,
+        validate_provenance_manifest,
+        validate_source_manifest,
+    )
+    from shared.step_completion import read_valid_manifest
+
+    manifest = await read_valid_manifest(
+        storage, parent_id, "job", "03_structure",
+    )
+    if manifest is None or manifest.get("outcome") != "done":
+        raise HTTPException(
+            409, "cannot continue AI without a current document structure manifest",
+        )
+    output_entries = {
+        str(entry["path"]): entry for entry in manifest["outputs"]
+    }
+    required = {
+        "intermediate/document.json",
+        "intermediate/document_index.md",
+        "intermediate/quality.json",
+        "intermediate/source_segments.json",
+        "output/provenance/original.json",
+    }
+    if not required.issubset(output_entries):
+        raise HTTPException(
+            409, "document structure manifest lacks the AI continuation closure",
+        )
+
+    raw: dict[str, bytes] = {}
+    for rel in sorted(required):
+        value = await storage.read_file(new_id, rel)
+        entry = output_entries[rel]
+        if value is None or len(value) != entry["size_bytes"] or (
+            "sha256:" + hashlib.sha256(value).hexdigest() != entry["sha256"]
+        ):
+            raise HTTPException(
+                409, "cloned document structure outputs failed integrity validation",
+            )
+        raw[rel] = value
+
+    try:
+        document = validate_document(
+            json.loads(raw["intermediate/document.json"]),
+            expected_job_id=parent_id,
+        )
+        quality = validate_quality(
+            json.loads(raw["intermediate/quality.json"]),
+            expected_job_id=parent_id,
+        )
+        source = validate_source_manifest(
+            json.loads(raw["intermediate/source_segments.json"]),
+        )
+        if source["job_id"] != parent_id or source["pipeline"] != "document":
+            raise ValueError("source manifest belongs to another job or pipeline")
+        note_bytes = raw["intermediate/document_index.md"]
+        normalized_body = markdown_to_index_text(note_bytes.decode("utf-8"))
+        provenance = validate_provenance_manifest(
+            json.loads(raw["output/provenance/original.json"]),
+            source_manifest=source,
+            note_bytes=note_bytes,
+            normalized_body=normalized_body,
+        )
+        if provenance["job_id"] != parent_id or provenance["note_type"] != "original":
+            raise ValueError("original provenance belongs to another job")
+
+        document["job_id"] = new_id
+        quality["job_id"] = new_id
+        source["job_id"] = new_id
+        document = validate_document(document, expected_job_id=new_id)
+        quality = validate_quality(quality, expected_job_id=new_id)
+        source = validate_source_manifest(source)
+        source_bytes = canonical_json_bytes(source)
+        provenance = build_provenance_manifest(
+            job_id=new_id,
+            note_type="original",
+            note_artifact=str(provenance["note_artifact"]),
+            note_bytes=note_bytes,
+            normalized_body=normalized_body,
+            source_manifest_path=str(provenance["source_manifest"]),
+            source_manifest=source,
+            segments=list(provenance["segments"]),
+        )
+        rebound = {
+            "intermediate/document.json": canonical_json_bytes(document),
+            "intermediate/quality.json": canonical_json_bytes(quality),
+            "intermediate/source_segments.json": source_bytes,
+            "output/provenance/original.json": canonical_json_bytes(provenance),
+        }
+    except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            409, "document structure outputs cannot be rebound to the child job",
+        ) from exc
+
+    replacements: dict[str, dict[str, Any]] = {}
+    for rel, value in rebound.items():
+        entry = output_entries[rel]
+        replacements[rel] = {
+            "old_size_bytes": entry["size_bytes"],
+            "old_sha256": entry["sha256"],
+            "size_bytes": len(value),
+            "sha256": "sha256:" + sha256_bytes(value),
+        }
+    for rel, value in rebound.items():
+        await storage.write_file(new_id, rel, value)
+    return replacements
 
 
 async def _create_job_snapshot_once(
@@ -1181,13 +1333,22 @@ async def _create_job_snapshot_once(
                 candidate = rel_path[len(prefix):] if prefix else rel_path
                 if any(fnmatch.fnmatch(candidate, pattern) for pattern in output_patterns):
                     await storage.delete_file(new_id, rel_path)
-        # manifest 重签发(§2.10):clone 不复制 .flori 内部命名空间(manifest 绑定
-        # job_id 身份);为保留步骤以新身份重新签发等价 manifest,输出哈希不变,
-        # 溯源经 exec_id=clone:{parent} 与 producer.kind=clone_reissue 保留。
+        rebound_outputs: dict[str, dict[str, Any]] = {}
+        if (
+            route.pipeline == "document"
+            and requested_roots
+            and "03_structure" not in reset_steps
+        ):
+            rebound_outputs = await _rebind_document_snapshot_artifacts(
+                storage, parent_id=parent.id, new_id=new_id,
+            )
+        # clone 不复制 .flori 内部命名空间。保留步骤必须以子 Job 身份重新签发,
+        # Document 身份产物先重绑并同步新 hash,原 producer 经 clone exec_id 保留。
         await _reissue_step_manifests(
             storage, parent_id=parent.id, new_id=new_id,
             by_name=by_name, reset_steps=reset_steps,
             part_ids=[part.id for part in target_parts],
+            rebound_outputs=rebound_outputs,
         )
         # reservation 行先承载上游终态,再与 target current 状态一并发布。否则 new_job
         # 初始化会把全部步骤置 waiting,使 from_step 之前的下载/转写再次执行。

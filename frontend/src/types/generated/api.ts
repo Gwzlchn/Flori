@@ -1822,6 +1822,10 @@ export interface components {
             section?: string | null;
             /** Source Fingerprint */
             source_fingerprint?: string | null;
+            /** Source Group Fingerprint */
+            source_group_fingerprint?: string | null;
+            /** Sources */
+            sources?: components["schemas"]["CanonicalEvidenceSourceProjection"][];
             /**
              * Status
              * @enum {string}
@@ -1839,6 +1843,20 @@ export interface components {
         CanonicalEvidenceResolveResponse: {
             /** Items */
             items: components["schemas"]["CanonicalEvidenceProjection"][];
+        };
+        /** CanonicalEvidenceSourceProjection */
+        CanonicalEvidenceSourceProjection: {
+            link: components["schemas"]["CanonicalEvidenceLink"];
+            /** Locator */
+            locator: components["schemas"]["CanonicalMediaLocator"] | components["schemas"]["CanonicalPdfLocator"] | components["schemas"]["CanonicalTextLocator"] | components["schemas"]["CanonicalImageLocator"];
+            /** Ordinal */
+            ordinal: number;
+            /** Source Fingerprint */
+            source_fingerprint: string;
+            /** Source Ref */
+            source_ref: string;
+            /** Source Segment Id */
+            source_segment_id: string;
         };
         /** CanonicalImageLocator */
         CanonicalImageLocator: {
@@ -2003,6 +2021,10 @@ export interface components {
             section?: string | null;
             /** Source Fingerprint */
             source_fingerprint?: string | null;
+            /** Source Group Fingerprint */
+            source_group_fingerprint?: string | null;
+            /** Sources */
+            sources?: components["schemas"]["CanonicalEvidenceSourceProjection"][];
         };
         /** ConceptLockResponse */
         ConceptLockResponse: {

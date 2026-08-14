@@ -381,7 +381,7 @@ scripts/backup.sh /mnt/nas/flori --minio-exclude .minio.sys/tmp
 - 归档先写 `.partial`，资产稳定性、SQLite `integrity_check`、manifest 和全部摘要通过后才 `fsync + os.replace` 原子发布；同 generation 拒绝覆盖。
 - 发布前还会验证源数据库 ledger、manifest 历史前缀，并在临时副本上执行生产迁移链。任一不一致时不发布归档及外部 `.sha256`。
 - 备份不主动停应用；复制期间 data/MinIO 发生变化会 fail-closed，不发布混代归档。高写入期应在维护窗口重试。
-- `workers/*/.cache` 是可重建的模型/下载缓存，可能包含上游工具维护的相对符号链接；归档固定排除该子树，但仍保留同一 worker 目录下的持久状态。其它符号链接继续 fail-closed。
+- `workers/*/.cache` 是可重建的模型/下载缓存，`workers/*/.qoder/logs` 是 Qoder CLI 可再生的原生运行日志；两者可能包含上游工具维护的相对符号链接，归档固定排除。Worker 身份、CLI 认证和产品 AI 审计仍保留；其它符号链接继续 fail-closed。
 - `--data-exclude` / `--minio-exclude` 是默认关闭的受控逃生口，路径分别按 data / MinIO 根解析、可重复，最终写入对应 asset manifest 的 `excluded_external_subtrees`。只能排除经确认可重建的精确运行缓存；禁止排除整个 `.minio.sys`，其中的格式、bucket 配置、IAM、版本和生命周期等元数据属于恢复资产。不得用排除参数绕过业务资产的稳定性失败。
 - 完整 data 根会包含大源媒体，容量规划不能沿用旧版“只备 DB”的估算。需要缩短保留期时先用 `gc-jobs.sh` 管理可重下源文件。
 - 源资产默认以只读 bind 挂入备份容器。若只在已冻结的隔离副本上因 SQLite sidecar 无法打开，才可显式设

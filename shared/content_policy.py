@@ -566,6 +566,7 @@ FORBIDDEN_TABLES = frozenset({"app_credentials", "worker_tokens"})
 REBUILDABLE_TABLES = frozenset({
     "job_steps", "workers", "schema_migrations", "note_chunks",
     "note_chunks_fts5", "notes_fts5", "canonical_evidence",
+    "canonical_evidence_sources",
     "concept_occurrences", "concept_occurrence_projection",
     "concept_occurrence_replay_state",
     "restored_job_activations", "flori_stat_probe",

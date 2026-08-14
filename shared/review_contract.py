@@ -172,6 +172,15 @@ def _document_bound_segment_ids(concepts: Any, provenance: Any) -> set[str]:
         for term in concepts.get("key_terms") or []:
             if not isinstance(term, dict):
                 continue
+            groups = term.get("evidence_source_segment_groups")
+            if isinstance(groups, list):
+                for group in groups:
+                    if not isinstance(group, list):
+                        continue
+                    for segment_id in group:
+                        if type(segment_id) is str and segment_id:
+                            result.add(segment_id)
+                continue
             for segment_id in term.get("evidence_source_segment_ids") or []:
                 if type(segment_id) is str and segment_id:
                     result.add(segment_id)

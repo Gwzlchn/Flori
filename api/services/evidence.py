@@ -319,6 +319,132 @@ def _derived_link(row: dict[str, Any], locator: dict[str, Any]) -> dict[str, str
     return {"kind": kind, "href": href, "label": label}
 
 
+async def _revalidate_source_member(
+    storage: StorageBackend,
+    cache: _ValidationCache,
+    *,
+    job_id: str,
+    source_manifest: dict[str, Any],
+    member: dict[str, Any],
+) -> tuple[str, str | None]:
+    """完整重验一个组成员；任一失败由父证据组整体失效。"""
+    source_id = str(member["source_ref"])
+    segment_id = str(member["source_segment_id"])
+    artifacts = source_manifest.get("source_artifacts")
+    segments = source_manifest.get("segments")
+    if not isinstance(artifacts, list) or not isinstance(segments, list):
+        return "stale", "source_manifest_invalid"
+    artifact = next((item for item in artifacts if (
+        isinstance(item, dict) and item.get("source_id") == source_id
+    )), None)
+    segment = next((item for item in segments if (
+        isinstance(item, dict) and item.get("segment_id") == segment_id
+    )), None)
+    if artifact is None or segment is None or segment.get("source_id") != source_id:
+        return "missing", "source_group_member_missing"
+    if (
+        artifact.get("path") != member["source_path"]
+        or artifact.get("sha256") != member["source_sha256"]
+        or artifact.get("revision") != member["source_revision"]
+        or segment.get("locator") != member["locator"]
+    ):
+        return "stale", "source_group_member_identity_changed"
+    try:
+        locator = validate_canonical_locator(
+            segment.get("locator"), source_artifact=artifact,
+        )
+    except ValueError:
+        return "stale", "source_group_member_locator_invalid"
+
+    source_data: bytes | None = None
+    try:
+        if locator["kind"] == "text":
+            source_data = await cache.read(storage, job_id, str(artifact["path"]))
+            source_matches = (
+                hashlib.sha256(source_data).hexdigest() == member["source_sha256"]
+                if source_data is not None else None
+            )
+        else:
+            source_matches = await cache.matches_sha256(
+                storage, job_id, str(artifact["path"]),
+                str(member["source_sha256"]),
+            )
+    except (OSError, ValueError):
+        source_matches = None
+    if source_matches is None:
+        return "missing", "source_group_member_source_missing"
+    if not source_matches:
+        return "stale", "source_group_member_source_changed"
+
+    if locator["kind"] == "text":
+        if source_data is None or len(source_data) > MAX_CANONICAL_SIDECAR_BYTES:
+            return "stale", "source_group_member_text_unverifiable"
+        try:
+            source_text = source_data.decode("utf-8")
+        except UnicodeDecodeError:
+            return "stale", "source_group_member_text_invalid"
+        start, end = segment.get("start"), segment.get("end")
+        if (
+            type(start) is not int or type(end) is not int
+            or not 0 <= start < end <= len(source_text)
+            or source_text[start:end] != locator["exact"]
+            or (locator["prefix"] and not source_text[:start].endswith(locator["prefix"]))
+            or (locator["suffix"] and not source_text[end:].startswith(locator["suffix"]))
+        ):
+            return "stale", "source_group_member_text_locator_changed"
+    elif locator["kind"] == "image":
+        try:
+            image_matches = await cache.matches_sha256(
+                storage, job_id, locator["asset_path"], locator["asset_sha256"],
+            )
+        except (OSError, ValueError):
+            image_matches = None
+        if image_matches is None:
+            return "missing", "source_group_member_image_missing"
+        if not image_matches:
+            return "stale", "source_group_member_image_changed"
+
+    support_artifact = segment.get("support_artifact")
+    if source_manifest.get("schema_version", 1) >= 2 and support_artifact is not None:
+        try:
+            support_data = await cache.read(
+                storage, job_id, str(support_artifact["path"]),
+                MAX_SUPPORT_ARTIFACT_BYTES,
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            support_data = None
+        if support_data is None:
+            return "missing", "source_group_member_support_missing"
+        if hashlib.sha256(support_data).hexdigest() != support_artifact.get("sha256"):
+            return "stale", "source_group_member_support_changed"
+        try:
+            expected_support = support_text_from_artifact(
+                support_data, support_artifact, segment, artifact,
+            )
+        except ValueError:
+            return "stale", "source_group_member_support_invalid"
+        if expected_support != segment.get("support_text"):
+            return "stale", "source_group_member_support_text_changed"
+
+    source_identity = {
+        "source_ref": source_id,
+        "source_segment_id": segment_id,
+        "path": artifact["path"],
+        "sha256": artifact["sha256"],
+        "revision": artifact["revision"],
+        "start": segment.get("start"),
+        "end": segment.get("end"),
+        "section": segment.get("section"),
+        "locator": locator,
+    }
+    if source_manifest.get("schema_version", 1) >= 2:
+        source_identity["support_text"] = segment.get("support_text")
+        source_identity["support_artifact"] = segment.get("support_artifact")
+    if canonical_source_fingerprint(source_identity) != member["source_fingerprint"]:
+        return "stale", "source_group_member_fingerprint_changed"
+    return "valid", None
+
+
 async def _revalidate_row(
     storage: StorageBackend,
     row: dict[str, Any],
@@ -400,146 +526,32 @@ async def _revalidate_row(
     ):
         return "stale", "provenance_identity_changed"
 
-    source_id = str(row["source_ref"])
-    segment_id = str(row["source_segment_id"])
-    artifacts = source_manifest.get("source_artifacts")
-    segments = source_manifest.get("segments")
-    if not isinstance(artifacts, list) or not isinstance(segments, list):
-        return "stale", "source_manifest_invalid"
-    artifact = next(
-        (
-            item for item in artifacts
-            if isinstance(item, dict) and item.get("source_id") == source_id
-        ),
-        None,
-    )
-    segment = next(
-        (
-            item for item in segments
-            if isinstance(item, dict) and item.get("segment_id") == segment_id
-        ),
-        None,
-    )
-    if artifact is None or segment is None or segment.get("source_id") != source_id:
-        return "missing", "source_segment_missing"
+    sources = row.get("sources")
     if (
-        artifact.get("path") != row["source_path"]
-        or artifact.get("sha256") != row["source_sha256"]
-        or artifact.get("revision") != row["source_revision"]
-        or segment.get("locator") != row["locator"]
+        not isinstance(sources, list) or not sources
+        or [source.get("ordinal") for source in sources] != list(range(len(sources)))
     ):
-        return "stale", "source_identity_changed"
-    try:
-        locator = validate_canonical_locator(
-            segment.get("locator"), source_artifact=artifact
+        return "stale", "source_group_invalid"
+    source_fingerprints: list[str] = []
+    for member in sources:
+        member_status = await _revalidate_source_member(
+            storage, cache, job_id=job_id,
+            source_manifest=source_manifest, member=member,
         )
-    except ValueError:
-        return "stale", "locator_invalid"
-
-    source_data: bytes | None = None
-    try:
-        if locator["kind"] == "text":
-            source_data = await cache.read(storage, job_id, str(artifact["path"]))
-            source_matches = (
-                hashlib.sha256(source_data).hexdigest() == row["source_sha256"]
-                if source_data is not None else None
-            )
-        else:
-            source_matches = await cache.matches_sha256(
-                storage, job_id, str(artifact["path"]), str(row["source_sha256"]),
-            )
-    except (OSError, ValueError):
-        source_matches = None
-    if source_matches is None:
-        return "missing", "source_missing"
-    if not source_matches:
-        return "stale", "source_changed"
-
-    if locator["kind"] == "text":
-        if source_data is None or len(source_data) > MAX_CANONICAL_SIDECAR_BYTES:
-            return "stale", "text_source_unverifiable"
-        try:
-            source_text = source_data.decode("utf-8")
-        except UnicodeDecodeError:
-            return "stale", "text_source_invalid"
-        start, end = segment.get("start"), segment.get("end")
-        if (
-            type(start) is not int or type(end) is not int
-            or not 0 <= start < end <= len(source_text)
-            or source_text[start:end] != locator["exact"]
-            or (
-                locator["prefix"]
-                and not source_text[:start].endswith(locator["prefix"])
-            )
-            or (
-                locator["suffix"]
-                and not source_text[end:].startswith(locator["suffix"])
-            )
-        ):
-            return "stale", "text_locator_changed"
-    elif locator["kind"] == "image":
-        try:
-            image_matches = await cache.matches_sha256(
-                storage, job_id, locator["asset_path"], locator["asset_sha256"],
-            )
-        except (OSError, ValueError):
-            image_matches = None
-        if image_matches is None:
-            return "missing", "image_missing"
-        if not image_matches:
-            return "stale", "image_changed"
-
-    support_artifact = segment.get("support_artifact")
-    if source_manifest.get("schema_version") == 2 and support_artifact is not None:
-        support_path = str(support_artifact["path"])
-        support_sha256 = str(support_artifact["sha256"])
-        try:
-            support_matches = await cache.matches_sha256(
-                storage, job_id, support_path, support_sha256,
-            )
-        except (OSError, ValueError):
-            support_matches = None
-        if support_matches is None:
-            return "missing", "support_artifact_missing"
-        if not support_matches:
-            return "stale", "support_artifact_changed"
-        try:
-            support_data = await cache.read(
-                storage, job_id, support_path, MAX_SUPPORT_ARTIFACT_BYTES,
-            )
-        except (OSError, ValueError):
-            support_data = None
-        if support_data is None:
-            return "missing", "support_artifact_missing"
-        try:
-            expected_support = support_text_from_artifact(
-                support_data, support_artifact, segment, artifact,
-            )
-        except ValueError:
-            return "stale", "support_artifact_invalid"
-        if expected_support != segment.get("support_text"):
-            return "stale", "support_text_changed"
-
-    source_identity = {
-        "source_ref": row["source_ref"],
-        "source_segment_id": row["source_segment_id"],
-        "path": artifact["path"],
-        "sha256": artifact["sha256"],
-        "revision": artifact["revision"],
-        "start": segment.get("start"),
-        "end": segment.get("end"),
-        "section": segment.get("section"),
-        "locator": locator,
-    }
-    if source_manifest.get("schema_version") == 2:
-        source_identity["support_text"] = segment.get("support_text")
-        source_identity["support_artifact"] = segment.get("support_artifact")
-    if canonical_source_fingerprint(source_identity) != row["source_fingerprint"]:
-        return "stale", "source_fingerprint_changed"
+        if member_status[0] != "valid":
+            return member_status
+        source_fingerprints.append(str(member["source_fingerprint"]))
+    source_group_fingerprint = hashlib.sha256(json.dumps(
+        source_fingerprints, ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    if source_group_fingerprint != row["source_group_fingerprint"]:
+        return "stale", "source_group_fingerprint_changed"
     evidence_fingerprints: set[str] = set()
     for mapping in provenance.get("segments", []):
         refs = mapping.get("source_segment_ids")
-        if not isinstance(refs, list) or segment_id not in refs:
+        if not isinstance(refs, list) or refs != [
+            source["source_segment_id"] for source in sources
+        ]:
             continue
         try:
             anchor_start, anchor_end = locate_provenance_anchor(
@@ -570,7 +582,7 @@ async def _revalidate_row(
             chunk_char_end=int(row["chunk_char_end"]),
             anchor_start=anchor_start,
             anchor_end=anchor_end,
-            source_fingerprint=str(row["source_fingerprint"]),
+            source_group_fingerprint=source_group_fingerprint,
             provenance_schema_version=int(provenance["schema_version"]),
             verification_policy=str(verification_policy),
         )
@@ -584,8 +596,7 @@ async def _revalidate_row(
         "job_id": row["job_id"],
         "note_type": row["note_type"],
         "chunk_id": row["chunk_id"],
-        "source_ref": row["source_ref"],
-        "source_segment_id": row["source_segment_id"],
+        "source_group_fingerprint": source_group_fingerprint,
         "evidence_fingerprint": row["evidence_fingerprint"],
     }
     try:
@@ -598,7 +609,18 @@ async def _revalidate_row(
 
 
 def _projection(row: dict[str, Any], status: str, reason: str | None) -> dict[str, Any]:
-    locator = row["locator"] if status == "valid" else None
+    projected_sources = []
+    if status == "valid":
+        for member in row["sources"]:
+            locator = member["locator"]
+            projected_sources.append({
+                "ordinal": member["ordinal"],
+                "source_ref": member["source_ref"],
+                "source_segment_id": member["source_segment_id"],
+                "source_fingerprint": member["source_fingerprint"],
+                "locator": _safe_locator_projection(locator),
+                "link": _derived_link({**row, **member}, locator),
+            })
     return {
         "evidence_id": row["evidence_id"],
         "status": status,
@@ -608,9 +630,16 @@ def _projection(row: dict[str, Any], status: str, reason: str | None) -> dict[st
         "chunk_id": row["chunk_id"],
         "section": row["section"],
         "evidence_fingerprint": row["evidence_fingerprint"],
-        "source_fingerprint": row["source_fingerprint"],
-        "locator": _safe_locator_projection(locator) if locator is not None else None,
-        "link": _derived_link(row, locator) if locator is not None else None,
+        "source_fingerprint": (
+            projected_sources[0]["source_fingerprint"]
+            if len(projected_sources) == 1 else None
+        ),
+        "source_group_fingerprint": row["source_group_fingerprint"],
+        "sources": projected_sources,
+        "locator": (
+            projected_sources[0]["locator"] if len(projected_sources) == 1 else None
+        ),
+        "link": projected_sources[0]["link"] if len(projected_sources) == 1 else None,
         "validated_at": row["validated_at"],
     }
 

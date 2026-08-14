@@ -5,7 +5,7 @@
 - 结构跟随论文的论证逻辑，不机械复刻目录，也不把知识卡逐条拼接。
 - 不设统一字数、段落数或章节数限制；使用清晰标题、自然段、列表和局部总结，避免一整页只有一个巨型段落。
 - 区分作者主张与模型综合。后者必须有依据、有限定、可反驳，不得冒充作者原话。
-- Markdown 正文不得自行写“模型综合”小节；把跨章判断写进 metadata 的 synthesis，并用 knowledge_refs 列出最小依据集，服务端会确定性渲染分析、依据和不确定性。
+- Markdown 正文不得自行写“模型综合”小节；把跨章判断写进末尾的 synthesis 块，并列出最小知识依据集，服务端会确定性渲染分析、依据和不确定性。
 - 相关性、规模门槛、代理指标或跨模型差异不得改写成因果结论；输入不能区分的解释必须明确写“无法归因”。
 - 完整调用审计、哈希和覆盖清单不进入 Markdown 正文，它们由系统单独折叠展示。
 
@@ -18,23 +18,23 @@
 图片规则：
 - 只使用 FIGURE_CATALOG 中的 figure_ref。
 - 在合适位置单独写 `{{FIGURE:<figure_ref>}}`，不要手写路径或 Markdown 图片。
-- 标题必须是单行纯文本；正文、标题、图解和模型综合都不得写 Markdown/HTML 图片或 source marker。
-- 每个选中图必须出现在 figure_placements，并说明读图顺序、支持的论点和不能推出的内容。
+- 正文、图解和模型综合都不得写 Markdown/HTML 图片或 source marker。
+- 服务端会按主题学习图中已验证的 figure_guides 渲染读图顺序和边界；你只决定正文中放置哪些 figure_ref 以及放置顺序，不要重复输出图解 metadata。
 - 图应服务理解；涉及论文主线的关键框架图、方法图或结果图不得无故省略。
 
 证据规则：
-- 重要段落末尾用 `[证据: p001-k001]`，只列足以支持该段的最小集合。同一证据段的所有知识 ID 必须在 KNOWLEDGE_SOURCE_MAP 中解析到同一 source；跨 source 比较必须拆成多个各自可证的自然段，不得把联合支持伪写成单条证明。
-- 只能使用 EXPECTED_KNOWLEDGE_REFS；服务端会从正文、图解和模型综合确定性计算 used_knowledge_refs，不要输出该字段。
-- theme_coverage_refs 必须精确包含全部 EXPECTED_THEME_REFS。
+- 重要段落末尾用 `[证据: p001-k001]`，只列足以支持该段的最小集合，形成最小联合来源组。证据组必须与它支持的正文处于同一物理行，不得单独占一行。每个可见行最多一个证据组；组内知识 ID 可解析到 1..32 个来源片段，超过上限必须拆成多个各自可证的自然段。
+- 只能使用 EXPECTED_KNOWLEDGE_REFS；服务端会从正文、已验证图解和模型综合确定性计算 used_knowledge_refs。
+- 服务端会从冻结输入确定标题和完整主题覆盖，不要输出 title、subtitle、theme_coverage_refs、figure_placements、audit_summary 或其它 metadata。
 
-输出必须严格分成以下三段，不要 Markdown fence 或额外说明：
-1. 首先输出一个严格符合 METADATA_SCHEMA 的完整 JSON 对象。JSON 只包含 metadata，不含正文。
-2. 下一行只输出 `---FLORI-FINAL-MARKDOWN-BEGIN---`。
-3. 然后输出原始 Markdown 正文；正文结束后另起一行只输出 `---FLORI-FINAL-MARKDOWN-END---`，其后不得有其它内容。
-metadata JSON 仍必须遵守 RFC 8259 转义；Markdown 正文不需要 JSON 转义。起止标记都只能出现一次，正文内不得复用保留标记。
-
-METADATA_SCHEMA:
-{{METADATA_SCHEMA}}
+输出只能是以下纯文本 wire，不要 JSON、Markdown fence、前言或额外说明。每个保留标记必须独占一行且只出现一次：
+1. 先输出 `---FLORI-FINAL-MARKDOWN-BEGIN---`。
+2. 输出原始 Markdown 正文。正文不得包含任何 `FLORI-FINAL-` 保留标记。
+3. 正文末尾输出 `---FLORI-FINAL-SYNTHESIS-BEGIN---`，随后输出跨主题综合分析的原始文本。
+4. 输出 `---FLORI-FINAL-SYNTHESIS-BASIS---`，随后输出依据说明的原始文本。
+5. 输出 `---FLORI-FINAL-SYNTHESIS-UNCERTAINTY---`，随后输出不确定性说明的原始文本。
+6. 输出 `---FLORI-FINAL-SYNTHESIS-KNOWLEDGE-REFS---`，下一行只输出逗号分隔的 knowledge ID，不要括号、JSON 数组或其它文字。
+7. 输出 `---FLORI-FINAL-SYNTHESIS-END---`，再输出 `---FLORI-FINAL-MARKDOWN-END---`；其后不得有其它内容。
 
 PAPER_MAP:
 {{PAPER_MAP}}

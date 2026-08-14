@@ -47,6 +47,8 @@ function evidence(over: Partial<ConceptEvidence> = {}): ConceptEvidence {
     content_type: 'document',
     document_kind: 'research_paper',
     source_fingerprint: 'd'.repeat(64),
+    source_group_fingerprint: null,
+    sources: [],
     note_type: 'smart',
     chunk_id: 'job-paper:smart:0',
     section: '方法',
@@ -173,6 +175,37 @@ beforeEach(() => {
 })
 
 describe('ConceptDefinitionPanel', () => {
+  it('概念佐证保留联合来源组且不降级为代表来源', async () => {
+    const grouped = evidence({
+      source_fingerprint: 'g'.repeat(64),
+      source_group_fingerprint: 'g'.repeat(64),
+      sources: [
+        {
+          ordinal: 0,
+          source_ref: 'document:body', source_segment_id: 'S1.P1', source_fingerprint: 'a'.repeat(64),
+          locator: { kind: 'pdf', page: 3, bbox: null },
+          link: { kind: 'pdf', href: '/content/job-paper?page=3', label: '第 3 页' },
+        },
+        {
+          ordinal: 1,
+          source_ref: 'document:body', source_segment_id: 'S1.P2', source_fingerprint: 'b'.repeat(64),
+          locator: { kind: 'pdf', page: 4, bbox: null },
+          link: { kind: 'pdf', href: '/content/job-paper?page=4', label: '第 4 页' },
+        },
+      ],
+      locator: null,
+      link: null,
+    })
+    api.get.mockResolvedValue(detail({
+      attestation: { ...detail().attestation, included: [grouped], excluded: [] },
+    }))
+    const wrapper = await mountPanel()
+
+    expect(wrapper.findAll('.evidence-locator-group')).toHaveLength(1)
+    expect(wrapper.findAll('.evidence-source-link')).toHaveLength(2)
+    expect(wrapper.findAll('.evidence-locator')).toHaveLength(0)
+  })
+
   it('展示当前版本、历史、佐证和真实出现总数，并只链接安全有效证据', async () => {
     api.get.mockResolvedValue(detail())
     const wrapper = await mountPanel()

@@ -785,6 +785,24 @@
             ],
             "title": "Source Fingerprint"
           },
+          "source_group_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Group Fingerprint"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/CanonicalEvidenceSourceProjection"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
           "status": {
             "enum": [
               "valid",
@@ -847,6 +865,67 @@
           "items"
         ],
         "title": "CanonicalEvidenceResolveResponse",
+        "type": "object"
+      },
+      "CanonicalEvidenceSourceProjection": {
+        "additionalProperties": false,
+        "properties": {
+          "link": {
+            "$ref": "#/components/schemas/CanonicalEvidenceLink"
+          },
+          "locator": {
+            "discriminator": {
+              "mapping": {
+                "image": "#/components/schemas/CanonicalImageLocator",
+                "media": "#/components/schemas/CanonicalMediaLocator",
+                "pdf": "#/components/schemas/CanonicalPdfLocator",
+                "text": "#/components/schemas/CanonicalTextLocator"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CanonicalMediaLocator"
+              },
+              {
+                "$ref": "#/components/schemas/CanonicalPdfLocator"
+              },
+              {
+                "$ref": "#/components/schemas/CanonicalTextLocator"
+              },
+              {
+                "$ref": "#/components/schemas/CanonicalImageLocator"
+              }
+            ],
+            "title": "Locator"
+          },
+          "ordinal": {
+            "minimum": 0.0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "source_fingerprint": {
+            "title": "Source Fingerprint",
+            "type": "string"
+          },
+          "source_ref": {
+            "title": "Source Ref",
+            "type": "string"
+          },
+          "source_segment_id": {
+            "title": "Source Segment Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ordinal",
+          "source_ref",
+          "source_segment_id",
+          "source_fingerprint",
+          "locator",
+          "link"
+        ],
+        "title": "CanonicalEvidenceSourceProjection",
         "type": "object"
       },
       "CanonicalImageLocator": {
@@ -1412,6 +1491,24 @@
               }
             ],
             "title": "Source Fingerprint"
+          },
+          "source_group_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Group Fingerprint"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/CanonicalEvidenceSourceProjection"
+            },
+            "title": "Sources",
+            "type": "array"
           }
         },
         "required": [

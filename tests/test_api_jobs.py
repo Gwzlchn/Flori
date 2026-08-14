@@ -161,6 +161,80 @@ class TestCreateJob:
         mock_redis.append_lifecycle_event.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_continue_ai_rebinds_document_structure_identity(
+        self, client, app,
+    ):
+        from shared.note_text import markdown_to_index_text
+        from shared.provenance import (
+            validate_provenance_manifest,
+            validate_source_manifest,
+        )
+        from tests.steps.test_step_document import _fixture
+        from tests.test_step_completion import _publish_done_manifest
+
+        parent_dir = _fixture(app.state.storage.jobs_dir)
+        parent_id = parent_dir.name
+        app.state.db.create_job(Job(
+            id=parent_id, content_type="document", pipeline="document",
+            document_kind="research_paper", source="arxiv",
+            meta={"flags": {"mechanical_only": True}}, status=JobStatus.DONE,
+        ))
+        await self._complete_mechanical_job(app, parent_id)
+        await app.state.storage.write_file(
+            parent_id, "job.json", json.dumps({
+                "id": parent_id, "content_type": "document",
+                "pipeline": "document", "flags": {"mechanical_only": True},
+            }).encode(),
+        )
+        outputs = []
+        for rel in (
+            "intermediate/document.json",
+            "intermediate/document_index.md",
+            "intermediate/quality.json",
+            "intermediate/source_segments.json",
+            "output/provenance/original.json",
+        ):
+            outputs.append((rel, (parent_dir / rel).read_bytes()))
+        _publish_done_manifest(
+            app.state.storage.jobs_dir, parent_id, "job", "03_structure",
+            outputs=outputs,
+        )
+
+        response = await client.post(f"/api/jobs/{parent_id}/continue-ai")
+
+        assert response.status_code == 200
+        child_id = response.json()["job_id"]
+        child = app.state.storage.jobs_dir / child_id
+        document = json.loads((child / "intermediate/document.json").read_bytes())
+        quality = json.loads((child / "intermediate/quality.json").read_bytes())
+        source = validate_source_manifest(json.loads(
+            (child / "intermediate/source_segments.json").read_bytes()
+        ))
+        note_bytes = (child / "intermediate/document_index.md").read_bytes()
+        provenance = validate_provenance_manifest(
+            json.loads((child / "output/provenance/original.json").read_bytes()),
+            source_manifest=source, note_bytes=note_bytes,
+            normalized_body=markdown_to_index_text(note_bytes.decode()),
+        )
+        assert document["job_id"] == child_id
+        assert quality["job_id"] == child_id
+        assert source["job_id"] == child_id
+        assert provenance["job_id"] == child_id
+        manifest = json.loads(
+            (child / ".flori/steps/03_structure/manifest.json").read_bytes()
+        )
+        entries = {item["path"]: item for item in manifest["outputs"]}
+        for rel in (
+            "intermediate/document.json",
+            "intermediate/quality.json",
+            "intermediate/source_segments.json",
+            "output/provenance/original.json",
+        ):
+            assert entries[rel]["sha256"] == (
+                "sha256:" + hashlib.sha256((child / rel).read_bytes()).hexdigest()
+            )
+
+    @pytest.mark.asyncio
     async def test_continue_ai_rejects_inflight_mechanical_snapshot(self, client):
         created = await client.post(
             "/api/jobs",

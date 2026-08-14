@@ -34,7 +34,8 @@ class ConceptsRepository:
         with self._lock:
             rows = self._conn.execute(
                 f"""SELECT o.domain, o.term, o.job_id, o.evidence_id, o.created_at,
-                           c.status AS evidence_status, c.source_fingerprint,
+                           c.status AS evidence_status,
+                           c.source_group_fingerprint AS source_fingerprint,
                            c.chunk_body_sha256,
                            n.body AS evidence_excerpt,
                            j.content_type

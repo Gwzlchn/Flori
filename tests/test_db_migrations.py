@@ -16,6 +16,7 @@ import pytest
 import shared.db as db_module
 import shared.ids as ids_module
 from shared.db import Database, SCHEMA_VERSION, UnsupportedSchemaVersionError
+from shared.models import Job, JobStatus
 from shared.migrations import v0001_legacy_baseline as migration_v1
 from shared.migrations import v0002_immutable_ledger as migration_v2
 from shared.migrations import v0003_srs_consistency as migration_v3
@@ -24,6 +25,7 @@ from shared.migrations import v0005_canonical_evidence as migration_v5
 from shared.migrations import v0006_concept_definition_history as migration_v6
 from shared.migrations import v0007_unified_document as migration_v7
 from shared.migrations import v0011_qoder_credit_accounting as migration_v11
+from shared.migrations import v0012_concept_projector_version as migration_v12
 from shared.migrations import (
     Migration,
     MigrationExecutionError,
@@ -1087,23 +1089,13 @@ def test_v9_to_v10_backfills_fixated_empty_projections_as_due_retry(
     ) == SCHEMA_VERSION
     migration_current.validate(database._conn)
 
-    state = database.get_concept_occurrence_replay_state("job-fixated")
-    assert state == {
-        "job_id": "job-fixated",
-        "state": "retry",
-        "reason": "legacy_empty_projection",
-        "source_digest": None,
-        "attempt_count": 0,
-        "last_attempt_at": None,
-        "next_retry_at": "1970-01-01T00:00:00+00:00",
-        "updated_at": "1970-01-01T00:00:00+00:00",
-        "projector_version": 1,
-    }
+    # v13 冷迁移清除旧 canonical/concept/FTS 投影。done job 因缺 FTS
+    # 进入全局补账，不能保留旧 projector 判定冒充新来源组语义。
+    assert database.get_concept_occurrence_replay_state("job-fixated") is None
     assert database.get_concept_occurrence_replay_state("job-full") is None
-    # 回填行立即到期,升级后第一拍就回到候选窗口。
     assert [
-        job.id for job in database.list_unreconciled_concept_occurrence_jobs()
-    ] == ["job-fixated"]
+        job.id for job in database.list_unindexed_done_jobs()
+    ] == ["job-fixated", "job-full"]
     database.close()
 
 
@@ -1139,8 +1131,10 @@ def test_v11_to_v12_backfills_projector_version_and_current_schema(
     )
     database._conn.commit()
 
-    assert run_migrations(database._conn, database._migration_steps()) == 12
-    migration_current.validate(database._conn)
+    assert run_migrations(
+        database._conn, database._migration_steps(), target_version=12,
+    ) == 12
+    migration_v12.validate(database._conn)
     assert database.get_concept_occurrence_projection_pair("job-v11") == (
         source_digest, projection_digest, 1,
     )
@@ -1161,6 +1155,61 @@ def test_v11_to_v12_backfills_projector_version_and_current_schema(
             database._conn.execute(
                 f"UPDATE {table} SET projector_version=0 WHERE job_id='job-v11'"
             )
+    database.close()
+
+
+def test_v12_to_v13_permanently_invalidates_legacy_study_evidence(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "canonical-group-v13.db")
+    run_migrations(
+        database._conn, database._migration_steps(), target_version=12,
+    )
+    job_id = "job-v12-study"
+    body = "## Result\n\nThe model does not exceed 5 kg."
+    database.create_job(Job(
+        id=job_id, content_type="document", document_kind="article",
+        pipeline="document", status=JobStatus.DONE, title="Legacy study",
+        domain="ml",
+    ))
+    database.index_job_notes(
+        job_id, "smart", "Legacy study", body,
+        content_type="document", domain="ml",
+    )
+    batch = database.create_study_suggestion_batch(
+        request_id="v12-study-batch", domain="ml", job_ids=[job_id],
+        concept_terms=[], max_cards=1,
+    )
+    evidence_id = batch["llm_request"]["evidence"][0]["evidence_id"]
+    before = database._conn.execute(
+        "SELECT status, invalid_reason FROM study_suggestion_evidence "
+        "WHERE evidence_id=?", (evidence_id,),
+    ).fetchone()
+    assert tuple(before) == ("valid", None)
+
+    assert run_migrations(
+        database._conn, database._migration_steps(),
+    ) == SCHEMA_VERSION
+    migration_current.validate(database._conn)
+    migrated = database._conn.execute(
+        "SELECT status, invalid_reason, canonical_evidence_id "
+        "FROM study_suggestion_evidence WHERE evidence_id=?", (evidence_id,),
+    ).fetchone()
+    assert tuple(migrated) == (
+        "unavailable", "canonical_evidence_schema_upgraded", None,
+    )
+
+    database.index_job_notes(
+        job_id, "smart", "Legacy study", body,
+        content_type="document", domain="ml",
+    )
+    after_rebuild = database._conn.execute(
+        "SELECT status, invalid_reason FROM study_suggestion_evidence "
+        "WHERE evidence_id=?", (evidence_id,),
+    ).fetchone()
+    assert tuple(after_rebuild) == (
+        "unavailable", "canonical_evidence_schema_upgraded",
+    )
     database.close()
 
 

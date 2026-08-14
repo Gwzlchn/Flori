@@ -14,14 +14,14 @@ CHECKPOINT_FORMAT = "flori-document-chapter-checkpoint"
 CHECKPOINT_VERSION = 1
 STAGE_CHECKPOINT_FORMAT = "flori-document-stage-checkpoint"
 STAGE_CHECKPOINT_VERSION = 1
-MAX_STAGE_ATTEMPTS = 3
+MAX_STAGE_ATTEMPTS = 4
 _JSON_RETRY_INSTRUCTION = (
     "\n\n上一次输出未通过确定性结构与证据闭包校验。"
     "重新生成完整 JSON，不要返回补丁或解释。校验反馈="
 )
 _FRAMED_RETRY_INSTRUCTION = (
     "\n\n上一次输出未通过确定性结构与证据闭包校验。"
-    "重新生成完整的 metadata JSON、Markdown 起止标记和原始 Markdown 正文，"
+    "重新生成完整的 Markdown 起止标记、原始 Markdown 正文和模型综合标记块，"
     "不要返回补丁或解释。校验反馈="
 )
 

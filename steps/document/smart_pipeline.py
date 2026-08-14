@@ -21,6 +21,11 @@ MAX_PACKAGES = 64
 MAX_KNOWLEDGE_ITEMS = 128
 FINAL_MARKDOWN_BEGIN = "---FLORI-FINAL-MARKDOWN-BEGIN---"
 FINAL_MARKDOWN_END = "---FLORI-FINAL-MARKDOWN-END---"
+FINAL_SYNTHESIS_BEGIN = "---FLORI-FINAL-SYNTHESIS-BEGIN---"
+FINAL_SYNTHESIS_BASIS = "---FLORI-FINAL-SYNTHESIS-BASIS---"
+FINAL_SYNTHESIS_UNCERTAINTY = "---FLORI-FINAL-SYNTHESIS-UNCERTAINTY---"
+FINAL_SYNTHESIS_REFS = "---FLORI-FINAL-SYNTHESIS-KNOWLEDGE-REFS---"
+FINAL_SYNTHESIS_END = "---FLORI-FINAL-SYNTHESIS-END---"
 _BIBLIOGRAPHY_RE = re.compile(
     r"^(?:(?:\d+(?:\.\d+)*[.)]?)\s+)?(?:references|bibliography|参考文献|参考书目)(?:\s|$)",
     re.I,
@@ -468,23 +473,113 @@ def parse_stage_result(raw: str, schema: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def parse_final_stage_result(
-    raw: str, metadata_schema: Mapping[str, Any], full_schema: Mapping[str, Any],
+def _split_wire_field(value: str, marker: str) -> tuple[str, str]:
+    pattern = rf"(?m)^{re.escape(marker)}\r?$"
+    matches = list(re.finditer(pattern, value))
+    if len(matches) != 1 or value.count(marker) != 1:
+        raise ValueError(f"final response must contain one {marker} line")
+    match = matches[0]
+    return value[:match.start()], value[match.end():]
+
+
+def _final_figure_placements(
+    markdown: str, themes: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    guides: dict[str, dict[str, Any]] = {}
+    for theme in themes:
+        for raw_guide in theme["figure_guides"]:
+            guide = {
+                "figure_ref": str(raw_guide["figure_ref"]),
+                "placement_reason": str(raw_guide["placement_hint"]),
+                "reading_guide": str(raw_guide["reading_guide"]),
+                "supports": str(raw_guide["supports"]),
+                "limits": str(raw_guide["limits"]),
+                "knowledge_refs": list(raw_guide["knowledge_refs"]),
+            }
+            existing = guides.get(guide["figure_ref"])
+            if existing is not None and existing != guide:
+                raise ValueError("theme figure guides conflict for one figure")
+            guides[guide["figure_ref"]] = guide
+    placements = []
+    for figure_ref in _FIGURE_RE.findall(markdown):
+        guide = guides.get(figure_ref)
+        if guide is None:
+            raise ValueError("final Markdown contains unknown figure ref")
+        placements.append(dict(guide))
+    return placements
+
+
+def _derived_final_audit(
+    theme_refs: list[str], themes: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """解析小型 JSON metadata 与原始 Markdown；起止标记使截断 fail-closed。"""
+    gaps = list(dict.fromkeys(
+        str(item["limitation"]).strip()
+        for theme in themes for item in theme["limitations"]
+        if str(item["limitation"]).strip()
+    ))
+    if len(gaps) > 128:
+        gaps = gaps[:127] + [f"另有 {len(gaps) - 127} 项主题限制，详见主题学习图。"]
+    return {
+        "scope": "服务端依据已验证主题学习图组装终稿：" + ", ".join(theme_refs),
+        "known_gaps": gaps,
+        "evidence_note": "引用闭包由服务端校验；完整调用审计以 AI 日志为准。",
+    }
+
+
+def parse_final_stage_result(
+    raw: str, full_schema: Mapping[str, Any], *, paper_title: str,
+    theme_refs: list[str], themes: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """解析纯文本终稿；结构字段只从冻结输入和保留标记确定性组装。"""
     data = raw.encode("utf-8")
     if len(data) > MAX_STAGE_RESULT_BYTES:
         raise ValueError("AI stage result exceeds byte limit")
-    if raw.count(FINAL_MARKDOWN_BEGIN) != 1 or raw.count(FINAL_MARKDOWN_END) != 1:
-        raise ValueError("final response must contain one complete Markdown frame")
-    prefix, remainder = raw.split(FINAL_MARKDOWN_BEGIN, 1)
-    body, suffix = remainder.split(FINAL_MARKDOWN_END, 1)
-    if suffix.strip():
+    markers = (
+        FINAL_MARKDOWN_BEGIN, FINAL_SYNTHESIS_BEGIN, FINAL_SYNTHESIS_BASIS,
+        FINAL_SYNTHESIS_UNCERTAINTY, FINAL_SYNTHESIS_REFS,
+        FINAL_SYNTHESIS_END, FINAL_MARKDOWN_END,
+    )
+    if any(
+        raw.count(marker) != 1
+        or len(re.findall(rf"(?m)^{re.escape(marker)}\r?$", raw)) != 1
+        for marker in markers
+    ):
+        raise ValueError("final response must contain each reserved marker once")
+    prefix, remainder = _split_wire_field(raw, FINAL_MARKDOWN_BEGIN)
+    framed, suffix = _split_wire_field(remainder, FINAL_MARKDOWN_END)
+    if prefix.strip() or suffix.strip():
         raise ValueError("final response contains content after Markdown frame")
-    markdown = body.strip()
+    markdown, synthesis_wire = _split_wire_field(framed, FINAL_SYNTHESIS_BEGIN)
+    analysis, synthesis_wire = _split_wire_field(
+        synthesis_wire, FINAL_SYNTHESIS_BASIS,
+    )
+    basis, synthesis_wire = _split_wire_field(
+        synthesis_wire, FINAL_SYNTHESIS_UNCERTAINTY,
+    )
+    uncertainty, synthesis_wire = _split_wire_field(
+        synthesis_wire, FINAL_SYNTHESIS_REFS,
+    )
+    refs_text, synthesis_suffix = _split_wire_field(
+        synthesis_wire, FINAL_SYNTHESIS_END,
+    )
+    markdown = markdown.strip()
     if not markdown:
         raise ValueError("final Markdown body is empty")
-    metadata = parse_stage_result(prefix.strip(), metadata_schema)
+    if synthesis_suffix.strip():
+        raise ValueError("final synthesis block must end the Markdown frame")
+    raw_refs = refs_text.strip().split(",")
+    if (
+        "\n" in refs_text.strip()
+        or "\r" in refs_text.strip()
+        or any(not item.strip() for item in raw_refs)
+    ):
+        raise ValueError("final synthesis knowledge refs must be one comma list")
+    synthesis = {
+        "analysis": analysis.strip(), "basis": basis.strip(),
+        "uncertainty": uncertainty.strip(),
+        "knowledge_refs": [item.strip() for item in raw_refs],
+    }
+    placements = _final_figure_placements(markdown, themes)
     evidence = [
         value.strip()
         for group in _EVIDENCE_RE.findall(markdown)
@@ -493,15 +588,20 @@ def parse_final_stage_result(
     used = list(dict.fromkeys([
         *evidence,
         *(
-            ref for placement in metadata["figure_placements"]
+            ref for placement in placements
             for ref in placement["knowledge_refs"]
         ),
-        *metadata["synthesis"]["knowledge_refs"],
+        *synthesis["knowledge_refs"],
     ]))
     result = {
-        **metadata,
+        "title": paper_title.strip(),
+        "subtitle": "基于已验证主题学习图的证据约束智能笔记",
         "note_markdown": markdown,
         "used_knowledge_refs": used,
+        "theme_coverage_refs": list(theme_refs),
+        "figure_placements": placements,
+        "synthesis": synthesis,
+        "audit_summary": _derived_final_audit(theme_refs, themes),
     }
     validate_schema(result, full_schema)
     return result
@@ -587,6 +687,42 @@ def enrich_cards(
     return enriched_cards, knowledge_catalog, figure_catalog, source_map
 
 
+def filter_attestable_knowledge(
+    knowledge_catalog: Mapping[str, Mapping[str, Any]],
+    source_map: Mapping[str, str],
+    source_manifest: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """只把每个来源成员都有可核验原文的知识交给终稿与导读。"""
+    segments = source_manifest.get("segments")
+    if not isinstance(segments, list):
+        raise ValueError("source manifest segments are invalid")
+    by_id = {
+        str(item["segment_id"]): item
+        for item in segments
+        if isinstance(item, Mapping) and isinstance(item.get("segment_id"), str)
+    }
+    selected: dict[str, dict[str, Any]] = {}
+    for knowledge_id, item in knowledge_catalog.items():
+        refs = item.get("source_refs")
+        if not isinstance(refs, list) or not refs:
+            raise ValueError("knowledge source refs are invalid")
+        source_ids: list[str] = []
+        for ref in refs:
+            source_id = source_map.get(str(ref))
+            if source_id is None or source_id not in by_id:
+                raise ValueError("knowledge source map is incomplete")
+            source_ids.append(source_id)
+        if all(
+            isinstance(by_id[source_id].get("support_text"), str)
+            and str(by_id[source_id]["support_text"]).strip()
+            for source_id in source_ids
+        ):
+            selected[str(knowledge_id)] = dict(item)
+    if not selected:
+        raise ValueError("document smart note has no attestable knowledge")
+    return selected
+
+
 def project_theme_card(card: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "package_id": card["package_id"], "logical_parent": card["logical_parent"],
@@ -650,6 +786,7 @@ def validate_final(
     used = result["used_knowledge_refs"]
     if not used or len(used) != len(set(used)) or not set(used) <= valid_knowledge:
         raise ValueError("final used knowledge refs are invalid")
+    _validate_evidence_group_lines(result["note_markdown"], label="final markdown")
     evidence = {
         value.strip()
         for group in _EVIDENCE_RE.findall(result["note_markdown"])
@@ -659,7 +796,7 @@ def validate_final(
         raise ValueError("final markdown has no evidence refs")
     if not evidence <= valid_knowledge:
         raise ValueError("final markdown evidence closure is invalid")
-    _require_single_source_evidence(
+    _require_bounded_source_evidence(
         _EVIDENCE_RE.findall(result["note_markdown"]), knowledge_catalog,
         label="final markdown",
     )
@@ -676,7 +813,7 @@ def validate_final(
     synthesis_refs = set(result["synthesis"]["knowledge_refs"])
     if not synthesis_refs or not synthesis_refs <= valid_knowledge:
         raise ValueError("final synthesis refs are invalid")
-    _require_single_source_evidence(
+    _require_bounded_source_evidence(
         [", ".join(result["synthesis"]["knowledge_refs"])], knowledge_catalog,
         label="final synthesis",
     )
@@ -698,11 +835,11 @@ def validate_final(
     for placement in result["figure_placements"]:
         if not placement["knowledge_refs"] or not set(placement["knowledge_refs"]) <= set(used):
             raise ValueError("final figure placement has unknown knowledge ref")
-        _require_single_source_evidence(
+        _require_bounded_source_evidence(
             [", ".join(placement["knowledge_refs"])], knowledge_catalog,
             label="final figure placement",
         )
-        for field in ("reading_guide", "limits"):
+        for field in ("reading_guide", "supports", "limits"):
             _reject_renderer_markup(
                 placement[field], label=f"final figure {field}",
             )
@@ -731,9 +868,9 @@ def _validate_note_title(value: str) -> None:
     _reject_renderer_markup(title, label="final title")
 
 
-def _require_single_source_evidence(
+def _require_bounded_source_evidence(
     groups: list[str], knowledge_catalog: Mapping[str, Mapping[str, Any]],
-    *, label: str,
+    *, label: str, max_sources: int = 32,
 ) -> None:
     for group in groups:
         knowledge_refs = [value.strip() for value in group.split(",") if value.strip()]
@@ -742,8 +879,33 @@ def _require_single_source_evidence(
             for knowledge_ref in knowledge_refs
             for source_ref in knowledge_catalog[knowledge_ref]["source_refs"]
         }
-        if len(source_refs) != 1:
-            raise ValueError(f"{label} evidence must resolve to exactly one source")
+        if not 1 <= len(source_refs) <= max_sources:
+            raise ValueError(f"{label} evidence source group is outside limit")
+
+
+def _validate_evidence_group_lines(value: str, *, label: str) -> None:
+    from html import unescape
+
+    from shared.note_text import markdown_to_index_text
+
+    for line in value.splitlines():
+        groups = _EVIDENCE_RE.findall(line)
+        if len(groups) > 1:
+            raise ValueError(f"{label} line contains multiple evidence groups")
+        if groups:
+            if _FIGURE_RE.search(line):
+                raise ValueError(
+                    f"{label} evidence group must not share a line with a figure placeholder"
+                )
+            without_protocol = _FIGURE_RE.sub("", _EVIDENCE_RE.sub("", line))
+            anchored = markdown_to_index_text(unescape(without_protocol)).strip()
+            if not anchored or not any(char.isalpha() for char in anchored):
+                raise ValueError(
+                    f"{label} evidence group must share its line with supported text"
+                )
+            refs = [item.strip() for item in groups[0].split(",") if item.strip()]
+            if not refs or len(refs) != len(set(refs)):
+                raise ValueError(f"{label} evidence group contains duplicate refs")
 
 
 def render_model_synthesis(result: Mapping[str, Any]) -> str:
@@ -774,6 +936,7 @@ def validate_introduction(
         raise ValueError("paper introduction headings are invalid")
     used = result["used_knowledge_refs"]
     valid = set(knowledge_catalog)
+    _validate_evidence_group_lines(markdown, label="paper introduction")
     evidence = {
         value.strip()
         for group in _EVIDENCE_RE.findall(markdown)
@@ -783,7 +946,7 @@ def validate_introduction(
         raise ValueError("paper introduction refs are invalid")
     if not evidence or evidence != set(used):
         raise ValueError("paper introduction evidence is invalid")
-    _require_single_source_evidence(
+    _require_bounded_source_evidence(
         _EVIDENCE_RE.findall(markdown), knowledge_catalog,
         label="paper introduction",
     )
@@ -816,11 +979,12 @@ def render_figures(
         if not paths:
             raise ValueError("selected figure has no media")
         guide = str(placement["reading_guide"]).strip()
+        supports = str(placement["supports"]).strip()
         limits = str(placement["limits"]).strip()
         refs = ", ".join(placement["knowledge_refs"])
         return (
             "\n\n".join(paths)
-            + f"\n\n> 读图：{guide} 边界：{limits}"
+            + f"\n\n> 读图：{guide} 支持：{supports} 边界：{limits}"
             + f" [证据: {refs}]"
         )
 

@@ -1,4 +1,4 @@
-"""来源分段与笔记 provenance v1/v2/v3 的严格契约测试。"""
+"""来源分段与笔记 provenance 多版本的严格契约测试。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import pytest
 
 from shared.provenance import (
     EXACT_QUOTE_POLICY,
+    GROUPED_SEMANTIC_ATTESTATION_POLICY,
     SEMANTIC_ATTESTATION_POLICY,
     build_semantic_attestation_mapping,
     build_provenance_candidate_manifest,
@@ -21,6 +22,7 @@ from shared.provenance import (
     extract_exact_quote_markers,
     make_segment_id,
     sha256_bytes,
+    validate_provenance_candidate_manifest,
     validate_provenance_manifest,
     validate_source_segment_id,
     validate_source_manifest,
@@ -645,7 +647,7 @@ def test_semantic_attestation_rejects_claim_source_policy_and_replay_tampering()
 
     changed_source = copy.deepcopy(source)
     changed_source["segments"][0]["support_text"] = "The model does not exceed 50 kg."
-    with pytest.raises(ValueError, match="source support"):
+    with pytest.raises(ValueError, match="source (support|member)"):
         build_provenance_manifest(
             job_id="job-11c",
             note_type="translated",
@@ -686,9 +688,147 @@ def test_non_exact_marker_becomes_untrusted_semantic_candidate(
     assert len(semantic) == 1
     assert semantic[0]["transform_kind"] == expected_kind
     assert set(semantic[0]) == {
-        "anchor", "prefix", "suffix", "section", "source_segment_id",
+        "anchor", "prefix", "suffix", "section", "source_segment_ids",
         "transform_kind", "producer_component", "producer_invocation_id",
     }
+    assert semantic[0]["source_segment_ids"] == [segment_id]
+
+
+def test_multi_source_markers_form_one_manifest_ordered_candidate() -> None:
+    source, first = _semantic_source()
+    second = source["segments"][1]["segment_id"]
+    source["segments"][1]["support_text"] = "The model costs 7 USD."
+    source["segments"][1]["support_artifact"] = {
+        "kind": "pdf_pages", "path": "intermediate/pdf_page_support.json",
+        "sha256": "b" * 64,
+        "selector": {"page": 3, "start": 0, "end": 22},
+    }
+    first_token, second_token = (
+        first.removeprefix("seg_"), second.removeprefix("seg_"),
+    )
+    claim = "The model does not exceed 5 kg and costs 7 USD."
+
+    clean, exact, semantic = extract_attestable_markers(
+        f"{claim} [[source:{second_token}]][[source:{first_token}]]",
+        source, error_prefix="smart note", producer_component="05_smart",
+        producer_invocation_id="producer-session",
+    )
+
+    assert clean == claim and exact == [] and len(semantic) == 1
+    assert semantic[0]["source_segment_ids"] == [first, second]
+    manifest = build_provenance_candidate_manifest(
+        job_id=source["job_id"], note_type="smart",
+        note_artifact="output/smart.md", note_bytes=claim.encode(),
+        normalized_body=claim, source_manifest_path="intermediate/source_segments.json",
+        source_manifest=source, candidates=[semantic[0]],
+    )
+    assert manifest["schema_version"] == 3
+    assert manifest["candidates"][0]["source_segment_ids"] == [first, second]
+
+
+def test_candidate_group_is_bounded_and_identity_binds_the_canonical_set() -> None:
+    source, first = _semantic_source()
+    second = source["segments"][1]["segment_id"]
+    source["segments"][1]["support_text"] = "Other support."
+    source["segments"][1]["support_artifact"] = {
+        "kind": "pdf_pages", "path": "intermediate/pdf_page_support.json",
+        "sha256": "b" * 64,
+        "selector": {"page": 3, "start": 0, "end": 14},
+    }
+    base = {
+        "anchor": "Grouped claim", "prefix": "", "suffix": "", "section": "smart",
+        "source_segment_ids": [second, first], "transform_kind": "paraphrase",
+        "producer_component": "05_smart", "producer_invocation_id": "producer-session",
+    }
+    kwargs = dict(
+        job_id=source["job_id"], note_type="smart", note_artifact="output/smart.md",
+        note_bytes=b"Grouped claim", normalized_body="Grouped claim",
+        source_manifest_path="intermediate/source_segments.json", source_manifest=source,
+    )
+    first_manifest = build_provenance_candidate_manifest(candidates=[base], **kwargs)
+    second_manifest = build_provenance_candidate_manifest(
+        candidates=[{**base, "source_segment_ids": [first, second]}], **kwargs,
+    )
+    assert first_manifest["candidates"][0]["candidate_id"] == (
+        second_manifest["candidates"][0]["candidate_id"]
+    )
+    reordered = copy.deepcopy(first_manifest)
+    reordered["candidates"][0]["source_segment_ids"].reverse()
+    with pytest.raises(ValueError, match="order is not canonical"):
+        validate_provenance_candidate_manifest(
+            reordered, source_manifest=source, note_bytes=b"Grouped claim",
+            normalized_body="Grouped claim",
+        )
+    oversized = {**base, "source_segment_ids": [f"S1.P{i}" for i in range(33)]}
+    with pytest.raises(ValueError, match="1..32"):
+        build_provenance_candidate_manifest(candidates=[oversized], **kwargs)
+
+
+def test_grouped_attestation_binds_all_member_support_and_locator_digests() -> None:
+    source, first = _semantic_source()
+    source["segments"][0]["support_text"] = "Model A uses 5 GB."
+    second = source["segments"][1]["segment_id"]
+    source["segments"][1]["support_text"] = "Model A responds in 20 ms."
+    source["segments"][1]["support_artifact"] = {
+        "kind": "pdf_pages", "path": "intermediate/pdf_page_support.json",
+        "sha256": "b" * 64,
+        "selector": {"page": 3, "start": 0, "end": 25},
+    }
+    mapping = _semantic_mapping(
+        source, first, source_segment_id=None,
+        source_segment_ids=[first, second],
+        anchor="Model A uses 5 GB and responds in 20 ms.",
+    )
+    assert mapping["verification_policy"] == GROUPED_SEMANTIC_ATTESTATION_POLICY
+    assert mapping["attestation"]["source_segment_ids"] == [first, second]
+    assert len(mapping["attestation"]["source_members"]) == 2
+
+    tampered = copy.deepcopy(mapping)
+    tampered["attestation"]["source_members"][1]["source_support_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="source member"):
+        build_provenance_manifest(
+            job_id=source["job_id"], note_type="smart",
+            note_artifact="output/smart.md", note_bytes=mapping["anchor"].encode(),
+            normalized_body=mapping["anchor"],
+            source_manifest_path="intermediate/source_segments.json",
+            source_manifest=source, segments=[tampered],
+        )
+
+    legacy = copy.deepcopy(mapping)
+    attestation = legacy["attestation"]
+    first_member = attestation["source_members"][0]
+    attestation["schema_version"] = 1
+    attestation["source_segment_id"] = first_member["source_segment_id"]
+    attestation["source_support_sha256"] = first_member["source_support_sha256"]
+    attestation["source_locator_sha256"] = first_member["source_locator_sha256"]
+    del attestation["source_segment_ids"]
+    del attestation["source_group_sha256"]
+    del attestation["source_members"]
+    with pytest.raises(ValueError, match="legacy semantic attestation cannot prove a group"):
+        build_provenance_manifest(
+            job_id=source["job_id"], note_type="smart",
+            note_artifact="output/smart.md", note_bytes=mapping["anchor"].encode(),
+            normalized_body=mapping["anchor"],
+            source_manifest_path="intermediate/source_segments.json",
+            source_manifest=source, segments=[legacy],
+        )
+
+
+def test_grouped_attestation_rejects_dropped_source_negation() -> None:
+    source, first = _semantic_source()
+    second = source["segments"][1]["segment_id"]
+    source["segments"][1]["support_text"] = "The measurement was repeated."
+    source["segments"][1]["support_artifact"] = {
+        "kind": "pdf_pages", "path": "intermediate/pdf_page_support.json",
+        "sha256": "b" * 64,
+        "selector": {"page": 3, "start": 0, "end": 29},
+    }
+    with pytest.raises(ValueError, match="negation conflict"):
+        _semantic_mapping(
+            source, first, source_segment_id=None,
+            source_segment_ids=[first, second],
+            anchor="The model exceeds 5 kg.",
+        )
 
 
 @pytest.mark.parametrize(

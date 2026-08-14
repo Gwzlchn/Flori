@@ -39,6 +39,11 @@ def test_document_smart_note_preserves_source_internal_conflicts():
     assert "完整调用审计、哈希和覆盖清单不进入 Markdown 正文" in final
     assert "FLORI-FINAL-MARKDOWN-BEGIN" in final
     assert "FLORI-FINAL-MARKDOWN-END" in final
+    assert "FLORI-FINAL-SYNTHESIS-BEGIN" in final
+    assert "FLORI-FINAL-SYNTHESIS-KNOWLEDGE-REFS" in final
+    assert "不要输出 title、subtitle、theme_coverage_refs" in final
+    assert "METADATA_SCHEMA" not in final
+    assert "完整 JSON" not in final
     assert "论文导读：这篇论文要解决什么" in introduction
     assert "背景与问题" in introduction and "解决思路" in introduction
     assert "不得升级为因果解释" in introduction
@@ -53,22 +58,29 @@ def test_semantic_attestation_template_uses_short_decision_refs():
         "note_type": "smart",
         "candidates": [{
             "candidate_id": "c1",
-            "source_segment_id": "seg-1",
+            "source_segment_ids": ["seg-1", "seg-2"],
             "transform_kind": "cross_language",
             "anchor": "CLAIM",
         }],
     }
-    source_manifest = {"segments": [{
-        "segment_id": "seg-1", "support_text": "SOURCE", "locator": {"t": 1},
-    }]}
+    source_manifest = {"segments": [
+        {"segment_id": "seg-1", "support_text": "SOURCE-A", "locator": {"t": 1}},
+        {"segment_id": "seg-2", "support_text": "SOURCE-B", "locator": {"t": 2}},
+    ]}
     prompt = build_semantic_attestation_prompt(
         manifest, source_manifest, protocol=protocol,
     )
     request = json.loads(prompt.split("INPUT=", 1)[1])
-    assert request == {"schema_version": 3, "items": [{
+    assert request == {"schema_version": 4, "items": [{
         "decision_id": "d000", "note_type": "smart",
         "transform_kind": "cross_language", "claim": "CLAIM",
-        "canonical_source": "SOURCE", "locator": {"t": 1},
+        "canonical_sources": [{
+            "source_segment_id": "seg-1", "support_text": "SOURCE-A",
+            "locator": {"t": 1},
+        }, {
+            "source_segment_id": "seg-2", "support_text": "SOURCE-B",
+            "locator": {"t": 2},
+        }],
     }]}
     assert "candidate_id" not in prompt
     assert prompt.startswith(protocol.rstrip() + "\n\nINPUT=")

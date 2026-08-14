@@ -148,6 +148,8 @@ services:
     logging: *default-logging
     volumes:
       - ${FLORI_DATA_DIR:-flori-data}:/data
+      # 完成副作用会重放语义证据协议,必须与产出证据的 Worker 读取同一模板快照。
+      - ${FLORI_TEMPLATES_DIR:-./configs/prompts/templates}:/data/prompts/templates:ro
     environment:
       <<: *common-env
       WORK_DIR: ${WORK_DIR:-/tmp/flori-work}

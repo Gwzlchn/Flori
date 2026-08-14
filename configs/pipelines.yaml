@@ -201,7 +201,7 @@ video:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.video.step_11_smart
-      version: "6"
+      version: "7"
       # 依赖取证:案例类笔记据 evidence.json 引 [E#] 一手来源(非案例类 10_evidence 秒 skip,不挡)。
       needs: ["09_mechanical", "10_evidence"]
       tags: ["vision"]
@@ -217,7 +217,7 @@ video:
       extends: .ai-step
       run: steps.common.step_concepts
       prompt_template: 05_concepts
-      version: "6"
+      version: "7"
       # 统一概念步:视频以最新版智能笔记为源(必有,11_smart 必跑)。
       needs: ["11_semantic_attestation"]
       # 证据绑定反馈最多追加一次完整 CLI 调用:2 x 1800s + 300s 收尾余量。
@@ -237,7 +237,7 @@ video:
       label: "语义证据独立核验"
       extends: .ai-step
       run: steps.utils.step_semantic_attestation
-      version: "4"
+      version: "5"
       needs: ["11_smart"]
       timeout: 900
       tags: []
@@ -256,7 +256,7 @@ video:
       label: "评审"
       extends: .review
       run: steps.video.step_12_review
-      version: "2"
+      version: "3"
       # 评最新版智能笔记;并读 evidence.json 核 [E#] 忠实性(经传递性排在取证之后)。
       needs: ["12_concepts"]
       tags: []
@@ -344,7 +344,7 @@ document:
       extends: .ai-step
       run: steps.document.step_05_smart
       prompt_template: 05_smart_document
-      version: "7"
+      version: "10"
       needs: ["03_structure"]
       # 章节卡并发4路，随后主题综合、framed正文和导读；长论文给完整六小时执行窗口。
       timeout: 21600
@@ -363,7 +363,7 @@ document:
       extends: .ai-step
       run: steps.document.step_07_concepts
       prompt_template: 05_concepts
-      version: "4"
+      version: "5"
       needs: ["05_smart"]
       # 证据绑定反馈最多追加一次完整 CLI 调用:2 x 1800s + 300s 收尾余量。
       timeout: 3900
@@ -381,9 +381,9 @@ document:
       label: "统一评审"
       extends: .review
       run: steps.document.step_08_review
-      version: "6"
+      version: "8"
       needs: ["07_concepts"]
-      # semantic attestation 一轮 + 评审/修复最多两轮:3 x 1800s + 300s 收尾余量。
+      # semantic attestation 与评审共享95分钟总窗口;单批和总批数分别受协议硬门约束。
       timeout: 5700
       tags: []
       rules:
@@ -400,7 +400,7 @@ document:
       label: "知识发布"
       extends: .cpu-step
       run: steps.document.step_09_publish
-      version: "1"
+      version: "2"
       needs: ["08_review"]
       timeout: 120
       rules:
@@ -464,7 +464,7 @@ audio:
       label: "智能版笔记"
       extends: .ai-step
       run: steps.audio.step_04_smart_podcast
-      version: "4"
+      version: "5"
       needs: ["03_transcript_parse"]
       tags: []
       ai:
@@ -476,7 +476,7 @@ audio:
       label: "概念 + 摘要"
       extends: .ai-step
       run: steps.common.step_concepts
-      version: "6"
+      version: "7"
       # 统一概念步:播客以智能笔记为源。
       needs: ["04_semantic_attestation"]
       # 证据绑定反馈最多追加一次完整 CLI 调用:2 x 1800s + 300s 收尾余量。
@@ -496,7 +496,7 @@ audio:
       label: "语义证据独立核验"
       extends: .ai-step
       run: steps.utils.step_semantic_attestation
-      version: "4"
+      version: "5"
       needs: ["04_smart_podcast"]
       timeout: 900
       tags: []
@@ -514,7 +514,7 @@ audio:
       label: "评审"
       extends: .review
       run: steps.audio.step_05_review
-      version: "2"
+      version: "3"
       needs: ["05_concepts"]
       # 初评失败时可完整修复一次:2 x 1800s + 300s 收尾余量。
       timeout: 3900

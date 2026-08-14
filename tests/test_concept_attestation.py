@@ -153,6 +153,53 @@ async def test_non_text_locator_uses_only_bound_note_chunk_excerpt(
 
 
 @pytest.mark.asyncio
+async def test_concept_attestation_preserves_one_complete_source_group(
+    monkeypatch,
+):
+    occurrence = _occurrence(1, "job-1", "legacy-single", "document")
+    projection = _projection(occurrence)
+    projection.update({
+        "source_fingerprint": None,
+        "source_group_fingerprint": "group-1",
+        "sources": [
+            {
+                "ordinal": 0,
+                "source_ref": "document:body",
+                "source_segment_id": "S1.P1",
+                "source_fingerprint": "member-1",
+                "locator": {"kind": "pdf", "page": 3, "bbox": None},
+                "link": {"kind": "pdf", "href": "/safe/1", "label": "p3"},
+            },
+            {
+                "ordinal": 1,
+                "source_ref": "document:body",
+                "source_segment_id": "S1.P2",
+                "source_fingerprint": "member-2",
+                "locator": {"kind": "pdf", "page": 4, "bbox": None},
+                "link": {"kind": "pdf", "href": "/safe/2", "label": "p4"},
+            },
+        ],
+        "locator": None,
+        "link": None,
+    })
+    _install_fakes(monkeypatch, {occurrence["evidence_id"]: projection})
+
+    result = await concepts.project_concept_attestation(
+        FakeDatabase([occurrence], {"job-1"}),
+        MemoryStorage({"job-1": b'{"reliable":true}'}),
+        "ml",
+        "RRF",
+    )
+
+    assert result["source_fingerprint_count"] == 1
+    assert len(result["included"]) == 1
+    assert result["included"][0]["source_group_fingerprint"] == "group-1"
+    assert [source["ordinal"] for source in result["included"][0]["sources"]] == [0, 1]
+    assert result["included"][0]["locator"] is None
+    assert result["included"][0]["link"] is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("size", "expected"), [
     (0, "none"),
     (1, "supported"),
@@ -272,6 +319,8 @@ async def test_invalid_and_unreliable_evidence_is_excluded_without_locator(
         "content_type": "document",
         "document_kind": "article",
         "source_fingerprint": "source-1",
+        "source_group_fingerprint": None,
+        "sources": [],
         "reason": expected_reason,
         "locator": None,
         "link": None,

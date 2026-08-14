@@ -456,38 +456,24 @@ class DryRunProvider:
                 "论文从一个明确的研究问题出发，给出方法、验证设计和主要结论。"
                 "阅读时应区分作者主张、实验支持与仍需保留的不确定性。"
             ) * 16
-            placements = [{
-                "figure_ref": ref, "placement_reason": "帮助理解论文论证。",
-                "reading_guide": "先看结构，再对照正文结论。",
-                "supports": "支持对应方法或结果。",
-                "limits": "不能推出目录之外的结论。",
-                "knowledge_refs": [knowledge_refs[0]],
-            } for ref in selected]
             figure_markdown = "\n\n".join(f"{{{{FIGURE:{ref}}}}}" for ref in selected)
-            result = {
-                "title": "DRY_RUN 论文智能笔记", "subtitle": "接线验收输出",
-                "theme_coverage_refs": theme_refs,
-                "figure_placements": placements,
-                "synthesis": {
-                    "analysis": "论文主线已按主题重建。",
-                    "basis": "全部主题学习图。",
-                    "uncertainty": "DRY_RUN 只用于接线验收。",
-                    "knowledge_refs": [knowledge_refs[0]],
-                },
-                "audit_summary": {
-                    "scope": "全部主题已审阅。", "known_gaps": [],
-                    "evidence_note": "完整调用审计由系统单独展示。",
-                },
-            }
             markdown = (
                 f"## 问题、方法与验证\n\n{body}[证据: {knowledge_refs[0]}]"
                 + ("\n\n" + figure_markdown if figure_markdown else "")
             )
             return (
-                json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-                + "\n---FLORI-FINAL-MARKDOWN-BEGIN---\n"
+                "---FLORI-FINAL-MARKDOWN-BEGIN---\n"
                 + markdown
-                + "\n---FLORI-FINAL-MARKDOWN-END---"
+                + "\n---FLORI-FINAL-SYNTHESIS-BEGIN---\n"
+                + "论文主线已按主题重建。\n"
+                + "---FLORI-FINAL-SYNTHESIS-BASIS---\n"
+                + "全部主题学习图。\n"
+                + "---FLORI-FINAL-SYNTHESIS-UNCERTAINTY---\n"
+                + "DRY_RUN 只用于接线验收。\n"
+                + "---FLORI-FINAL-SYNTHESIS-KNOWLEDGE-REFS---\n"
+                + str(knowledge_refs[0])
+                + "\n---FLORI-FINAL-SYNTHESIS-END---\n"
+                + "---FLORI-FINAL-MARKDOWN-END---"
             )
         if "论文精读笔记的导读编辑" in prompt:
             refs = cls._prompt_json(prompt, "VALID_REFS")

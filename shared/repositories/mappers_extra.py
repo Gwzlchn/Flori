@@ -35,11 +35,10 @@ class DatabaseRowMappersExtra:
         )
 
     @staticmethod
-    def _row_to_canonical_evidence(row: sqlite3.Row) -> dict:
-        try:
-            locator = json.loads(str(row["locator_json"]))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            locator = None
+    def _row_to_canonical_evidence(
+        row: sqlite3.Row,
+        sources: list[dict] | None = None,
+    ) -> dict:
         return {
             "evidence_id": row["evidence_id"],
             "schema_version": row["schema_version"],
@@ -47,11 +46,6 @@ class DatabaseRowMappersExtra:
             "note_type": row["note_type"],
             "chunk_id": row["chunk_id"],
             "section": row["section"],
-            "source_ref": row["source_ref"],
-            "source_segment_id": row["source_segment_id"],
-            "source_path": row["source_path"],
-            "source_sha256": row["source_sha256"],
-            "source_revision": row["source_revision"],
             "note_path": row["note_path"],
             "note_sha256": row["note_sha256"],
             "provenance_path": row["provenance_path"],
@@ -59,10 +53,9 @@ class DatabaseRowMappersExtra:
             "chunk_body_sha256": row["chunk_body_sha256"],
             "chunk_char_start": row["chunk_char_start"],
             "chunk_char_end": row["chunk_char_end"],
-            "locator_kind": row["locator_kind"],
-            "locator": locator,
             "evidence_fingerprint": row["evidence_fingerprint"],
-            "source_fingerprint": row["source_fingerprint"],
+            "source_group_fingerprint": row["source_group_fingerprint"],
+            "sources": list(sources or []),
             "status": row["status"],
             "reason": row["invalid_reason"],
             "validated_at": row["validated_at"],

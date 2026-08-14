@@ -189,16 +189,21 @@ def attach_concept_source_segments(
             continue
         candidates = _term_candidates(item)
         refs: list[str] = []
+        groups: list[list[str]] = []
         for mapping in snapshot.anchors:
             if not any(
                 _literal_term_in_anchor(candidate, mapping.anchor)
                 for candidate in candidates
             ):
                 continue
+            group = list(mapping.source_segment_ids)
+            if group not in groups:
+                groups.append(group)
             for segment_id in mapping.source_segment_ids:
                 if segment_id not in refs:
                     refs.append(segment_id)
         item["evidence_source_segment_ids"] = refs
+        item["evidence_source_segment_groups"] = groups
     return terms
 
 
@@ -208,8 +213,8 @@ def all_concept_terms_have_evidence(key_terms: Any) -> bool:
         return False
     return all(
         isinstance(item, Mapping)
-        and type(item.get("evidence_source_segment_ids")) is list
-        and bool(item["evidence_source_segment_ids"])
+        and type(item.get("evidence_source_segment_groups")) is list
+        and bool(item["evidence_source_segment_groups"])
         for item in key_terms
     )
 
@@ -233,11 +238,13 @@ def _copy_terms_with_empty_evidence(key_terms: Any) -> list[Any]:
         if isinstance(item, Mapping):
             copied = dict(item)
             copied["evidence_source_segment_ids"] = []
+            copied["evidence_source_segment_groups"] = []
             result.append(copied)
         elif isinstance(item, str):
             result.append({
                 "term": item,
                 "evidence_source_segment_ids": [],
+                "evidence_source_segment_groups": [],
             })
     return result
 

@@ -183,9 +183,9 @@ class TestVariables:
     def test_provenance_writers_invalidate_existing_done_markers(self, configs_dir):
         pipelines = load_pipelines(configs_dir / "pipelines.yaml")
         expected = {
-            "video": {"08_punctuate": "4", "11_smart": "6"},
-            "document": {"02_parse": "4", "04_translate": "1", "05_smart": "7"},
-            "audio": {"03_transcript_parse": "3", "04_smart_podcast": "4"},
+            "video": {"08_punctuate": "4", "11_smart": "7"},
+            "document": {"02_parse": "4", "04_translate": "1", "05_smart": "10"},
+            "audio": {"03_transcript_parse": "3", "04_smart_podcast": "5"},
         }
         for pipeline, versions in expected.items():
             actual = {step["name"]: step["version"] for step in pipelines[pipeline]["steps"]}
@@ -203,9 +203,9 @@ class TestSemanticAttestationPipeline:
             "video": "11_semantic_attestation",
             "audio": "04_semantic_attestation",
         }
-        attestor_versions = {"video": "4", "audio": "4"}
+        attestor_versions = {"video": "5", "audio": "5"}
         concepts = {"video": "12_concepts", "audio": "05_concepts"}
-        concept_versions = {"video": "6", "audio": "6"}
+        concept_versions = {"video": "7", "audio": "7"}
         for pipeline, steps in producers.items():
             jobs = raw[pipeline]["jobs"]
 
@@ -259,14 +259,17 @@ class TestSemanticAttestationPipeline:
         assert jobs["04_translate"]["allow_failure"] is True
         assert jobs["05_smart"]["needs"] == ["03_structure"]
         assert jobs["05_smart"]["timeout"] == 21600
+        assert jobs["05_smart"]["version"] == "10"
         assert jobs["05_smart"]["tags"] == ["vision"]
         assert "output/smart_pipeline/*" in jobs["05_smart"]["outputs"]
         assert jobs["07_concepts"]["needs"] == ["05_smart"]
         assert jobs["07_concepts"]["timeout"] == 3900
+        assert jobs["07_concepts"]["version"] == "5"
         assert jobs["08_review"]["needs"] == ["07_concepts"]
         assert jobs["08_review"]["timeout"] == 5700
-        assert jobs["08_review"]["version"] == "6"
+        assert jobs["08_review"]["version"] == "8"
         assert jobs["09_publish"]["needs"] == ["08_review"]
+        assert jobs["09_publish"]["version"] == "2"
         assert "output/provenance_exact/smart.json" in jobs["05_smart"]["outputs"]
         assert "output/provenance/smart.json" not in jobs["05_smart"]["outputs"]
         assert "output/provenance/smart.json" in jobs["08_review"]["outputs"]
@@ -384,8 +387,8 @@ class TestAIRoleContract:
         assert {
             key: value["version"] for key, value in semantic_steps.items()
         } == {
-            ("video", "11_semantic_attestation"): "4",
-            ("audio", "04_semantic_attestation"): "4",
+            ("video", "11_semantic_attestation"): "5",
+            ("audio", "04_semantic_attestation"): "5",
         }
         for (_pipeline, step_name), step in semantic_steps.items():
             assert (
@@ -401,9 +404,9 @@ class TestAIRoleContract:
             if step["name"] in {"05_review", "08_review", "12_review"}
         }
         assert review_steps == {
-            ("video", "12_review"): (3900, "2"),
-            ("document", "08_review"): (5700, "6"),
-            ("audio", "05_review"): (3900, "2"),
+            ("video", "12_review"): (3900, "3"),
+            ("document", "08_review"): (5700, "8"),
+            ("audio", "05_review"): (3900, "3"),
         }
         video_smart = next(
             step for step in pipelines["video"]["steps"]

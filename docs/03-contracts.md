@@ -485,6 +485,9 @@ Response `200`：
 执行 Worker admission,再 fork 一个 `mechanical_only=false,smart_note=true` 的不可变新快照。父机械
 快照不修改。新快照从当前 pipeline 中所有“没有 AI 祖先的 AI 根”开始,重置这些根及其 DAG 下游的
 done marker 和声明 outputs,因此 AI 后面的机械汇总步骤也会重算,不会复用基于 skipped AI 生成的旧产物。
+Document 快照还必须以父 `03_structure` 当前 manifest 验证机械产物闭包,随后把 `document.json`、质量
+报告、source manifest 与 original provenance 的 `job_id`、来源摘要和 manifest 输出摘要一起重签到子 Job;
+缺文件、摘要不符或证据闭包无法复算时返回 `409`,不得让新 Job 消费仍绑定父身份的机械产物。
 同一父快照固定使用 durable `continue-ai:v1` operation key,重复点击返回同一新快照。
 
 Response `200`:
@@ -1715,7 +1718,7 @@ Response `201`：`GlossaryTermResponse`（`status` 恒为 `accepted`）。
 未命中 `404`。Response `200`：`ConceptTermDetailResponse`，在 `GlossaryTermResponse` 基础上增加：
 
 - `current_definition` 与 `definition_history`：不可变版本完整投影；历史最多 100 条，并给 `definition_history_total/definition_history_limit`。
-- `attestation`：`level`、distinct evidence/job/source fingerprint/content type 计数、`source_set_fingerprint`，以及 `included/excluded`。只有当前 valid 且绑定可靠评审原文快照的 included evidence 才带 locator/link；excluded 始终不可跳转。
+- `attestation`：`level`、distinct evidence/job/source group fingerprint/content type 计数、`source_set_fingerprint`，以及 `included/excluded`。`source_fingerprint_count` 为兼容字段名，计数单位是不可拆分的 canonical source group。只有当前 valid 且绑定可靠评审原文快照的 included evidence 才带单来源 `locator/link` 或完整有序 `sources[]`；excluded 始终不可跳转。
 - 每个 definition version 记录 evidence IDs、生成 strategy、provider/model、prompt/input hash、前驱、actor 与创建时间。manual edit 的 evidence 集为空，不伪装成自动佐证定义。
 
 #### PUT /api/glossary/{domain}/{term} — 修改术语
@@ -1816,9 +1819,15 @@ Response `200`（`note_type` 区分命中的是哪类笔记，如 `smart`/`mecha
         "chunk_id": "j_20260516_abc123:smart:0",
         "section": "训练过程",
         "evidence_fingerprint": "<64 lowercase hex>",
-        "source_fingerprint": "<64 lowercase hex>",
-        "locator": {"kind": "media", "start_ms": 12500, "end_ms": 16000},
-        "link": {"kind": "media", "href": "/api/jobs/.../media?...#t=12.5", "label": "00:12"},
+        "source_group_fingerprint": "<64 lowercase hex>",
+        "sources": [{
+          "ordinal": 0,
+          "source_ref": "transcript",
+          "source_segment_id": "seg_<64 lowercase hex>",
+          "source_fingerprint": "<64 lowercase hex>",
+          "locator": {"kind": "media", "start_ms": 12500, "end_ms": 16000},
+          "link": {"kind": "media", "href": "/api/jobs/.../media?...#t=12.5", "label": "00:12"}
+        }],
         "validated_at": "2026-07-14T14:00:00Z"
       }]
     }
@@ -1851,43 +1860,47 @@ Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投
   support text 并与 manifest 精确比较。HTML、音视频转写和 OCR box 写真实文本，
   Document PDF 由 `02_parse` 使用 Poppler/OCR 提取页面支持文本并绑定页码、bbox 和 PDF fingerprint；空白页、
   提取失败、非 UTF-8 或单页超限时该页写 `null`，不得截断或错位绑定。
-- `output/provenance/{note_type}.json` v2 的每个 mapping 在 v1 锚点字段之外必须有
-  `verification_policy=direct_locator_v1|exact_quote_v1`。direct 用于确定性 producer；smart 只能用
-  exact quote，且每个 mapping 必须恰好绑定一个 source segment。整行 claim 只做 NFC 和有限
+- `output/provenance/{note_type}.json` v4 的每个 mapping 在 v1 锚点字段之外必须有
+  `verification_policy`。direct 用于确定性 producer；smart 的 exact quote 必须恰好绑定一个
+  source segment。整行 claim 只做 NFC 和有限
   空白归一后，必须逐字包含于该 segment 的 support text；不做 NFKC 兼容归一，也不对
-  所有来源全局做 HTML entity 解码。同行多 ref，包括同源和跨模态组合，均不产生映射。
+  所有来源全局做 HTML entity 解码。证据组必须与它支持的正文处于同一物理行，独立占行时没有可核验锚点并必须 fail-closed。同一可见行只允许一个知识证据组；服务端把组内知识引用解析成
+  source manifest 顺序下的 1..32 个 source segment，同行相邻 marker 是一个不可拆的原子来源组。
   producer 输出的未知或畸形 `[[source:ID]]` 必须 fail-closed。同一 ID 重复出现时只允许首次
   marker 进入候选，后续 marker 从正文移除但不生成重复 mapping；正文可以保留，不能把重复陈述
   伪装成多条独立已验证证据。
 - 跨语言翻译和语义改写不得放宽 v2 的 exact-quote 规则。producer 另写
-  `output/provenance_candidates/{smart|translated}.json` v2；顶层状态为
+  `output/provenance_candidates/{smart|translated}.json` v3；顶层状态为
   `ready|empty|no_source`，后两者是覆盖旧候选的显式 tombstone。每个候选必须绑定 note/source
-  SHA、唯一正文锚点及 prefix/suffix/section 上下文、单个 source segment、`transform_kind`、producer
+  SHA、唯一正文锚点及 prefix/suffix/section 上下文、有序 `source_segment_ids`、`transform_kind`、producer
   component 和 invocation identity。候选文件只能作为待核验输入，不能直接进入 canonical evidence。
 - video 和 audio 在 producer 与 concepts 之间使用独立语义核验步,分别为
   `11_semantic_attestation` 和 `04_semantic_attestation`。Document 由 `08_review` 在质量评审前核验
-  smart 候选,不读取或核验 translated 候选。每个 semantic batch 只允许一次 AI 调用和一条绑定日志。
+  smart 候选,不读取或核验 translated 候选。候选组不可跨 AI 批次拆分。
   调用前必须完整校验本批次 manifests 及跨 manifest 候选 ID 唯一性，再按各 manifest 原顺序
-  确定性选择单次调用子集；子集最多 100 条，按受控协议渲染后的 UTF-8 prompt 最多 64 KiB。达到条数
-  上限或加入某候选会超出字节上限时，该候选记为 `budget_rejected`，继续尝试后续候选，不截断字段，
-  不为其生成 mapping；存在这类拒绝时步骤结果标记 `degraded=true`，而不是让整个批次失败。完整候选 manifests
-  仍必须绑定 batch ID 和 commit hash。reader 必须先完整复验 manifests，再用同一选择函数复算子集；
-  response schema v3 不让模型抄写完整 candidate ID；服务端按选中子集的全局顺序生成小写短引用
+  确定性分批；整篇最多 512 条，每批最多 100 条、最多 32 批，单批 UTF-8 prompt 最多 64 KiB。
+  多批调用按 concrete provider 的 `document_smart_parallelism` 使用有界滑动窗口；任一批失败后不再补交新批次，
+  已在途调用只保留审计，必须等待全部批次成功后才允许一次性发布 provenance 与 batch commit。
+  单个来源组超出 prompt 上限或任一全局上限时，在 AI 调用前 fail-closed，不截断、不跳过、不做部分发布。
+  reader 必须先完整复验 manifests，再用同一分批函数复算每批；response schema v4 不让模型抄写完整
+  candidate ID；服务端按每批顺序生成小写短引用
   `d000..d099`，prompt 只携带 `decision_id`，writer 和 reader 用同一纯函数严格映回完整 candidate ID。
   decisions 必须恰好按顺序返回全部短引用；缺失、额外、重复、乱序、跳号、类型错误、大小写变化或额外字段
   均 fail-closed，不做模糊纠错或按位置猜测。prompt 和 decisions 必须恰好绑定该子集，任何未选候选的
-  mapping 均 fail-closed。只有
+  mapping 均 fail-closed。全部批次成功后才一次 materialize 并 commit-last。只有
   `confidence_ppm >= 950000` 且 decision 同时声明 `semantic_equivalent` 和
   `critical_facts_match` 时，才生成
-  `verification_policy=semantic_attestation_v1` 的 provenance v3 mapping；数字、单位、货币、比例、
+  单来源生成 `verification_policy=semantic_attestation_v1`，多来源生成
+  `verification_policy=grouped_semantic_attestation_v1` 的 provenance v4 mapping。联合证明逐成员绑定
+  support/locator digest 并绑定完整组 digest，任何成员子集不得继承整组 supported。数字、单位、货币、比例、
   否定、主体或范围冲突一律拒绝，不得回退到 exact quote 或弱匹配。
 - 对独立语义核验上线前已经完成的存量任务，Scheduler 只在 pipeline candidate 显式登记旧 producer
   和 sidecar 引入版本，且旧 `.done` 的 step、def digest、输出路径与版本边界全部匹配时，允许以空
   canonical evidence 补 FTS。当前 pipeline digest、缺一侧 sidecar、未知 producer、引入版本之后的
   marker 或任何畸形字段均 fail-closed。配置存在旧 producer 时只检查该 producer，不接受新 attestor
   的虚构旧版本或缺少 def digest 的 marker；不得为历史笔记合成 evidence。
-- `output/provenance/semantic_batch.json` v1 是 commit-last 批次提交清单。它绑定 job/pipeline/batch、
-  attestor component、候选 manifest 和最终 provenance 的 path/SHA，以及实际 AI 日志记录中的
+- `output/provenance/semantic_batch.json` v2 是 commit-last 批次提交清单。它绑定 job/pipeline/batch、
+  attestor component、候选 manifest 和最终 provenance 的 path/SHA，以及各批实际 AI 日志记录中的
   provider/model/session/prompt/response/decision。canonical reader 必须在受信 job 根目录内重读并
   复算全部候选、最终产物、source manifest 和 AI 日志。writer 只接受本次串行 AIInvocation 刚完成且
   身份逐字段匹配的内存审计记录,并原子写成单记录 immutable proof；proof 最大 2 MiB。累计 JSONL
@@ -1900,6 +1913,10 @@ Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投
   改写/纯数字 claim、PDF 空白页或提取失败页均 fail-closed。未经上述独立批次核验的跨语言
   translated/smart claim 仍 fail-closed。producer、独立 attestor 和 Scheduler 分别复算，客户端不能
   提交、重签或拼装 canonical mapping。
+- schema v13 冷迁移把 canonical evidence 升级为一个父证据加有序成员表。旧 singleton canonical、
+  FTS、concept occurrence 和 projector state 都作为可重建投影清空；既有 study suggestion evidence
+  同时永久标为 `unavailable` 并清除 canonical 指针，即使之后重建出相同正文 chunk 也不得跨代恢复为
+  `valid`。旧 suggestion 需要新联合证据语义时必须重新生成，不能选择一个代表来源补回旧快照。
 
 ```json
 {
@@ -1911,16 +1928,23 @@ Search、Ask、MCP 和内容详情共用同一个 evidence identity 与三态投
   "chunk_id": "j_xxx:smart:0",
   "section": "引言",
   "evidence_fingerprint": "<64 lowercase hex>",
-  "source_fingerprint": "<64 lowercase hex>",
-  "locator": {"kind": "pdf", "page": 3, "bbox": null},
-  "link": {"kind": "pdf", "href": "/api/jobs/.../media?...#page=3", "label": "跳到 PDF 页"},
+  "source_group_fingerprint": "<64 lowercase hex>",
+  "sources": [{
+    "ordinal": 0,
+    "source_ref": "pdf",
+    "source_segment_id": "seg_<64 lowercase hex>",
+    "source_fingerprint": "<64 lowercase hex>",
+    "locator": {"kind": "pdf", "page": 3, "bbox": null},
+    "link": {"kind": "pdf", "href": "/api/jobs/.../media?...#page=3", "label": "跳到 PDF 页"}
+  }],
   "validated_at": "2026-07-14T14:00:00Z"
 }
 ```
 
-- `valid` 才允许 `reason=null` 且返回安全 `locator/link`。`link` 只能由服务端 resolver 派生，
+- `valid` 才允许 `reason=null` 且 `sources[]` 的每个成员返回安全 `locator/link`。任一成员失效时
+  整组失效，不返回部分有效组。`link` 只能由服务端 resolver 派生，
   消费端不从 locator、job_id 或任何 path 拼接 URL。
-- `stale/missing` 必须有非空 `reason`，且 `locator=null/link=null`。跨 job 绑定、原始 path 越界、
+- `stale/missing` 必须有非空 `reason`，且 `sources[]` 为空。跨 job 绑定、原始 path 越界、
   source/note/chunk hash 篡改、text anchor 多解或无解均 fail-closed，不产生链接。
 - locator union 字段固定：`media={kind,start_ms,end_ms}`；
   `pdf={kind,page,bbox:[x0,y0,x1,y1]|null}`；
@@ -2443,7 +2467,7 @@ Prompt version 的合法范围是 SQLite 有符号 64 位正整数 `1..2^63-1`�
 
 覆盖键使用 pipeline 运行时步骤名,模板名可由 `prompt_template` 映射。`11_smart` 有主模板 `11_smart.md` 和视觉变体 `11_smart.vision.md`;该步覆盖只替换主模板,不污染视觉 pass。`08_punctuate` 没有同名主模板,覆盖替换当次实际选中的 `.zh` 或 `.translate` 变体。video 概念步运行时身份为 `12_concepts`,正文通过 `prompt_template: 05_concepts` 复用 tracked 模板;它的 done/progress/AI log/prompt override 仍全部使用 `12_concepts`。
 
-**协议锁定步(`prompt_locked`)**:步骤配置 `prompt_locked: true` 表示该步 prompt 是与服务端校验逻辑成对的协议文本,只可读不可覆盖。当前锁定步为三条 pipeline 的语义核验步 `11/06/04_semantic_attestation`,共用 tracked 模板 `semantic_attestation.md`。列表与详情正常返回模板内容并带 `locked: true`;`PUT`/`activate`/`DELETE` 一律 `403`。Worker 解析时同样跳过 job 覆盖(存量脏覆盖不生效)。修改协议正文只能改仓库模板文件并随代码评审发布;协议语义变化须同步 `materialize_semantic_attestations` 解析器并 bump 步骤 `version`。当前 response schema 为 v3,使用服务端派生的 `d000..d099` 短引用;旧 v1/v2 response 仅保留直接解析兼容,既有批次因 reader 用当前受信模板复算 prompt 而 fail-closed,必须重跑语义核验步,不得把旧响应模糊迁移为 v3。
+**协议锁定步(`prompt_locked`)**:步骤配置 `prompt_locked: true` 表示该步 prompt 是与服务端校验逻辑成对的协议文本,只可读不可覆盖。当前锁定步为 video `11_semantic_attestation`、audio `04_semantic_attestation`;Document 由 `08_review` 内置同一协议核验。三条 pipeline 共用 tracked 模板 `semantic_attestation.md`。列表与详情正常返回模板内容并带 `locked: true`;`PUT`/`activate`/`DELETE` 一律 `403`。Worker 解析时同样跳过 job 覆盖(存量脏覆盖不生效)。修改协议正文只能改仓库模板文件并随代码评审发布;协议语义变化须同步 `materialize_semantic_attestations` 解析器并 bump 步骤 `version`。当前 response schema 为 v4,使用服务端派生的 `d000..d099` 短引用并逐批绑定原子来源组;旧 response 只保留直接解析兼容,不能证明当前联合证据。既有批次因 reader 用当前受信模板复算 prompt 而 fail-closed,必须重跑语义核验步,不得把旧响应模糊迁移为 v4。
 
 三个评审步 `05_review/08_review/12_review` 使用同一占位符契约 `{{intro}}/{{dimensions}}/{{score_example}}/{{ref_block}}`。audio 与 video 的 tracked 骨架逐字相同；Document 的 `08_review.md` 额外强调公式、视觉注册表和 locator，但仍由相同运行期参数注入。`score_keys` 由评分维度配置决定,不从模板反向解析。覆盖删除 `{{ref_block}}` 时,完整参照块追加到末尾,避免被评内容丢失。
 
@@ -3041,8 +3065,8 @@ video:
   - `intermediate/document.json` 保存 canonical metadata、blocks、Figure/Table registry、sources 与 locator；`quality.json` 保存 complete/degraded/rejected 及缺失原因；不生成或读取 `output/original.md`、`output/translated.md`、`intermediate/figures.json`。
   - `04_translate` 按稳定 block ID 翻译自然语言，冻结公式、代码、数字、单位和引用，发布 `translation.json + translated.html`。schema 支持 1:1、1:N、N:1 对齐；违反 segment/cardinality/表格结构不变量时重试后拒绝发布。该步骤 `allow_failure=true`，但仍先耗尽正常重试；最终失败保留错误与失败统计并签发当前 lifecycle generation 的 `allowed_failure` skipped manifest，不终止知识分支。配置加载期禁止任何 `needs/fan_in` 指向 `allow_failure` 步骤，避免把可选失败伪装成完成前提。并发 rerun 后迟到的旧代 manifest 不参与恢复；有效 manifest 可同时修复 Redis 与 DB 的终态投影。
   - 原文 HTML 通过 CSP/sandbox 安全副本展示，PDF 由 PDF.js 保留原始版式并按 page+bbox 高亮；Figure/Table 使用稳定 visual ID、分组目录、结构表或 source crop 降级。
-  - `05_smart` 消费 `document.json + quality.json + source_segments.json`,不因译文存在而换正文或失效指纹。Quality schema 只接受枚举原因码和有界浅层指标,单文件上限 64 KiB；历史 v1 的 `scanned_pdf_ocr_error:<ExceptionName>` 只在后缀满足安全标识符时归一为 `scanned_pdf_ocr_failed`。原始来源按章节顺序唯一分配,单包正文不超过 46 KiB、source alias 不超过 32 个；单段过长按 UTF-8 完整边界拆分,参考文献目录确定性排除并写覆盖回执。单执行包最多附 5 张真实图片,任一边界超限时按来源顺序拆包,同一图片只归入来源的首个 part。章节卡按 concrete provider 的 `document_smart_parallelism` 使用有界滑动窗口,Qoder 和 Claude 默认均为 4、未声明时保守为 4,全局上限为 8；不得一次把全部章节包提交给 executor。任一包耗尽三次确定性校验后,立即停止补交新包并取消尚未开始的 future,只等待窗口内已运行调用完成审计。随后最多三份主题综合、一次完整正文和一次独立论文导读；步骤开始时冻结四份 Prompt 快照,每阶段最终 prompt 不超过 1 MiB,响应不超过 2 MiB,结构或引用闭包失败最多完整重试两次。终稿以小型 metadata JSON、唯一 Markdown 起止标记和原始 Markdown 正文组成,服务端从正文、图解和模型综合引用确定性计算 used knowledge refs；缺失或重复标记、截断、尾随内容和未知引用全部拒绝。其它阶段仍使用严格 JSON；额外字段错误会有界列出最多16个对象的多余字段与允许字段,其余对象报告数量；非法 JSON 反馈只报告有界 reason 与行列号,不回显或修补原始输出。每次尝试都重新执行相同的 schema、来源、图片和证据闭包,第三次仍不合法则整个步骤不发布。章节卡必须覆盖背景、问题、方法、结果、限制与读图边界,主题层显式恢复前后关联；最终正文不设统一字数、段落或章节数限制。作者正文只能使用已验证知识引用；结构化模型综合由服务端确定性渲染分析、依据、不确定性和最小证据集。导读从跨章节的有界证据 catalog 固定回答背景与问题、解决思路、验证方法、主要结论与阅读边界。
-    章节包、知识卡、主题、catalog、覆盖回执、最终 JSON 与导读 JSON 都发布到 `output/smart_pipeline/*`;重跑先清空步骤独占目录并只授权本次精确文件集合,不得把旧 package/theme JSON、临时文件或其它遗留物混进新 manifest。完整调用审计仍在折叠的 `05_smart` AI log 中,不写进笔记正文；导读和最终正文分别绑定各自实际 AI session。每个声明证据的自然段必须在服务端解析为一个 source;跨 source 比较必须拆成多个各自可证的自然段,不得把联合支持伪写成每条 source 都可独立支持。同一 source 可因不同 anchor 分别进入多段证明,只去重相同 source+anchor,不得统一伪绑最后一次调用、让先处理的导读抢占正文 mapping,或让正文早先引用抢占后续图解与模型综合。extractor 返回后再用声明证据段与 exact/semantic anchor 做精确集合对账,任一静默丢弃都会拒绝发布。模型不得直接写 Markdown/HTML 图片、资源路径或 source marker；标题只接受单行文本。图片占位符由服务端映射回已验证的 `assets/` 路径,图解的知识引用也由服务端确定性写成证据 marker,再统一映射为原始 source marker；未知、重复或跨包引用 fail-closed。解析状态不是 `complete` 时,程序确定性写入来源质量提示,并同时投影成功 crosswalk 数和歧义/失败数。`pdf_crosswalk_blocks>0`只证明部分正文块保留页码/bbox,`pdf_crosswalk_visuals>0`只证明部分视觉项保留映射；两者不得互相代替或把 partial 退化夸大成对应维度全部缺失。来源冲突必须明确标成“来源内部未决矛盾”。它把 exact baseline 独占发布到 `output/provenance_exact/smart.json`。`08_review` 读取该不可变基线并把 semantic final 发布到 `output/provenance/smart.json`,因此单独 rerun 08 只删除自身 final,不会删除必需输入。同一论文的 Qoder/Claude 对照必须使用两个独立 Job,禁止对同一 Job 并发 `rerun-smart`；两次换代会互相撤销且共享 canonical 输出,不能作为 A/B。
+  - `05_smart` 消费 `document.json + quality.json + source_segments.json`,不因译文存在而换正文或失效指纹。Quality schema 只接受枚举原因码和有界浅层指标,单文件上限 64 KiB；历史 v1 的 `scanned_pdf_ocr_error:<ExceptionName>` 只在后缀满足安全标识符时归一为 `scanned_pdf_ocr_failed`。原始来源按章节顺序唯一分配,单包正文不超过 46 KiB、source alias 不超过 32 个；单段过长按 UTF-8 完整边界拆分,参考文献目录确定性排除并写覆盖回执。单执行包最多附 5 张真实图片,任一边界超限时按来源顺序拆包,同一图片只归入来源的首个 part。章节卡按 concrete provider 的 `document_smart_parallelism` 使用有界滑动窗口,Qoder 和 Claude 默认均为 4、未声明时保守为 4,全局上限为 8；不得一次把全部章节包提交给 executor。任一包耗尽四次确定性校验后,立即停止补交新包并取消尚未开始的 future,只等待窗口内已运行调用完成审计。随后最多三份主题综合、一次完整正文和一次独立论文导读；终稿与导读的可选知识集合会先排除任一来源成员没有非空 `support_text` 的知识组,避免模型产出无法进入 exact/semantic 证明的引用。步骤开始时冻结四份 Prompt 快照,每阶段最终 prompt 不超过 1 MiB,响应不超过 2 MiB,结构或引用闭包失败最多完整重试三次。终稿是唯一 Markdown 起止标记内的原始正文与结构化模型综合标记块,不要求模型生成 metadata JSON；标题、主题覆盖、图片 placement、used knowledge refs 和审计回执均由服务端从冻结输入确定性派生。缺失或重复标记、截断、尾随内容和未知引用全部拒绝。其它阶段仍使用严格 JSON；额外字段错误会有界列出最多16个对象的多余字段与允许字段,其余对象报告数量；非法 JSON 反馈只报告有界 reason 与行列号,不回显或修补原始输出。每次尝试都重新执行相同的 schema、来源、图片和证据闭包,第四次仍不合法则整个步骤不发布。章节卡必须覆盖背景、问题、方法、结果、限制与读图边界,主题层显式恢复前后关联；最终正文不设统一字数、段落或章节数限制。作者正文只能使用已验证知识引用；结构化模型综合由服务端确定性渲染分析、依据、不确定性和最小证据集。导读从跨章节的有界证据 catalog 固定回答背景与问题、解决思路、验证方法、主要结论与阅读边界。
+    章节包、知识卡、主题、catalog、覆盖回执、最终 JSON 与导读 JSON 都发布到 `output/smart_pipeline/*`;重跑先清空步骤独占目录并只授权本次精确文件集合,不得把旧 package/theme JSON、临时文件或其它遗留物混进新 manifest。完整调用审计仍在折叠的 `05_smart` AI log 中,不写进笔记正文；导读和最终正文分别绑定各自实际 AI session。每个声明证据的可见行在服务端解析为一个 1..32 source segment 的原子联合组；不得把联合支持拆成多条单来源证明或让子集继承整组结论。同一 source 可因不同 anchor 分别进入多段证明,只去重相同 source+anchor,不得统一伪绑最后一次调用、让先处理的导读抢占正文 mapping,或让正文早先引用抢占后续图解与模型综合。extractor 返回后再用声明证据行的 anchor+完整source组与 exact/semantic mapping 做精确对账,任一静默丢弃都会拒绝发布。模型不得直接写 Markdown/HTML 图片、资源路径或 source marker；标题只接受单行文本。图片占位符由服务端映射回已验证的 `assets/` 路径,图解的知识引用也由服务端确定性写成证据 marker,再统一映射为原始 source marker；未知、重复或跨包引用 fail-closed。解析状态不是 `complete` 时,程序确定性写入来源质量提示,并同时投影成功 crosswalk 数和歧义/失败数。`pdf_crosswalk_blocks>0`只证明部分正文块保留页码/bbox,`pdf_crosswalk_visuals>0`只证明部分视觉项保留映射；两者不得互相代替或把 partial 退化夸大成对应维度全部缺失。来源冲突必须明确标成“来源内部未决矛盾”。它把 exact baseline 独占发布到 `output/provenance_exact/smart.json`。`08_review` 读取该不可变基线并把 semantic final 发布到 `output/provenance/smart.json`,因此单独 rerun 08 只删除自身 final,不会删除必需输入。同一论文的 Qoder/Claude 对照必须使用两个独立 Job,禁止对同一 Job 并发 `rerun-smart`；两次换代会互相撤销且共享 canonical 输出,不能作为 A/B。
     `07_concepts` 从智能笔记选择概念,但模型自报 refs 一律清空,由服务端按原始 source segment 的
     `support_text` 逐字绑定每个概念。`08_review` 先把 smart semantic candidates 核验为最终 provenance,
     再统一评审原始 Document、解析质量、智能笔记和概念清单。质量报告先经 schema 校验和旧字段归一,

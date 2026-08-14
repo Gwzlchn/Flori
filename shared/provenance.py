@@ -14,17 +14,19 @@ from typing import Any, Callable, Mapping, Sequence
 
 
 SOURCE_MANIFEST_SCHEMA_VERSION = 2
-PROVENANCE_SCHEMA_VERSION = 3
+PROVENANCE_SCHEMA_VERSION = 4
 SUPPORTED_SOURCE_MANIFEST_SCHEMA_VERSIONS = {1, SOURCE_MANIFEST_SCHEMA_VERSION}
-SUPPORTED_PROVENANCE_SCHEMA_VERSIONS = {1, 2, PROVENANCE_SCHEMA_VERSION}
+SUPPORTED_PROVENANCE_SCHEMA_VERSIONS = {1, 2, 3, PROVENANCE_SCHEMA_VERSION}
 MAX_PROVENANCE_BYTES = 8 * 1024 * 1024
 MAX_SOURCE_ARTIFACTS = 128
 MAX_SOURCE_SEGMENTS = 20_000
 MAX_NOTE_MAPPINGS = 20_000
 MAX_SUPPORT_TEXT_BYTES = 4096
-MAX_SEMANTIC_CANDIDATES = 100
+MAX_SEMANTIC_CANDIDATES = 512
+MAX_SEMANTIC_CANDIDATES_PER_BATCH = 100
+MAX_SEMANTIC_ATTESTATION_BATCHES = 32
 MAX_SEMANTIC_ATTESTATION_PROMPT_BYTES = 64 * 1024
-SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION = 3
+SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION = 4
 # 语义存证绑定的 ai_log 只认这个前缀;恢复侧 evidence_contract 会按该路径重读文件,
 # 所以它同时是"备份必须捞到"的契约路径。产出侧 shared/step_ai.py 与产物声明共用此常量。
 SEMANTIC_AI_LOG_PREFIX = "output/ai_logs/"
@@ -39,7 +41,9 @@ _SEMANTIC_PROMPT_BUDGET_ERROR = (
 DIRECT_LOCATOR_POLICY = "direct_locator_v1"
 EXACT_QUOTE_POLICY = "exact_quote_v1"
 SEMANTIC_ATTESTATION_POLICY = "semantic_attestation_v1"
-SEMANTIC_ATTESTATION_SCHEMA_VERSION = 1
+GROUPED_SEMANTIC_ATTESTATION_POLICY = "grouped_semantic_attestation_v1"
+SEMANTIC_ATTESTATION_SCHEMA_VERSION = 2
+MAX_SEMANTIC_SOURCE_SEGMENTS = 32
 SEMANTIC_ATTESTATION_MIN_CONFIDENCE_PPM = 950_000
 SEMANTIC_BATCH_COMMIT_PATH = "output/provenance/semantic_batch.json"
 
@@ -78,7 +82,7 @@ _PROVENANCE_SEGMENT_KEYS_V2 = _PROVENANCE_SEGMENT_KEYS_V1 | {
 _PROVENANCE_SEGMENT_KEYS_V3_SEMANTIC = _PROVENANCE_SEGMENT_KEYS_V2 | {
     "attestation",
 }
-_SEMANTIC_ATTESTATION_KEYS = {
+_SEMANTIC_ATTESTATION_KEYS_V1 = {
     "schema_version", "decision", "confidence_ppm", "transform_kind",
     "candidate_id", "job_id", "note_type", "note_sha256",
     "source_manifest_sha256", "batch_id",
@@ -87,6 +91,14 @@ _SEMANTIC_ATTESTATION_KEYS = {
     "producer_component", "producer_invocation_id", "attestor_component",
     "attestor_invocation_id", "attestor", "ai_log",
     "reason_codes", "critical_facts",
+}
+_SEMANTIC_ATTESTATION_KEYS_V2 = (
+    _SEMANTIC_ATTESTATION_KEYS_V1
+    - {"source_segment_id", "source_support_sha256", "source_locator_sha256"}
+    | {"source_segment_ids", "source_group_sha256", "source_members"}
+)
+_SEMANTIC_SOURCE_MEMBER_KEYS = {
+    "source_segment_id", "source_support_sha256", "source_locator_sha256",
 }
 _SEMANTIC_ATTESTOR_KEYS = {"kind", "provider", "model", "prompt_sha256"}
 _SEMANTIC_AI_LOG_KEYS = {
@@ -112,15 +124,21 @@ _CANDIDATE_MANIFEST_KEYS = {
     "schema_version", "status", "job_id", "note_type", "note_artifact", "note_sha256",
     "source_manifest", "source_manifest_sha256", "candidates",
 }
-_CANDIDATE_KEYS = {
+_CANDIDATE_KEYS_V2 = {
     "candidate_id", "anchor", "prefix", "suffix", "section",
     "source_segment_id", "transform_kind", "producer_component",
     "producer_invocation_id",
 }
-_SEMANTIC_BATCH_KEYS = {
+_CANDIDATE_KEYS_V3 = (
+    _CANDIDATE_KEYS_V2 - {"source_segment_id"} | {"source_segment_ids"}
+)
+_SEMANTIC_BATCH_KEYS_V1 = {
     "schema_version", "job_id", "pipeline", "batch_id", "attestor_component",
     "candidate_manifests", "provenance_manifests", "ai_log",
 }
+_SEMANTIC_BATCH_KEYS_V2 = (
+    _SEMANTIC_BATCH_KEYS_V1 - {"ai_log"} | {"ai_logs"}
+)
 _SEMANTIC_BATCH_ARTIFACT_KEYS = {"note_type", "path", "sha256"}
 _QUANTITY_RE = re.compile(
     r"(?<![\w.])(?P<currency>[¥￥$€£]?)\s*(?P<sign>[+\-−]?)\s*"
@@ -214,6 +232,42 @@ def validate_source_segment_id(value: Any) -> str:
     if type(value) is not str or _ID_RE.fullmatch(value) is None:
         raise ValueError("source segment id is invalid")
     return value
+
+
+def _validate_semantic_source_segment_ids(value: Any, *, field: str) -> list[str]:
+    if type(value) is not list or not 1 <= len(value) <= MAX_SEMANTIC_SOURCE_SEGMENTS:
+        raise ValueError(
+            f"{field} must contain 1..{MAX_SEMANTIC_SOURCE_SEGMENTS} source segments"
+        )
+    refs = [validate_source_segment_id(item) for item in value]
+    if len(refs) != len(set(refs)):
+        raise ValueError(f"{field} must be ordered and unique")
+    return refs
+
+
+def _candidate_source_segment_ids(candidate: Mapping[str, Any]) -> list[str]:
+    if "source_segment_ids" in candidate:
+        value = candidate["source_segment_ids"]
+    else:
+        value = [candidate.get("source_segment_id")]
+    return _validate_semantic_source_segment_ids(
+        value, field="semantic candidate source_segment_ids",
+    )
+
+
+def _source_ids_in_manifest_order(
+    refs: Sequence[str],
+    source_manifest: Mapping[str, Any],
+    *,
+    field: str,
+) -> list[str]:
+    order = {
+        str(item["segment_id"]): index
+        for index, item in enumerate(source_manifest["segments"])
+    }
+    if any(ref not in order for ref in refs):
+        raise ValueError(f"{field} contains an unknown source segment")
+    return sorted(refs, key=order.__getitem__)
 
 
 def make_segment_id(
@@ -377,13 +431,20 @@ def build_provenance_manifest(
         ),
     } for segment in segments]
     uses_semantic_attestation = any(
-        segment.get("verification_policy") == SEMANTIC_ATTESTATION_POLICY
+        segment.get("verification_policy") in {
+            SEMANTIC_ATTESTATION_POLICY, GROUPED_SEMANTIC_ATTESTATION_POLICY,
+        }
         or "attestation" in segment
+        for segment in normalized_segments
+    )
+    uses_grouped_attestation = any(
+        segment.get("verification_policy") == GROUPED_SEMANTIC_ATTESTATION_POLICY
         for segment in normalized_segments
     )
     manifest = _json_copy({
         "schema_version": (
-            PROVENANCE_SCHEMA_VERSION if uses_semantic_attestation else 2
+            PROVENANCE_SCHEMA_VERSION
+            if uses_grouped_attestation else 3 if uses_semantic_attestation else 2
         ),
         "job_id": job_id,
         "note_type": note_type,
@@ -453,7 +514,10 @@ def validate_provenance_manifest(
         if (
             schema_version >= 3
             and (
-                segment.get("verification_policy") == SEMANTIC_ATTESTATION_POLICY
+                segment.get("verification_policy") in {
+                    SEMANTIC_ATTESTATION_POLICY,
+                    GROUPED_SEMANTIC_ATTESTATION_POLICY,
+                }
                 or "attestation" in segment
             )
         ):
@@ -483,22 +547,27 @@ def validate_provenance_manifest(
             if policy not in {
                 DIRECT_LOCATOR_POLICY,
                 EXACT_QUOTE_POLICY,
-                SEMANTIC_ATTESTATION_POLICY,
+                SEMANTIC_ATTESTATION_POLICY, GROUPED_SEMANTIC_ATTESTATION_POLICY,
             }:
                 raise ValueError(f"{label}.verification_policy is unsupported")
-            if note_type == "translated" and policy != SEMANTIC_ATTESTATION_POLICY:
+            if note_type == "translated" and policy not in {
+                SEMANTIC_ATTESTATION_POLICY, GROUPED_SEMANTIC_ATTESTATION_POLICY,
+            }:
                 raise ValueError(
                     f"{label} translated provenance requires cross-language attestation"
                 )
             if note_type == "smart" and policy not in {
                 EXACT_QUOTE_POLICY, SEMANTIC_ATTESTATION_POLICY,
+                GROUPED_SEMANTIC_ATTESTATION_POLICY,
             }:
                 raise ValueError(
                     f"{label} smart mapping requires exact_quote_v1 or semantic attestation"
                 )
             if policy == EXACT_QUOTE_POLICY:
                 validate_exact_quote_mapping(segment, validated_source, field=label)
-            elif policy == SEMANTIC_ATTESTATION_POLICY:
+            elif policy in {
+                SEMANTIC_ATTESTATION_POLICY, GROUPED_SEMANTIC_ATTESTATION_POLICY,
+            }:
                 if schema_version < 3:
                     raise ValueError(f"{label} semantic attestation requires provenance v3")
                 validate_semantic_attestation_mapping(
@@ -589,7 +658,7 @@ def build_semantic_attestation_mapping(
     prefix: str,
     suffix: str,
     section: str | None,
-    source_segment_id: str,
+    source_segment_id: str | None,
     source_manifest: Mapping[str, Any],
     transform_kind: str,
     producer_component: str,
@@ -609,8 +678,9 @@ def build_semantic_attestation_mapping(
     decision: str,
     confidence_ppm: int,
     reason_codes: Sequence[str],
+    source_segment_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    """把独立调用的判断绑定到实际 claim 与 canonical source,不接收自报 hash。"""
+    """把独立调用绑定到完整 source 组;单成员仍兼容既有语义证明。"""
     validated_source = validate_source_manifest(source_manifest)
     candidate_id = _require_id(candidate_id, "semantic candidate_id")
     if not candidate_id.startswith("cand_") or _SHA256_RE.fullmatch(
@@ -626,19 +696,37 @@ def build_semantic_attestation_mapping(
     _require_sha256(batch_id, "semantic batch_id")
     if validated_source["job_id"] != job_id:
         raise ValueError("semantic attestation source belongs to another job")
-    source_segment_id = validate_source_segment_id(source_segment_id)
-    segment = next(
-        (
-            item for item in validated_source["segments"]
-            if item["segment_id"] == source_segment_id
-        ),
-        None,
+    if source_segment_ids is not None and source_segment_id is not None:
+        raise ValueError("semantic attestation has conflicting source fields")
+    raw_refs = (
+        list(source_segment_ids)
+        if source_segment_ids is not None else [source_segment_id]
     )
-    if segment is None:
-        raise ValueError("semantic attestation source segment is unknown")
-    support = segment.get("support_text")
-    if type(support) is not str or not support.strip():
-        raise ValueError("semantic attestation source support is unavailable")
+    refs = _validate_semantic_source_segment_ids(
+        raw_refs, field="semantic attestation source_segment_ids",
+    )
+    refs = _source_ids_in_manifest_order(
+        refs, validated_source, field="semantic attestation source_segment_ids",
+    )
+    by_id = {item["segment_id"]: item for item in validated_source["segments"]}
+    segments = []
+    source_members = []
+    for ref in refs:
+        segment = by_id.get(ref)
+        if segment is None:
+            raise ValueError("semantic attestation source segment is unknown")
+        support = segment.get("support_text")
+        if type(support) is not str or not support.strip():
+            raise ValueError("semantic attestation source support is unavailable")
+        segments.append(segment)
+        source_members.append({
+            "source_segment_id": ref,
+            "source_support_sha256": sha256_bytes(support.encode("utf-8")),
+            "source_locator_sha256": sha256_bytes(
+                canonical_json(segment["locator"]).encode("utf-8")
+            ),
+        })
+    combined_support = "\n\n".join(str(item["support_text"]) for item in segments)
     anchor = _require_nonempty_text(anchor, "semantic attestation claim")
     _require_text(prefix, "semantic attestation prefix")
     _require_text(suffix, "semantic attestation suffix")
@@ -688,8 +776,13 @@ def build_semantic_attestation_mapping(
             "semantic attestation requires semantic_equivalent and critical_facts_match"
         )
 
-    critical = _semantic_critical_facts(anchor, support)
-    _require_semantic_critical_match(critical, field="semantic attestation")
+    critical = _semantic_critical_facts(anchor, combined_support)
+    if len(refs) == 1:
+        _require_semantic_critical_match(critical, field="semantic attestation")
+    else:
+        _require_grouped_semantic_critical_match(
+            critical, field="grouped semantic attestation",
+        )
     ai_log = _validate_semantic_ai_log_binding(ai_log_binding)
 
     mapping = {
@@ -697,8 +790,11 @@ def build_semantic_attestation_mapping(
         "prefix": prefix,
         "suffix": suffix,
         "section": section,
-        "source_segment_ids": [source_segment_id],
-        "verification_policy": SEMANTIC_ATTESTATION_POLICY,
+        "source_segment_ids": refs,
+        "verification_policy": (
+            SEMANTIC_ATTESTATION_POLICY
+            if len(refs) == 1 else GROUPED_SEMANTIC_ATTESTATION_POLICY
+        ),
         "attestation": {
             "schema_version": SEMANTIC_ATTESTATION_SCHEMA_VERSION,
             "decision": decision,
@@ -711,12 +807,15 @@ def build_semantic_attestation_mapping(
             "source_manifest_sha256": source_manifest_sha256,
             "batch_id": batch_id,
             "claim_sha256": sha256_bytes(anchor.encode("utf-8")),
-            "source_segment_id": source_segment_id,
-            "source_support_sha256": sha256_bytes(support.encode("utf-8")),
-            "source_locator_sha256": sha256_bytes(
-                canonical_json(segment["locator"]).encode("utf-8")
+            "source_segment_ids": refs,
+            "source_group_sha256": sha256_bytes(
+                canonical_json_bytes(source_members)
             ),
-            "policy_id": SEMANTIC_ATTESTATION_POLICY,
+            "source_members": source_members,
+            "policy_id": (
+                SEMANTIC_ATTESTATION_POLICY
+                if len(refs) == 1 else GROUPED_SEMANTIC_ATTESTATION_POLICY
+            ),
             "policy_version": 1,
             "producer_component": producer_component,
             "producer_invocation_id": producer_invocation_id,
@@ -744,18 +843,37 @@ def validate_semantic_attestation_mapping(
     field: str = "provenance segment",
 ) -> None:
     """重算语义证明绑定;证明字段、策略或 canonical source 漂移即失效。"""
-    if mapping.get("verification_policy") != SEMANTIC_ATTESTATION_POLICY:
+    policy = mapping.get("verification_policy")
+    if policy not in {
+        SEMANTIC_ATTESTATION_POLICY, GROUPED_SEMANTIC_ATTESTATION_POLICY,
+    }:
         raise ValueError(f"{field}.verification_policy is unsupported")
     refs = mapping.get("source_segment_ids")
-    if type(refs) is not list or len(refs) != 1:
-        raise ValueError(f"{field} semantic attestation requires one source segment")
+    refs = _validate_semantic_source_segment_ids(
+        refs, field=f"{field}.source_segment_ids",
+    )
+    if refs != _source_ids_in_manifest_order(
+        refs, source_manifest, field=f"{field}.source_segment_ids",
+    ):
+        raise ValueError(f"{field}.source_segment_ids order is not canonical")
+    if policy == SEMANTIC_ATTESTATION_POLICY and len(refs) != 1:
+        raise ValueError(f"{field} single semantic attestation requires one source segment")
+    if policy == GROUPED_SEMANTIC_ATTESTATION_POLICY and len(refs) < 2:
+        raise ValueError(f"{field} grouped semantic attestation requires multiple sources")
     attestation = mapping.get("attestation")
     _require_mapping(attestation, f"{field}.attestation")
-    _require_exact_keys(
-        attestation, _SEMANTIC_ATTESTATION_KEYS, f"{field}.attestation",
-    )
-    if attestation["schema_version"] != SEMANTIC_ATTESTATION_SCHEMA_VERSION:
+    attestation_schema = attestation.get("schema_version")
+    if attestation_schema == 1:
+        if policy != SEMANTIC_ATTESTATION_POLICY or len(refs) != 1:
+            raise ValueError(f"{field} legacy semantic attestation cannot prove a group")
+        attestation_keys = _SEMANTIC_ATTESTATION_KEYS_V1
+    elif attestation_schema == SEMANTIC_ATTESTATION_SCHEMA_VERSION:
+        attestation_keys = _SEMANTIC_ATTESTATION_KEYS_V2
+    else:
         raise ValueError(f"{field} semantic attestation schema is unsupported")
+    _require_exact_keys(
+        attestation, attestation_keys, f"{field}.attestation",
+    )
     if attestation["decision"] != "supported":
         raise ValueError(f"{field} semantic attestation decision must be supported")
     confidence = attestation["confidence_ppm"]
@@ -766,7 +884,7 @@ def validate_semantic_attestation_mapping(
         raise ValueError(f"{field} semantic attestation confidence is below policy")
     if attestation["transform_kind"] not in _SEMANTIC_TRANSFORM_KINDS:
         raise ValueError(f"{field} semantic attestation transform kind is unsupported")
-    if attestation["policy_id"] != SEMANTIC_ATTESTATION_POLICY:
+    if attestation["policy_id"] != policy:
         raise ValueError(f"{field} semantic attestation policy is invalid")
     if attestation["policy_version"] != 1:
         raise ValueError(f"{field} semantic attestation policy version is invalid")
@@ -827,42 +945,71 @@ def validate_semantic_attestation_mapping(
     if len(reasons) != len(set(reasons)) or set(reasons) != _SEMANTIC_REASON_CODES:
         raise ValueError(f"{field} semantic attestation reason codes are invalid")
 
-    segment_id = refs[0]
-    if attestation["source_segment_id"] != segment_id:
-        raise ValueError(f"{field} semantic attestation source binding changed")
-    segment = next(
-        (
-            item for item in source_manifest.get("segments", [])
-            if item.get("segment_id") == segment_id
-        ),
-        None,
-    )
-    if segment is None:
-        raise ValueError(f"{field} semantic attestation source is missing")
-    support = segment.get("support_text")
-    if type(support) is not str or not support.strip():
-        raise ValueError(f"{field} semantic attestation source support is unavailable")
+    source_by_id = {
+        item.get("segment_id"): item for item in source_manifest.get("segments", [])
+        if isinstance(item, Mapping)
+    }
+    segments = []
+    expected_members = []
+    for segment_id in refs:
+        segment = source_by_id.get(segment_id)
+        if segment is None:
+            raise ValueError(f"{field} semantic attestation source is missing")
+        support = segment.get("support_text")
+        if type(support) is not str or not support.strip():
+            raise ValueError(f"{field} semantic attestation source support is unavailable")
+        segments.append(segment)
+        expected_members.append({
+            "source_segment_id": segment_id,
+            "source_support_sha256": sha256_bytes(support.encode("utf-8")),
+            "source_locator_sha256": sha256_bytes(
+                canonical_json(segment["locator"]).encode("utf-8")
+            ),
+        })
+    if attestation_schema == 1:
+        member = expected_members[0]
+        if attestation["source_segment_id"] != refs[0]:
+            raise ValueError(f"{field} semantic attestation source binding changed")
+        if attestation["source_support_sha256"] != member["source_support_sha256"]:
+            raise ValueError(f"{field} semantic attestation source support changed")
+        if attestation["source_locator_sha256"] != member["source_locator_sha256"]:
+            raise ValueError(f"{field} semantic attestation source locator changed")
+    else:
+        if attestation["source_segment_ids"] != refs:
+            raise ValueError(f"{field} semantic attestation source group changed")
+        members = _require_list(
+            attestation["source_members"], f"{field}.source_members", nonempty=True,
+        )
+        for index, member in enumerate(members):
+            _require_mapping(member, f"{field}.source_members[{index}]")
+            _require_exact_keys(
+                member, _SEMANTIC_SOURCE_MEMBER_KEYS,
+                f"{field}.source_members[{index}]",
+            )
+        if canonical_json(members) != canonical_json(expected_members):
+            raise ValueError(f"{field} semantic attestation source member changed")
+        if attestation["source_group_sha256"] != sha256_bytes(
+            canonical_json_bytes(expected_members)
+        ):
+            raise ValueError(f"{field} semantic attestation source group changed")
     anchor = mapping.get("anchor")
     if type(anchor) is not str or not anchor.strip():
         raise ValueError(f"{field} semantic attestation claim is invalid")
     if attestation["claim_sha256"] != sha256_bytes(anchor.encode("utf-8")):
         raise ValueError(f"{field} semantic attestation claim binding changed")
-    if attestation["source_support_sha256"] != sha256_bytes(support.encode("utf-8")):
-        raise ValueError(f"{field} semantic attestation source support changed")
-    expected_locator_sha = sha256_bytes(
-        canonical_json(segment["locator"]).encode("utf-8")
-    )
-    if attestation["source_locator_sha256"] != expected_locator_sha:
-        raise ValueError(f"{field} semantic attestation source locator changed")
-
     critical = _require_mapping(
         attestation["critical_facts"], f"{field}.critical_facts",
     )
     _require_exact_keys(
         critical, _SEMANTIC_CRITICAL_FACT_KEYS, f"{field}.critical_facts",
     )
-    expected_critical = _semantic_critical_facts(anchor, support)
-    _require_semantic_critical_match(expected_critical, field=field)
+    expected_critical = _semantic_critical_facts(
+        anchor, "\n\n".join(str(item["support_text"]) for item in segments),
+    )
+    if policy == GROUPED_SEMANTIC_ATTESTATION_POLICY:
+        _require_grouped_semantic_critical_match(expected_critical, field=field)
+    else:
+        _require_semantic_critical_match(expected_critical, field=field)
     if canonical_json(dict(critical)) != canonical_json(expected_critical):
         raise ValueError(f"{field} semantic attestation critical facts changed")
 
@@ -927,6 +1074,23 @@ def _require_semantic_critical_match(critical: Mapping[str, Any], *, field: str)
             raise ValueError(f"{field} {label} conflict")
 
 
+def _require_grouped_semantic_critical_match(
+    critical: Mapping[str, Any], *, field: str,
+) -> None:
+    for suffix, label in (
+        ("quantity_tokens", "quantity or unit"),
+        ("range_tokens", "range"),
+        ("polarity_tokens", "polarity"),
+        ("subject_tokens", "subject"),
+    ):
+        claim = critical[f"claim_{suffix}"]
+        source = critical[f"source_{suffix}"]
+        if any(claim.count(token) > source.count(token) for token in set(claim)):
+            raise ValueError(f"{field} {label} conflict")
+    if critical["claim_negation_count"] != critical["source_negation_count"]:
+        raise ValueError(f"{field} negation conflict")
+
+
 def _validate_semantic_ai_log_binding(
     value: Mapping[str, Any], *, field: str = "semantic ai_log",
 ) -> dict[str, Any]:
@@ -964,11 +1128,27 @@ def build_provenance_candidate_manifest(
 ) -> dict[str, Any]:
     """固化 producer 候选但不接受 decision/attestor 字段。"""
     validated_source = validate_source_manifest(source_manifest)
+    source_order = {
+        str(item["segment_id"]): index
+        for index, item in enumerate(validated_source["segments"])
+    }
     normalized: list[dict[str, Any]] = []
     for candidate in candidates:
         raw = dict(candidate)
         raw.pop("candidate_id", None)
-        required = _CANDIDATE_KEYS - {"candidate_id"}
+        legacy_source = raw.pop("source_segment_id", None)
+        if legacy_source is not None:
+            if "source_segment_ids" in raw:
+                raise ValueError("semantic candidate has conflicting source fields")
+            raw["source_segment_ids"] = [legacy_source]
+        raw_refs = _validate_semantic_source_segment_ids(
+            raw.get("source_segment_ids"),
+            field="semantic candidate input.source_segment_ids",
+        )
+        if any(ref not in source_order for ref in raw_refs):
+            raise ValueError("semantic candidate source is missing")
+        raw["source_segment_ids"] = sorted(raw_refs, key=source_order.__getitem__)
+        required = _CANDIDATE_KEYS_V3 - {"candidate_id"}
         _require_exact_keys(raw, required, "semantic candidate input")
         identity = {
             "job_id": job_id,
@@ -983,7 +1163,7 @@ def build_provenance_candidate_manifest(
             **raw,
         })
     manifest = _json_copy({
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "ready" if normalized else "empty",
         "job_id": job_id,
         "note_type": note_type,
@@ -1016,7 +1196,8 @@ def validate_provenance_candidate_manifest(
     _require_exact_keys(
         manifest, _CANDIDATE_MANIFEST_KEYS, "semantic candidate manifest",
     )
-    if manifest["schema_version"] != 2:
+    schema_version = manifest["schema_version"]
+    if schema_version not in {2, 3}:
         raise ValueError("semantic candidate schema is unsupported")
     if manifest["status"] not in {"ready", "empty", "no_source"}:
         raise ValueError("semantic candidate status is invalid")
@@ -1068,11 +1249,14 @@ def validate_provenance_candidate_manifest(
     if bool(candidates) != (manifest["status"] == "ready"):
         raise ValueError("semantic candidate status does not match candidates")
     seen_ids: set[str] = set()
-    seen_pairs: set[tuple[str, str]] = set()
+    seen_pairs: set[tuple[str, tuple[str, ...]]] = set()
     for index, candidate in enumerate(candidates):
         label = f"semantic candidates[{index}]"
         _require_mapping(candidate, label)
-        _require_exact_keys(candidate, _CANDIDATE_KEYS, label)
+        candidate_keys = (
+            _CANDIDATE_KEYS_V2 if schema_version == 2 else _CANDIDATE_KEYS_V3
+        )
+        _require_exact_keys(candidate, candidate_keys, label)
         candidate_id = candidate["candidate_id"]
         if (
             type(candidate_id) is not str
@@ -1087,14 +1271,29 @@ def validate_provenance_candidate_manifest(
         prefix = _require_text(candidate["prefix"], f"{label}.prefix")
         suffix = _require_text(candidate["suffix"], f"{label}.suffix")
         _require_optional_text(candidate["section"], f"{label}.section", allow_empty=False)
-        source_segment_id = validate_source_segment_id(
-            candidate["source_segment_id"],
+        raw_source_ids = (
+            [candidate["source_segment_id"]]
+            if schema_version == 2 else candidate["source_segment_ids"]
         )
-        segment = source_segments.get(source_segment_id)
-        if segment is None:
-            raise ValueError(f"{label} semantic candidate source is missing")
-        if type(segment.get("support_text")) is not str:
-            raise ValueError(f"{label} semantic candidate source support is unavailable")
+        source_segment_ids = _validate_semantic_source_segment_ids(
+            raw_source_ids, field=f"{label}.source_segment_ids",
+        )
+        if schema_version == 3:
+            expected_order = _source_ids_in_manifest_order(
+                source_segment_ids,
+                validated_source,
+                field=f"{label}.source_segment_ids",
+            )
+            if source_segment_ids != expected_order:
+                raise ValueError(f"{label}.source_segment_ids order is not canonical")
+        for source_segment_id in source_segment_ids:
+            segment = source_segments.get(source_segment_id)
+            if segment is None:
+                raise ValueError(f"{label} semantic candidate source is missing")
+            if type(segment.get("support_text")) is not str:
+                raise ValueError(
+                    f"{label} semantic candidate source support is unavailable"
+                )
         if candidate["transform_kind"] not in _SEMANTIC_TRANSFORM_KINDS:
             raise ValueError(f"{label} semantic transform kind is unsupported")
         _require_id(candidate["producer_component"], f"{label}.producer_component")
@@ -1102,7 +1301,7 @@ def validate_provenance_candidate_manifest(
             candidate["producer_invocation_id"], f"{label}.producer_invocation_id",
         )
         _require_unique_anchor(normalized_body, anchor, prefix, suffix, label)
-        pair = (anchor, source_segment_id)
+        pair = (anchor, tuple(source_segment_ids))
         if pair in seen_pairs:
             raise ValueError("semantic candidate mapping is duplicated")
         seen_pairs.add(pair)
@@ -1110,7 +1309,7 @@ def validate_provenance_candidate_manifest(
             "job_id": job_id,
             "note_type": note_type,
             "note_sha256": manifest["note_sha256"],
-            **{key: candidate[key] for key in _CANDIDATE_KEYS - {"candidate_id"}},
+            **{key: candidate[key] for key in candidate_keys - {"candidate_id"}},
         }
         expected_id = "cand_" + sha256_bytes(
             canonical_json(expected_identity).encode("utf-8")
@@ -1151,9 +1350,12 @@ def semantic_attestation_batch_id(
     pipeline: str,
     attestor_component: str,
     candidate_manifests: Sequence[Mapping[str, Any]],
-    ai_log: Mapping[str, Any] | None,
+    ai_log: Mapping[str, Any] | None = None,
+    ai_logs: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     """批次身份不依赖待写 final,避免 commit manifest 与 final 循环哈希。"""
+    if ai_log is not None and ai_logs is not None:
+        raise ValueError("semantic batch has conflicting ai_log fields")
     identity = {
         "job_id": _require_id(job_id, "semantic batch job_id"),
         "pipeline": _require_id(pipeline, "semantic batch pipeline"),
@@ -1175,6 +1377,12 @@ def semantic_attestation_batch_id(
             }
         ),
     }
+    if ai_logs is not None:
+        identity.pop("ai_log")
+        identity["ai_logs"] = [{
+            key: value for key, value in _validate_semantic_ai_log_binding(item).items()
+            if key != "response_decision_sha256"
+        } for item in ai_logs]
     return sha256_bytes(canonical_json_bytes(identity))
 
 
@@ -1186,26 +1394,36 @@ def build_semantic_batch_commit(
     attestor_component: str,
     candidate_manifests: Sequence[Mapping[str, Any]],
     provenance_manifests: Sequence[Mapping[str, Any]],
-    ai_log: Mapping[str, Any] | None,
+    ai_log: Mapping[str, Any] | None = None,
+    ai_logs: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if ai_log is not None and ai_logs is not None:
+        raise ValueError("semantic batch has conflicting ai_log fields")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2 if ai_logs is not None else 1,
         "job_id": job_id,
         "pipeline": pipeline,
         "batch_id": batch_id,
         "attestor_component": attestor_component,
         "candidate_manifests": list(candidate_manifests),
         "provenance_manifests": list(provenance_manifests),
-        "ai_log": None if ai_log is None else dict(ai_log),
     }
+    if ai_logs is None:
+        manifest["ai_log"] = None if ai_log is None else dict(ai_log)
+    else:
+        manifest["ai_logs"] = [dict(item) for item in ai_logs]
     return validate_semantic_batch_commit(manifest)
 
 
 def validate_semantic_batch_commit(manifest: Mapping[str, Any]) -> dict[str, Any]:
     """验证事务提交清单形状;artifact 字节和 AI 日志由 canonical reader 重验。"""
     value = _require_mapping(manifest, "semantic batch commit")
-    _require_exact_keys(value, _SEMANTIC_BATCH_KEYS, "semantic batch commit")
-    if value["schema_version"] != 1:
+    schema_version = value.get("schema_version")
+    keys = (
+        _SEMANTIC_BATCH_KEYS_V1 if schema_version == 1 else _SEMANTIC_BATCH_KEYS_V2
+    )
+    _require_exact_keys(value, keys, "semantic batch commit")
+    if schema_version not in {1, 2}:
         raise ValueError("semantic batch schema is unsupported")
     _require_id(value["job_id"], "semantic batch job_id")
     _require_id(value["pipeline"], "semantic batch pipeline")
@@ -1235,10 +1453,17 @@ def validate_semantic_batch_commit(manifest: Mapping[str, Any]) -> dict[str, Any
         item["note_type"] for item in result["provenance_manifests"]
     }:
         raise ValueError("semantic batch artifact sets differ")
-    if value["ai_log"] is None:
+    if schema_version == 1 and value["ai_log"] is None:
         result["ai_log"] = None
-    else:
+    elif schema_version == 1:
         result["ai_log"] = _validate_semantic_ai_log_binding(value["ai_log"])
+    else:
+        logs = _require_list(value["ai_logs"], "semantic batch ai_logs", nonempty=False)
+        result["ai_logs"] = [
+            _validate_semantic_ai_log_binding(item) for item in logs
+        ]
+        if len({item["call_index"] for item in result["ai_logs"]}) != len(logs):
+            raise ValueError("semantic batch ai_log call_index is duplicated")
     return _json_copy(result)
 
 
@@ -1291,7 +1516,14 @@ def extract_attestable_markers(
             refs.append(known[token])
         clean_lines.append(clean_line)
         if refs:
-            pending.append((anchor, refs))
+            manifest_order = {
+                str(item["segment_id"]): index
+                for index, item in enumerate(validated_source["segments"])
+            }
+            pending.append((
+                anchor,
+                sorted(set(refs), key=manifest_order.__getitem__),
+            ))
 
     cleaned = "\n".join(clean_lines)
     normalized_body = markdown_to_index_text(cleaned)
@@ -1302,7 +1534,6 @@ def extract_attestable_markers(
             not anchor
             or normalized_body.count(anchor) != 1
             or not any(char.isalpha() for char in anchor)
-            or len(refs) != 1
         ):
             continue
         base = {
@@ -1313,7 +1544,7 @@ def extract_attestable_markers(
             "source_segment_ids": refs,
             "verification_policy": EXACT_QUOTE_POLICY,
         }
-        if not force_semantic:
+        if len(refs) == 1 and not force_semantic:
             try:
                 validate_exact_quote_mapping(base, validated_source)
             except ValueError:
@@ -1321,12 +1552,13 @@ def extract_attestable_markers(
             else:
                 exact.append(base)
                 continue
-        support = by_id[refs[0]].get("support_text")
-        if type(support) is not str or not support.strip():
+        supports = [by_id[ref].get("support_text") for ref in refs]
+        if any(type(support) is not str or not support.strip() for support in supports):
             continue
+        combined_support = "\n\n".join(str(support) for support in supports)
         transform_kind = "translated" if force_semantic else (
             "cross_language"
-            if _contains_cjk(anchor) != _contains_cjk(support)
+            if _contains_cjk(anchor) != _contains_cjk(combined_support)
             else "paraphrase"
         )
         semantic.append({
@@ -1334,7 +1566,7 @@ def extract_attestable_markers(
             "prefix": "",
             "suffix": "",
             "section": "translated" if force_semantic else "smart",
-            "source_segment_id": refs[0],
+            "source_segment_ids": refs,
             "transform_kind": transform_kind,
             "producer_component": producer_component,
             "producer_invocation_id": producer_invocation_id,
@@ -1351,7 +1583,7 @@ def semantic_attestation_decision_refs(
 ) -> list[dict[str, str]]:
     """按本批全局候选顺序生成短决策引用,并保留服务端映回关系。"""
     ids = list(candidate_ids)
-    if len(ids) > MAX_SEMANTIC_CANDIDATES:
+    if len(ids) > MAX_SEMANTIC_CANDIDATES_PER_BATCH:
         raise ValueError("semantic attestation decision refs exceed count limit")
     if (
         any(type(candidate_id) is not str or not candidate_id for candidate_id in ids)
@@ -1405,14 +1637,18 @@ def build_semantic_attestation_prompt(
     for ref, (manifest, candidate) in zip(
         refs, ordered_candidates, strict=True,
     ):
-        segment = source_segments[candidate["source_segment_id"]]
+        source_ids = _candidate_source_segment_ids(candidate)
+        sources = [source_segments[source_id] for source_id in source_ids]
         items.append({
             "decision_id": ref["decision_id"],
             "note_type": manifest["note_type"],
             "transform_kind": candidate["transform_kind"],
             "claim": candidate["anchor"],
-            "canonical_source": segment["support_text"],
-            "locator": segment["locator"],
+            "canonical_sources": [{
+                "source_segment_id": source_id,
+                "support_text": segment["support_text"],
+                "locator": segment["locator"],
+            } for source_id, segment in zip(source_ids, sources, strict=True)],
         })
     request = canonical_json({
         "schema_version": SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION,
@@ -1471,7 +1707,7 @@ def select_semantic_attestation_batch(
     prompt: str | None = None
     for note_type, candidate in ordered_candidates:
         candidate_id = str(candidate["candidate_id"])
-        if len(selected) >= MAX_SEMANTIC_CANDIDATES:
+        if len(selected) >= MAX_SEMANTIC_CANDIDATES_PER_BATCH:
             budget_rejected.append(candidate_id)
             continue
         attempted = [*selected, (note_type, candidate)]
@@ -1507,22 +1743,110 @@ def select_semantic_attestation_batch(
     }
 
 
-def materialize_semantic_attestations(
-    candidate_manifest: Mapping[str, Any],
+def select_semantic_attestation_batches(
+    candidate_manifests: Sequence[Mapping[str, Any]],
     source_manifest: Mapping[str, Any],
     *,
-    response_text: str,
-    attestor_component: str,
-    attestor_invocation_id: str,
-    attestor_provider: str,
-    attestor_model: str,
-    attestor_prompt: str,
-    ai_log_binding: Mapping[str, Any],
-    batch_id: str,
-    response_candidate_ids: Sequence[str] | None = None,
-    required_response_schema: int | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """严格解析独立响应;低置信和冲突只进拒绝诊断,不生成 mapping。"""
+    protocol: str,
+) -> list[dict[str, Any]]:
+    """把全部候选稳定装入有界调用;候选组不可拆,单组超预算即失败。"""
+    if not protocol.strip():
+        raise ValueError("semantic attestation protocol is empty")
+    note_type_order = {
+        note_type: index for index, note_type in enumerate(_SEMANTIC_NOTE_TYPES)
+    }
+    ordered: list[tuple[str, Mapping[str, Any]]] = []
+    seen_note_types: set[str] = set()
+    seen_ids: set[str] = set()
+    for manifest in sorted(
+        candidate_manifests,
+        key=lambda item: note_type_order.get(
+            str(item.get("note_type")), len(note_type_order),
+        ),
+    ):
+        note_type = manifest.get("note_type")
+        if note_type not in note_type_order or note_type in seen_note_types:
+            raise ValueError("semantic attestation manifest note_type is invalid")
+        seen_note_types.add(note_type)
+        candidates = manifest.get("candidates")
+        if type(candidates) is not list:
+            raise ValueError("semantic attestation manifest candidates are invalid")
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                raise ValueError("semantic attestation candidate is invalid")
+            candidate_id = candidate.get("candidate_id")
+            if type(candidate_id) is not str or candidate_id in seen_ids:
+                raise ValueError("semantic candidate id is duplicated across batch")
+            seen_ids.add(candidate_id)
+            ordered.append((str(note_type), candidate))
+    if len(ordered) > MAX_SEMANTIC_CANDIDATES:
+        raise ValueError("semantic attestation candidates exceed global limit")
+
+    def render(values: list[tuple[str, Mapping[str, Any]]]) -> str:
+        manifests = [{
+            "note_type": note_type,
+            "candidates": [
+                candidate for current_type, candidate in values
+                if current_type == note_type
+            ],
+        } for note_type in _SEMANTIC_NOTE_TYPES if any(
+            current_type == note_type for current_type, _candidate in values
+        )]
+        return build_semantic_attestation_prompt(
+            manifests, source_manifest, protocol=protocol,
+        )
+
+    batches: list[dict[str, Any]] = []
+    current: list[tuple[str, Mapping[str, Any]]] = []
+    current_prompt: str | None = None
+    for item in ordered:
+        attempted = [*current, item]
+        if len(attempted) <= MAX_SEMANTIC_CANDIDATES_PER_BATCH:
+            try:
+                attempted_prompt = render(attempted)
+            except ValueError as exc:
+                if str(exc) != _SEMANTIC_PROMPT_BUDGET_ERROR:
+                    raise
+            else:
+                current, current_prompt = attempted, attempted_prompt
+                continue
+        if not current or current_prompt is None:
+            raise ValueError("semantic attestation candidate group exceeds prompt budget")
+        batches.append({
+            "selected_candidate_ids": [
+                str(candidate["candidate_id"]) for _note_type, candidate in current
+            ],
+            "prompt": current_prompt,
+        })
+        if len(batches) >= MAX_SEMANTIC_ATTESTATION_BATCHES:
+            raise ValueError("semantic attestation batches exceed global limit")
+        try:
+            current_prompt = render([item])
+        except ValueError as exc:
+            if str(exc) == _SEMANTIC_PROMPT_BUDGET_ERROR:
+                raise ValueError(
+                    "semantic attestation candidate group exceeds prompt budget"
+                ) from exc
+            raise
+        current = [item]
+    if current:
+        assert current_prompt is not None
+        batches.append({
+            "selected_candidate_ids": [
+                str(candidate["candidate_id"]) for _note_type, candidate in current
+            ],
+            "prompt": current_prompt,
+        })
+    if len(batches) > MAX_SEMANTIC_ATTESTATION_BATCHES:
+        raise ValueError("semantic attestation batches exceed global limit")
+    return batches
+
+
+def validate_semantic_attestor_response(
+    response_text: str, expected_ids: Sequence[str],
+    *, required_response_schema: int | None = None,
+) -> tuple[list[Mapping[str, Any]], str, list[str]]:
+    """严格校验整批响应；调用调度可在补交下一批前复用同一结构门。"""
     try:
         response = json.loads(response_text)
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
@@ -1532,7 +1856,7 @@ def materialize_semantic_attestations(
     response_schema = response["schema_version"]
     if (
         type(response_schema) is not int
-        or response_schema not in {1, 2, SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION}
+        or response_schema not in {1, 2, 3, SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION}
         or (
             required_response_schema is not None
             and response_schema != required_response_schema
@@ -1540,13 +1864,8 @@ def materialize_semantic_attestations(
         or type(response["decisions"]) is not list
     ):
         raise ValueError("semantic attestor response schema is invalid")
-    candidates = candidate_manifest["candidates"]
     decisions = response["decisions"]
-    expected_ids = list(
-        [item["candidate_id"] for item in candidates]
-        if response_candidate_ids is None
-        else response_candidate_ids
-    )
+    expected_ids = list(expected_ids)
     if response_schema == SEMANTIC_ATTESTOR_RESPONSE_SCHEMA_VERSION:
         refs = semantic_attestation_decision_refs(expected_ids)
         identity_key = "decision_id"
@@ -1560,16 +1879,10 @@ def materialize_semantic_attestations(
     ]
     if len(decisions) != len(expected_ids) or actual_response_ids != expected_response_ids:
         raise ValueError("semantic attestor response is incomplete")
-    decision_by_id = dict(zip(expected_ids, decisions, strict=True))
-    identity_by_id = dict(zip(expected_ids, expected_response_ids, strict=True))
-    accepted: list[dict[str, Any]] = []
-    rejected: list[dict[str, Any]] = []
-    selected_ids = set(expected_ids)
-    for candidate in candidates:
-        if candidate["candidate_id"] not in selected_ids:
-            continue
-        decision = decision_by_id[candidate["candidate_id"]]
-        expected_identity = identity_by_id[candidate["candidate_id"]]
+    validated: list[Mapping[str, Any]] = []
+    for decision, expected_identity in zip(
+        decisions, expected_response_ids, strict=True,
+    ):
         if (
             not isinstance(decision, Mapping)
             or set(decision) != {
@@ -1591,6 +1904,54 @@ def materialize_semantic_attestations(
             or len(reasons) != len(set(reasons))
         ):
             raise ValueError("semantic attestor decision values are invalid")
+        if outcome == "rejected" and not set(reasons).issubset(
+            _SEMANTIC_REJECTION_CODES
+        ):
+            raise ValueError("semantic attestor rejection reason is invalid")
+        validated.append(decision)
+    return validated, identity_key, expected_response_ids
+
+
+def materialize_semantic_attestations(
+    candidate_manifest: Mapping[str, Any],
+    source_manifest: Mapping[str, Any],
+    *,
+    response_text: str,
+    attestor_component: str,
+    attestor_invocation_id: str,
+    attestor_provider: str,
+    attestor_model: str,
+    attestor_prompt: str,
+    ai_log_binding: Mapping[str, Any],
+    batch_id: str,
+    response_candidate_ids: Sequence[str] | None = None,
+    required_response_schema: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """严格解析独立响应;低置信和冲突只进拒绝诊断,不生成 mapping。"""
+    candidates = candidate_manifest["candidates"]
+    expected_ids = list(
+        [item["candidate_id"] for item in candidates]
+        if response_candidate_ids is None
+        else response_candidate_ids
+    )
+    decisions, identity_key, expected_response_ids = validate_semantic_attestor_response(
+        response_text, expected_ids,
+        required_response_schema=required_response_schema,
+    )
+    decision_by_id = dict(zip(expected_ids, decisions, strict=True))
+    identity_by_id = dict(zip(expected_ids, expected_response_ids, strict=True))
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    selected_ids = set(expected_ids)
+    for candidate in candidates:
+        if candidate["candidate_id"] not in selected_ids:
+            continue
+        decision = decision_by_id[candidate["candidate_id"]]
+        expected_identity = identity_by_id[candidate["candidate_id"]]
+        assert decision.get(identity_key) == expected_identity
+        outcome = decision.get("decision")
+        confidence = decision.get("confidence_ppm")
+        reasons = decision.get("reason_codes")
         if outcome == "supported":
             if (
                 confidence < SEMANTIC_ATTESTATION_MIN_CONFIDENCE_PPM
@@ -1607,7 +1968,8 @@ def materialize_semantic_attestations(
                     prefix=candidate["prefix"],
                     suffix=candidate["suffix"],
                     section=candidate["section"],
-                    source_segment_id=candidate["source_segment_id"],
+                    source_segment_id=None,
+                    source_segment_ids=_candidate_source_segment_ids(candidate),
                     source_manifest=source_manifest,
                     transform_kind=candidate["transform_kind"],
                     producer_component=candidate["producer_component"],
@@ -1641,8 +2003,6 @@ def materialize_semantic_attestations(
                 continue
             accepted.append(mapping)
         else:
-            if not set(reasons).issubset(_SEMANTIC_REJECTION_CODES):
-                raise ValueError("semantic attestor rejection reason is invalid")
             rejected.append({
                 "candidate_id": candidate["candidate_id"],
                 "reason": ",".join(reasons),

@@ -427,9 +427,16 @@ def _copy_stable_tree(
 
 
 def _base_data_excluded(rel: Path) -> bool:
-    # Worker 模型缓存可重建且按上游约定包含同树相对 symlink。把它当持久资产会让
-    # fail-closed 的归档路径门拒绝整代备份,也会无意义放大每代体积。
+    # Worker 缓存和 CLI 原生日志都可重建,且上游会在其中维护相对 symlink。
+    # 身份、认证和产品 AI 审计不在这两棵子树,仍必须进入 exact DR。
     if len(rel.parts) >= 3 and rel.parts[0] == "workers" and rel.parts[2] == ".cache":
+        return True
+    if (
+        len(rel.parts) >= 4
+        and rel.parts[0] == "workers"
+        and rel.parts[2] == ".qoder"
+        and rel.parts[3] == "logs"
+    ):
         return True
     return rel.as_posix() in {
         "db/analyzer.db",
@@ -950,6 +957,7 @@ def create_snapshot(
         )
         manifest["assets"]["data"]["excluded_runtime_subtrees"] = [
             "workers/*/.cache",
+            "workers/*/.qoder/logs",
         ]
         if minio_root is not None:
             manifest["assets"]["minio"]["excluded_external_subtrees"] = sorted(

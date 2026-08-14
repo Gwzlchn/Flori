@@ -266,8 +266,8 @@ class ConceptsStep(StepBase):
         retained = [
             dict(item) for item in key_terms
             if isinstance(item, dict)
-            and isinstance(item.get("evidence_source_segment_ids"), list)
-            and bool(item["evidence_source_segment_ids"])
+            and isinstance(item.get("evidence_source_segment_groups"), list)
+            and bool(item["evidence_source_segment_groups"])
         ]
         names = {
             item.get("term") for item in retained

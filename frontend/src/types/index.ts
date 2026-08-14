@@ -568,6 +568,15 @@ export interface CanonicalEvidenceLink {
   label: string
 }
 
+export interface CanonicalEvidenceSourceProjection {
+  ordinal: number
+  source_ref: string
+  source_segment_id: string
+  source_fingerprint: string
+  locator: CanonicalEvidenceLocator
+  link: CanonicalEvidenceLink
+}
+
 // GET/POST /api/evidence/* 的唯一消费者投影。stale/missing 的 locator/link 必须为 null。
 export interface CanonicalEvidenceProjection {
   evidence_id: string
@@ -579,6 +588,8 @@ export interface CanonicalEvidenceProjection {
   section: string | null
   evidence_fingerprint: string | null
   source_fingerprint: string | null
+  source_group_fingerprint?: string | null
+  sources?: CanonicalEvidenceSourceProjection[]
   locator: CanonicalEvidenceLocator | null
   link: CanonicalEvidenceLink | null
   validated_at: string | null
@@ -651,6 +662,8 @@ export interface ConceptEvidence {
   content_type: string
   document_kind: string | null
   source_fingerprint: string | null
+  source_group_fingerprint: string | null
+  sources: CanonicalEvidenceSourceProjection[]
   note_type: string | null
   chunk_id: string | null
   section: string | null

@@ -143,7 +143,7 @@ class _DBStub:
         )
         self.calls: list[dict] = []
         self.relations: list[dict] = []
-        self.canonical_by_segment: dict[str, list[str]] = {}
+        self.canonical_by_group: dict[tuple[str, ...], list[str]] = {}
         self.canonical_queries: list[dict] = []
         self.occurrence_replacements: list[dict] = []
         self.occurrence_projection_sources: dict[str, str] = {}
@@ -182,17 +182,17 @@ class _DBStub:
         self.relations.append({"domain": domain, "term": term, "relations": relations})
         return len(relations)
 
-    def canonical_evidence_ids_for_source_segments(
-        self, *, job_id, note_type, source_segment_ids,
+    def canonical_evidence_ids_for_source_groups(
+        self, *, job_id, note_type, source_segment_groups,
     ):
         self.canonical_queries.append({
             "job_id": job_id,
             "note_type": note_type,
-            "source_segment_ids": list(source_segment_ids),
+            "source_segment_groups": list(source_segment_groups),
         })
         return {
-            segment_id: list(self.canonical_by_segment.get(segment_id, []))
-            for segment_id in source_segment_ids
+            tuple(group): list(self.canonical_by_group.get(tuple(group), []))
+            for group in source_segment_groups
         }
 
     def replace_job_concept_occurrences(
@@ -454,12 +454,12 @@ async def test_concept_source_segments_resolve_to_canonical_occurrences():
             "term": "Transformer",
             "definition": "d",
             "evidence_source_segment_ids": [_SEGMENT_A, _SEGMENT_B],
+            "evidence_source_segment_groups": [[_SEGMENT_A, _SEGMENT_B]],
         }],
     }
     db = _DBStub(domain="dl")
-    db.canonical_by_segment = {
-        _SEGMENT_A: ["ev-a"],
-        _SEGMENT_B: ["ev-b", "ev-a"],
+    db.canonical_by_group = {
+        (_SEGMENT_A, _SEGMENT_B): ["ev-joint"],
     }
     engine = _make_engine(_ConceptsStorageStub(concepts), db)
 
@@ -468,10 +468,10 @@ async def test_concept_source_segments_resolve_to_canonical_occurrences():
     assert db.canonical_queries == [{
         "job_id": "j_evidence",
         "note_type": "smart",
-        "source_segment_ids": [_SEGMENT_A, _SEGMENT_B],
+        "source_segment_groups": [[_SEGMENT_A, _SEGMENT_B]],
     }]
     assert db.occurrence_replacements[-1]["mapping"] == {
-        "Transformer": ["ev-a", "ev-b"],
+        "Transformer": ["ev-joint"],
     }
 
 
@@ -489,12 +489,14 @@ async def test_concept_source_segment_contract_accepts_producer_ids_and_rejects_
                 "a" * 129,
                 _SEGMENT_BLOCK,
             ],
+            "evidence_source_segment_groups": [[
+                _SEGMENT_BLOCK, _SEGMENT_HIERARCHICAL,
+            ]],
         }],
     }
     db = _DBStub(domain="dl")
-    db.canonical_by_segment = {
-        _SEGMENT_BLOCK: ["ev-block"],
-        _SEGMENT_HIERARCHICAL: ["ev-hierarchical"],
+    db.canonical_by_group = {
+        (_SEGMENT_BLOCK, _SEGMENT_HIERARCHICAL): ["ev-joint"],
     }
     engine = _make_engine(_ConceptsStorageStub(concepts), db)
 
@@ -503,10 +505,10 @@ async def test_concept_source_segment_contract_accepts_producer_ids_and_rejects_
     assert db.canonical_queries == [{
         "job_id": "j-producer-ids",
         "note_type": "smart",
-        "source_segment_ids": [_SEGMENT_BLOCK, _SEGMENT_HIERARCHICAL],
+        "source_segment_groups": [[_SEGMENT_BLOCK, _SEGMENT_HIERARCHICAL]],
     }]
     assert db.occurrence_replacements[-1]["mapping"] == {
-        "Transformer": ["ev-block", "ev-hierarchical"],
+        "Transformer": ["ev-joint"],
     }
 
 
@@ -535,12 +537,14 @@ async def test_repeated_completion_is_idempotent_and_removed_term_is_omitted():
     storage = _ConceptsStorageStub({
         "evidence_note_type": "original",
         "key_terms": [
-            {"term": "A", "evidence_source_segment_ids": [_SEGMENT_A]},
-            {"term": "B", "evidence_source_segment_ids": [_SEGMENT_B]},
+            {"term": "A", "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]]},
+            {"term": "B", "evidence_source_segment_ids": [_SEGMENT_B],
+                    "evidence_source_segment_groups": [[_SEGMENT_B]]},
         ],
     })
     db = _DBStub()
-    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"], _SEGMENT_B: ["ev-b"]}
+    db.canonical_by_group = {(_SEGMENT_A,): ["ev-a"], (_SEGMENT_B,): ["ev-b"]}
     engine = _make_engine(storage, db)
 
     await engine._collect_glossary("j_replay")
@@ -550,7 +554,8 @@ async def test_repeated_completion_is_idempotent_and_removed_term_is_omitted():
 
     storage._data = json.dumps({
         "evidence_note_type": "original",
-        "key_terms": [{"term": "A", "evidence_source_segment_ids": [_SEGMENT_A]}],
+        "key_terms": [{"term": "A", "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]]}],
     }).encode()
     await engine._collect_glossary("j_replay")
 
@@ -569,6 +574,7 @@ async def test_untrustworthy_replay_clears_previous_job_occurrences(failure):
                 "key_terms": [{
                     "term": "A",
                     "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]],
                 }],
             }).encode()
             self.review = None
@@ -600,7 +606,7 @@ async def test_untrustworthy_replay_clears_previous_job_occurrences(failure):
 
     storage = MutableStorage()
     db = _DBStub()
-    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    db.canonical_by_group = {(_SEGMENT_A,): ["ev-a"]}
     engine = _make_engine(storage, db)
     await engine._collect_glossary("j_replay")
     assert db.occurrence_replacements[-1]["mapping"] == {"A": ["ev-a"]}
@@ -627,6 +633,7 @@ async def test_unreadable_source_keeps_occurrences_and_fails_completion_gate():
                 "key_terms": [{
                     "term": "A",
                     "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]],
                 }],
             }).encode()
 
@@ -644,7 +651,7 @@ async def test_unreadable_source_keeps_occurrences_and_fails_completion_gate():
 
     storage = VanishingStorage()
     db = _DBStub()
-    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    db.canonical_by_group = {(_SEGMENT_A,): ["ev-a"]}
     engine = _make_engine(storage, db)
     await engine._collect_glossary("j_replay")
     marker = db.occurrence_projection_sources["j_replay"]
@@ -694,6 +701,7 @@ async def test_occurrence_projection_replay_has_no_glossary_or_ai_side_effects()
             "term": "RRF",
             "definition": "rank fusion",
             "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]],
         }],
     }
     db = _DBStub()
@@ -702,7 +710,7 @@ async def test_occurrence_projection_replay_has_no_glossary_or_ai_side_effects()
         "content_type": "document", "location": None, "definition": "",
         "document_kind": "article",
     })
-    db.canonical_by_segment = {_SEGMENT_A: ["ev-rrf"]}
+    db.canonical_by_group = {(_SEGMENT_A,): ["ev-rrf"]}
     engine = _make_engine(_ConceptsStorageStub(concepts), db)
     before = list(db.calls)
 
@@ -930,7 +938,7 @@ async def test_stale_empty_marker_replays_to_full_projection_roundtrip():
     # 重放必须发现 digest 不符,把空投影修回非空,并在之后保持幂等。
     stale_digest = "sha256:" + hashlib.sha256(b"source_missing").hexdigest()
     db = _DBStub(domain="ml")
-    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    db.canonical_by_group = {(_SEGMENT_A,): ["ev-a"]}
     db.calls.append({
         "term": "Alpha", "zh_name": "", "domain": "ml", "job_id": "seed",
         "content_type": "document", "location": None, "definition": "",
@@ -945,6 +953,7 @@ async def test_stale_empty_marker_replays_to_full_projection_roundtrip():
         "key_terms": [{
             "term": "Alpha",
             "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]],
         }],
     })
     engine = _make_engine(storage, db)
@@ -969,7 +978,7 @@ async def test_sentinel_marker_with_missing_source_defers_then_replays():
     # 同进程内真源一就绪就要立即重放,不等调度器重启。
     stale_digest = "sha256:" + hashlib.sha256(b"source_missing").hexdigest()
     db = _DBStub(domain="ml")
-    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    db.canonical_by_group = {(_SEGMENT_A,): ["ev-a"]}
     db.calls.append({
         "term": "Alpha", "zh_name": "", "domain": "ml", "job_id": "seed",
         "content_type": "document", "location": None, "definition": "",
@@ -988,6 +997,7 @@ async def test_sentinel_marker_with_missing_source_defers_then_replays():
         "key_terms": [{
             "term": "Alpha",
             "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]],
         }],
     }
     assert await engine.reconcile_concept_occurrences_only("j_sentinel") == 1
@@ -1032,12 +1042,13 @@ async def test_review_fallback_and_rejected_term_never_fabricate_occurrences():
             return []
 
     rejected_db = RejectedDB()
-    rejected_db.canonical_by_segment = {_SEGMENT_A: ["ev-rejected"]}
+    rejected_db.canonical_by_group = {(_SEGMENT_A,): ["ev-rejected"]}
     concepts = {
         "evidence_note_type": "original",
         "key_terms": [{
             "term": "Rejected",
             "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]],
         }],
     }
     await _make_engine(
@@ -1052,10 +1063,11 @@ def _auto_synthesis_engine(*, locked: bool = False):
         "key_terms": [{
             "term": "AutoTerm",
             "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]],
         }],
     }
     db = _DBStub(domain="dl")
-    db.canonical_by_segment = {_SEGMENT_A: ["ev-auto"]}
+    db.canonical_by_group = {(_SEGMENT_A,): ["ev-auto"]}
     db.definition_states["AutoTerm"] = {
         "current_definition_version_id": "cdv-current",
         "lock_revision": 4,
@@ -1498,7 +1510,7 @@ async def test_matching_digest_with_nonempty_source_must_recompute():
     marker 只说明发布过这个投影, 不说明投影正确;必须重算, 算出非空就得改回非空。
     """
     db = _DBStub(domain="ml")
-    db.canonical_by_segment = {_SEGMENT_A: ["ev-a"]}
+    db.canonical_by_group = {(_SEGMENT_A,): ["ev-a"]}
     db.calls.append({
         "term": "Alpha", "zh_name": "", "domain": "ml", "job_id": "seed",
         "content_type": "document", "location": None, "definition": "",
@@ -1506,7 +1518,8 @@ async def test_matching_digest_with_nonempty_source_must_recompute():
     })
     source = {
         "evidence_note_type": "original",
-        "key_terms": [{"term": "Alpha", "evidence_source_segment_ids": [_SEGMENT_A]}],
+        "key_terms": [{"term": "Alpha", "evidence_source_segment_ids": [_SEGMENT_A],
+                    "evidence_source_segment_groups": [[_SEGMENT_A]]}],
     }
     payload = json.dumps(source, ensure_ascii=False).encode("utf-8")
     real_digest = _concept_projection_source_digest("concepts", payload)

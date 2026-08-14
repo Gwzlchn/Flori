@@ -63,21 +63,6 @@ def _insert_evidence(
     body = f"evidence body {segment_id}"
     body_sha = _sha(body)
     evidence_fingerprint = _sha(f"fingerprint:{job_id}:{segment_id}")
-    identity = json.dumps(
-        {
-            "schema_version": 1,
-            "job_id": job_id,
-            "note_type": note_type,
-            "chunk_id": chunk_id,
-            "source_ref": "document:body",
-            "source_segment_id": segment_id,
-            "evidence_fingerprint": evidence_fingerprint,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    evidence_id = "ce_" + _sha(identity)
     locator_json = json.dumps(
         {
             "dom_path": None,
@@ -90,6 +75,25 @@ def _insert_evidence(
         sort_keys=True,
         separators=(",", ":"),
     )
+    source_sha256 = _sha(f"source:{job_id}")
+    source_fingerprint = _sha(f"source-fingerprint:{job_id}:{segment_id}")
+    source_group_fingerprint = _sha(json.dumps(
+        [source_fingerprint], ensure_ascii=False, separators=(",", ":"),
+    ))
+    identity = json.dumps(
+        {
+            "schema_version": 2,
+            "job_id": job_id,
+            "note_type": note_type,
+            "chunk_id": chunk_id,
+            "source_group_fingerprint": source_group_fingerprint,
+            "evidence_fingerprint": evidence_fingerprint,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    evidence_id = "ce_" + _sha(identity)
     database._conn.execute(
         """INSERT INTO note_chunks
            (chunk_id, job_id, note_type, content_type, collection_id, domain,
@@ -113,33 +117,38 @@ def _insert_evidence(
     database._conn.execute(
         """INSERT INTO canonical_evidence
            (evidence_id, schema_version, job_id, note_type, chunk_id, section,
-            source_ref, source_segment_id, source_path, source_sha256,
-            source_revision, note_path, note_sha256, provenance_path,
+            note_path, note_sha256, provenance_path,
             provenance_sha256, chunk_body_sha256, chunk_char_start,
-            chunk_char_end, locator_kind, locator_json, evidence_fingerprint,
-            source_fingerprint, status, invalid_reason, validated_at,
+            chunk_char_end, evidence_fingerprint, source_group_fingerprint,
+            status, invalid_reason, validated_at,
             created_at, updated_at)
-           VALUES (?,1,?,?,?,'section','document:body',?,'input/source.html',?,
-                   NULL,'output/notes.md',?,'output/provenance/smart.json',?,
-                   ?,0,?,'text',?,?,?,'valid',NULL,?,?,?)""",
+           VALUES (?,2,?,?,?,'section','output/notes.md',?,
+                   'output/provenance/smart.json',?, ?,0,?,?,?,
+                   'valid',NULL,?,?,?)""",
         (
             evidence_id,
             job_id,
             note_type,
             chunk_id,
-            segment_id,
-            _sha(f"source:{job_id}"),
             _sha(f"note:{job_id}"),
             _sha(f"provenance:{job_id}"),
             body_sha,
             len(body),
-            locator_json,
             evidence_fingerprint,
-            _sha(f"source-fingerprint:{job_id}:{segment_id}"),
+            source_group_fingerprint,
             _NOW,
             _NOW,
             _NOW,
         ),
+    )
+    database._conn.execute(
+        """INSERT INTO canonical_evidence_sources
+           (evidence_id, ordinal, source_ref, source_segment_id, source_path,
+            source_sha256, source_revision, locator_kind, locator_json,
+            source_fingerprint)
+           VALUES (?,0,'document:body',?,'input/source.html',?,NULL,
+                   'text',?,?)""",
+        (evidence_id, segment_id, source_sha256, locator_json, source_fingerprint),
     )
     row = database._conn.execute(
         "SELECT evidence_json FROM note_chunks WHERE chunk_id=?",
@@ -580,14 +589,14 @@ def test_source_segment_mapping_only_returns_current_valid_ids(db: Database) -> 
     _insert_job(db, "job-map")
     first = _insert_evidence(db, "job-map", "segment:1")
     second = _insert_evidence(db, "job-map", "segment:2")
-    assert db.canonical_evidence_ids_for_source_segments(
+    assert db.canonical_evidence_ids_for_source_groups(
         job_id="job-map",
         note_type="smart",
-        source_segment_ids=["segment:2", "missing", "segment:1"],
+        source_segment_groups=[["segment:2"], ["missing"], ["segment:1"]],
     ) == {
-        "segment:2": [second],
-        "missing": [],
-        "segment:1": [first],
+        ("segment:2",): [second],
+        ("missing",): [],
+        ("segment:1",): [first],
     }
     db._conn.execute(
         """UPDATE canonical_evidence
@@ -595,11 +604,11 @@ def test_source_segment_mapping_only_returns_current_valid_ids(db: Database) -> 
         (second,),
     )
     db._conn.commit()
-    assert db.canonical_evidence_ids_for_source_segments(
+    assert db.canonical_evidence_ids_for_source_groups(
         job_id="job-map",
         note_type="smart",
-        source_segment_ids=["segment:2", "segment:1"],
-    ) == {"segment:2": [], "segment:1": [first]}
+        source_segment_groups=[["segment:2"], ["segment:1"]],
+    ) == {("segment:2",): [], ("segment:1",): [first]}
 
 
 def test_concept_occurrence_projects_bound_chunk_excerpt(db: Database) -> None:

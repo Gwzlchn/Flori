@@ -37,7 +37,10 @@ const attestationLabel = computed(() => {
 })
 
 function asProjection(evidence: ConceptEvidence): CanonicalEvidenceProjection {
-  const valid = evidence.reason === null && evidence.locator !== null && evidence.link !== null
+  const valid = evidence.reason === null && (
+    evidence.sources.length >= 2
+    || (evidence.locator !== null && evidence.link !== null)
+  )
   const stale = !valid && /stale|changed|mismatch|superseded|过期/i.test(evidence.reason || '')
   return {
     evidence_id: evidence.evidence_id,
@@ -49,6 +52,8 @@ function asProjection(evidence: ConceptEvidence): CanonicalEvidenceProjection {
     section: evidence.section,
     evidence_fingerprint: null,
     source_fingerprint: evidence.source_fingerprint,
+    source_group_fingerprint: evidence.source_group_fingerprint,
+    sources: evidence.sources,
     locator: evidence.locator,
     link: evidence.link,
     validated_at: null,

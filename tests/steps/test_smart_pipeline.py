@@ -21,12 +21,18 @@ from shared.step_ai import AIInvocation
 from steps.document.smart_pipeline import (
     FINAL_MARKDOWN_BEGIN,
     FINAL_MARKDOWN_END,
+    FINAL_SYNTHESIS_BASIS,
+    FINAL_SYNTHESIS_BEGIN,
+    FINAL_SYNTHESIS_END,
+    FINAL_SYNTHESIS_REFS,
+    FINAL_SYNTHESIS_UNCERTAINTY,
     MAX_IMAGE_ATTACHMENTS,
     MAX_PACKAGE_SOURCE_ALIASES,
     MAX_PACKAGES,
     MAX_STAGE_PROMPT_BYTES,
     build_chapter_packages,
     canonical_json,
+    filter_attestable_knowledge,
     parse_stage_result,
     parse_final_stage_result,
     inject_source_markers,
@@ -140,11 +146,15 @@ def _final() -> dict:
 
 def _framed_final(value: dict | None = None) -> str:
     result = deepcopy(value or _final())
-    markdown = result.pop("note_markdown")
-    result.pop("used_knowledge_refs")
+    markdown = result["note_markdown"]
+    synthesis = result["synthesis"]
     return (
-        json.dumps(result, ensure_ascii=False)
-        + f"\n{FINAL_MARKDOWN_BEGIN}\n{markdown}\n{FINAL_MARKDOWN_END}"
+        f"{FINAL_MARKDOWN_BEGIN}\n{markdown}\n"
+        f"{FINAL_SYNTHESIS_BEGIN}\n{synthesis['analysis']}\n"
+        f"{FINAL_SYNTHESIS_BASIS}\n{synthesis['basis']}\n"
+        f"{FINAL_SYNTHESIS_UNCERTAINTY}\n{synthesis['uncertainty']}\n"
+        f"{FINAL_SYNTHESIS_REFS}\n{', '.join(synthesis['knowledge_refs'])}\n"
+        f"{FINAL_SYNTHESIS_END}\n{FINAL_MARKDOWN_END}"
     )
 
 
@@ -181,15 +191,15 @@ def _fake_layered_call_with_value(
     })
     self.call_index += 1
     if self.audit_name == "03-final":
-        metadata = {
-            key: item for key, item in value.items()
-            if key not in {"note_markdown", "used_knowledge_refs"}
-        }
+        synthesis = value["synthesis"]
         return (
-            json.dumps(metadata, ensure_ascii=False)
-            + f"\n{FINAL_MARKDOWN_BEGIN}\n"
-            + value["note_markdown"]
-            + f"\n{FINAL_MARKDOWN_END}"
+            f"{FINAL_MARKDOWN_BEGIN}\n{value['note_markdown']}\n"
+            f"{FINAL_SYNTHESIS_BEGIN}\n{synthesis['analysis']}\n"
+            f"{FINAL_SYNTHESIS_BASIS}\n{synthesis['basis']}\n"
+            f"{FINAL_SYNTHESIS_UNCERTAINTY}\n{synthesis['uncertainty']}\n"
+            f"{FINAL_SYNTHESIS_REFS}\n"
+            f"{', '.join(synthesis['knowledge_refs'])}\n"
+            f"{FINAL_SYNTHESIS_END}\n{FINAL_MARKDOWN_END}"
         )
     return json.dumps(value, ensure_ascii=False)
 
@@ -685,19 +695,18 @@ def test_framed_stage_retry_uses_framed_feedback(tmp_path, monkeypatch):
     monkeypatch.setattr(step.ai, "load_prompt_template", lambda _name: "fixed")
     monkeypatch.setattr(step.ai, "call", call)
     full_schema = step._schema("final")
-    metadata_schema = step._schema("final_metadata")
-    bundle = {"metadata": metadata_schema, "full": full_schema}
+    bundle = {"full": full_schema}
     result = step._call_validated(
         step.ai, "final", {}, bundle, lambda value: value,
         parser=lambda raw, schemas: parse_final_stage_result(
-            raw, schemas["metadata"], schemas["full"],
+            raw, schemas["full"], paper_title="Paper", theme_refs=["t01"],
+            themes=[_theme()],
         ),
         response_format="text",
     )
     assert result["note_markdown"]
     assert len(prompts) == 2
-    assert "重新生成完整的 metadata JSON" in prompts[1]
-    assert "重新生成完整 JSON" not in prompts[1]
+    assert "reserved marker once" in prompts[1]
 
 
 @pytest.mark.parametrize(("failures", "legacy"), (
@@ -1250,6 +1259,44 @@ def test_chapter_builder_excludes_bibliography_variants(heading):
     assert [item["segment_id"] for item in receipt["excluded"]] == ["R1"]
 
 
+def test_final_inputs_exclude_knowledge_with_unavailable_source_support():
+    knowledge = {
+        "p001-k001": {"source_refs": ["p001-s001", "p001-s002"]},
+        "p001-k002": {"source_refs": ["p001-s003"]},
+    }
+    source_map = {
+        "p001-s001": "blk_1", "p001-s002": "blk_2", "p001-s003": "blk_3",
+    }
+    source_manifest = {
+        "segments": [
+            {"segment_id": "blk_1", "support_text": "可核验原文一"},
+            {"segment_id": "blk_2", "support_text": None},
+            {"segment_id": "blk_3", "support_text": "可核验原文三"},
+        ],
+    }
+
+    selected = filter_attestable_knowledge(
+        knowledge, source_map, source_manifest,
+    )
+
+    assert selected == {"p001-k002": knowledge["p001-k002"]}
+    assert knowledge["p001-k001"]["source_refs"] == ["p001-s001", "p001-s002"]
+
+
+def test_final_inputs_fail_closed_when_source_map_or_support_is_unusable():
+    knowledge = {"p001-k001": {"source_refs": ["p001-s001"]}}
+
+    with pytest.raises(ValueError, match="source map is incomplete"):
+        filter_attestable_knowledge(
+            knowledge, {}, {"segments": [{"segment_id": "blk_1", "support_text": "x"}]},
+        )
+    with pytest.raises(ValueError, match="no attestable knowledge"):
+        filter_attestable_knowledge(
+            knowledge, {"p001-s001": "blk_1"},
+            {"segments": [{"segment_id": "blk_1", "support_text": None}]},
+        )
+
+
 def test_chapter_contract_rejects_unknown_source_and_missing_figure(tmp_path):
     schema = json.loads((
         Path(__file__).parents[2]
@@ -1284,14 +1331,17 @@ def test_framed_final_keeps_raw_markdown_and_derives_used_refs():
         Path(__file__).parents[2]
         / "configs/prompts/schemas/05_smart_document.final.json"
     ).read_text())
-    metadata_schema = json.loads((
-        Path(__file__).parents[2]
-        / "configs/prompts/schemas/05_smart_document.final_metadata.json"
-    ).read_text())
     raw = _framed_final().replace("一个需要测量的问题", "一个包含 `x\\y` 和 \"引号\" 的问题")
-    parsed = parse_final_stage_result(raw, metadata_schema, full_schema)
+    parsed = parse_final_stage_result(
+        raw, full_schema, paper_title="Frozen paper title",
+        theme_refs=["t01"], themes=[_theme()],
+    )
     assert "`x\\y`" in parsed["note_markdown"]
     assert parsed["used_knowledge_refs"] == ["p001-k001", "p001-k002"]
+    assert parsed["title"] == "Frozen paper title"
+    assert parsed["theme_coverage_refs"] == ["t01"]
+    assert parsed["subtitle"] == "基于已验证主题学习图的证据约束智能笔记"
+    assert parsed["audit_summary"]["known_gaps"] == []
 
 
 @pytest.mark.parametrize("mutate", (
@@ -1299,18 +1349,74 @@ def test_framed_final_keeps_raw_markdown_and_derives_used_refs():
     lambda raw: raw + f"\n{FINAL_MARKDOWN_END}",
     lambda raw: "preamble\n" + raw,
     lambda raw: raw + "\ntrailing",
+    lambda raw: raw.replace(FINAL_SYNTHESIS_END, ""),
+    lambda raw: raw.replace(FINAL_SYNTHESIS_BASIS, FINAL_SYNTHESIS_UNCERTAINTY),
+    lambda raw: raw.replace(FINAL_SYNTHESIS_REFS, FINAL_SYNTHESIS_REFS + " extra"),
 ))
 def test_framed_final_rejects_truncation_duplicates_and_extra_content(mutate):
     full_schema = json.loads((
         Path(__file__).parents[2]
         / "configs/prompts/schemas/05_smart_document.final.json"
     ).read_text())
-    metadata_schema = json.loads((
-        Path(__file__).parents[2]
-        / "configs/prompts/schemas/05_smart_document.final_metadata.json"
-    ).read_text())
     with pytest.raises(ValueError):
-        parse_final_stage_result(mutate(_framed_final()), metadata_schema, full_schema)
+        parse_final_stage_result(
+            mutate(_framed_final()), full_schema, paper_title="Paper",
+            theme_refs=["t01"], themes=[_theme()],
+        )
+
+
+def test_framed_final_derives_placements_from_verified_theme_guides():
+    schema = json.loads((
+        Path(__file__).parents[2]
+        / "configs/prompts/schemas/05_smart_document.final.json"
+    ).read_text())
+    theme = _theme()
+    theme["figure_guides"] = [{
+        "figure_ref": "p001-f01", "placement_hint": "方法之后",
+        "reading_guide": "先看横轴。", "supports": "支持结果。",
+        "limits": "不能推出因果。", "knowledge_refs": ["p001-k001"],
+    }]
+    value = _final()
+    value["note_markdown"] += "\n\n{{FIGURE:p001-f01}}"
+    parsed = parse_final_stage_result(
+        _framed_final(value), schema, paper_title="Paper",
+        theme_refs=["t01"], themes=[theme],
+    )
+    assert parsed["figure_placements"] == [{
+        "figure_ref": "p001-f01", "placement_reason": "方法之后",
+        "reading_guide": "先看横轴。", "supports": "支持结果。",
+        "limits": "不能推出因果。", "knowledge_refs": ["p001-k001"],
+    }]
+    assert parsed["used_knowledge_refs"] == ["p001-k001", "p001-k002"]
+
+
+def test_framed_final_rejects_unknown_or_conflicting_theme_figure_guides():
+    schema = json.loads((
+        Path(__file__).parents[2]
+        / "configs/prompts/schemas/05_smart_document.final.json"
+    ).read_text())
+    value = _final()
+    value["note_markdown"] += "\n\n{{FIGURE:p001-f01}}"
+    with pytest.raises(ValueError, match="unknown figure ref"):
+        parse_final_stage_result(
+            _framed_final(value), schema, paper_title="Paper",
+            theme_refs=["t01"], themes=[_theme()],
+        )
+
+    first = _theme()
+    first["figure_guides"] = [{
+        "figure_ref": "p001-f01", "placement_hint": "A",
+        "reading_guide": "A", "supports": "A", "limits": "A",
+        "knowledge_refs": ["p001-k001"],
+    }]
+    second = deepcopy(first)
+    second["theme_id"] = "t02"
+    second["figure_guides"][0]["reading_guide"] = "B"
+    with pytest.raises(ValueError, match="guides conflict"):
+        parse_final_stage_result(
+            _framed_final(value), schema, paper_title="Paper",
+            theme_refs=["t01", "t02"], themes=[first, second],
+        )
 
 
 def test_model_synthesis_is_rendered_with_basis_uncertainty_and_evidence():
@@ -1356,21 +1462,102 @@ def test_final_contract_rejects_model_rendered_image_or_title_injection(
         )
 
 
-def test_final_contract_rejects_joint_source_evidence_before_marker_extraction():
+@pytest.mark.parametrize("supports", (
+    "![track](https://attacker.example/pixel)",
+    "[证据: p001-k002]",
+    "{{FIGURE:p001-f02}}",
+    "[[source:S1.P1]]",
+))
+def test_final_contract_rejects_renderer_markup_in_figure_supports(supports):
+    result = _final()
+    result["note_markdown"] += "\n\n{{FIGURE:p001-f01}}"
+    result["figure_placements"] = [{
+        "figure_ref": "p001-f01", "placement_reason": "解释结果",
+        "reading_guide": "先看横轴。", "supports": supports,
+        "limits": "不能推出因果。", "knowledge_refs": ["p001-k001"],
+    }]
+    with pytest.raises(ValueError, match="final figure supports"):
+        validate_final(
+            result, ["t01"], _knowledge_catalog("p001-k001", "p001-k002"),
+            ["p001-f01"],
+        )
+
+
+def test_final_contract_accepts_bounded_joint_source_evidence():
     result = _final()
     result["note_markdown"] = result["note_markdown"].replace(
         "[证据: p001-k001]", "[证据: p001-k001, p001-k002]",
     )
-    with pytest.raises(ValueError, match="exactly one source"):
+    assert validate_final(
+        result, ["t01"], _knowledge_catalog("p001-k001", "p001-k002"), [],
+    ) == result
+
+
+def test_final_contract_rejects_two_groups_on_one_visible_line():
+    result = _final()
+    result["note_markdown"] = result["note_markdown"].replace(
+        "[证据: p001-k001]",
+        "[证据: p001-k001] [证据: p001-k002]",
+    )
+    with pytest.raises(ValueError, match="multiple evidence groups"):
         validate_final(
             result, ["t01"], _knowledge_catalog("p001-k001", "p001-k002"), [],
         )
+
+
+@pytest.mark.parametrize("unsupported", (
+    "", "-", "&nbsp;",
+))
+def test_final_contract_rejects_evidence_group_without_same_line_anchor(unsupported):
+    result = _final()
+    result["note_markdown"] = result["note_markdown"].replace(
+        "[证据: p001-k001]", f"\n{unsupported}[证据: p001-k001]",
+    )
+    with pytest.raises(ValueError, match="must share its line with supported text"):
+        validate_final(
+            result, ["t01"], _knowledge_catalog("p001-k001", "p001-k002"), [],
+        )
+
+
+def test_final_contract_rejects_evidence_beside_figure_placeholder():
+    result = _final()
+    result["note_markdown"] = result["note_markdown"].replace(
+        "[证据: p001-k001]",
+        "正文 {{FIGURE:p001-f01}} [证据: p001-k001]",
+    )
+    result["figure_placements"] = [{
+        "figure_ref": "p001-f01", "placement_reason": "解释结果",
+        "reading_guide": "先看横轴。", "supports": "支持效率结论。",
+        "limits": "不能推出因果。", "knowledge_refs": ["p001-k002"],
+    }]
+    with pytest.raises(ValueError, match="must not share a line with a figure"):
+        validate_final(
+            result, ["t01"], _knowledge_catalog("p001-k001", "p001-k002"),
+            ["p001-f01"],
+        )
+
+
+def test_final_contract_rejects_evidence_group_over_source_limit():
+    result = _final()
+    catalog = _knowledge_catalog("p001-k001", "p001-k002")
+    catalog["p001-k001"]["source_refs"] = [f"s{index:03d}" for index in range(33)]
+    with pytest.raises(ValueError, match="source group is outside limit"):
+        validate_final(result, ["t01"], catalog, [])
 
 
 def test_introduction_contract_rejects_model_source_marker():
     result = _introduction()
     result["introduction_markdown"] += "\n\n[[source:S1.P1]]"
     with pytest.raises(ValueError, match="source markers"):
+        validate_introduction(result, _knowledge_catalog("p001-k001"))
+
+
+def test_introduction_contract_rejects_evidence_group_without_same_line_anchor():
+    result = _introduction()
+    result["introduction_markdown"] = result["introduction_markdown"].replace(
+        "[证据: p001-k001]", "\n[证据: p001-k001]",
+    )
+    with pytest.raises(ValueError, match="must share its line with supported text"):
         validate_introduction(result, _knowledge_catalog("p001-k001"))
 
 
@@ -1452,7 +1639,7 @@ def test_stage_prompt_rendering_is_single_pass():
     assert rendered == "A={{B}} B=safe"
 
 
-def test_layered_step_retries_invalid_stage_twice_and_publishes_nothing(
+def test_layered_step_retries_invalid_stage_three_times_and_publishes_nothing(
     tmp_path, monkeypatch,
 ):
     job = _fixture(tmp_path)
@@ -1473,7 +1660,7 @@ def test_layered_step_retries_invalid_stage_twice_and_publishes_nothing(
     monkeypatch.setattr(AIInvocation, "call", invalid)
     with pytest.raises(ValueError, match="identity mismatch"):
         step.execute()
-    assert calls == 3
+    assert calls == 4
     assert not list((job / "output/versions").glob("notes_smart_*"))
     assert not (job / "output/smart_pipeline/manifest.json").exists()
 
@@ -1538,15 +1725,18 @@ def test_stage_prompt_budget_rejects_before_ai(tmp_path, monkeypatch):
         )
 
 
-def test_stage_third_attempt_can_recover_from_truncated_json(tmp_path, monkeypatch):
+def test_stage_fourth_attempt_recovers_after_json_and_schema_failures(
+    tmp_path, monkeypatch,
+):
     job = _fixture(tmp_path)
     config = make_step_config(
         tmp_path, step_name="05_smart", pool="ai", pipeline="document",
     )
     step = DocumentSmartStep("05_smart", job, config)
     responses = iter((
-        '{"ok":',
-        '{"ok":',
+        '{"ok":true}{}',
+        '{"ok":"unfinished}',
+        '{"ok":true,"source_refs_note":"unsupported"}',
         '{"ok":true}',
     ))
     prompts: list[str] = []
@@ -1564,12 +1754,15 @@ def test_stage_third_attempt_can_recover_from_truncated_json(tmp_path, monkeypat
     assert step._call_validated(
         step.ai, "test", {}, schema, lambda value: value,
     ) == {"ok": True}
-    assert len(prompts) == 3
+    assert len(prompts) == 4
     assert "校验反馈=" not in prompts[0]
     assert "AI stage result is not valid JSON" in prompts[1]
-    assert "line 1 column 7" in prompts[1]
+    assert "Extra data" in prompts[1]
     assert "complete RFC 8259 JSON object" in prompts[1]
     assert "AI stage result is not valid JSON" in prompts[2]
+    assert "Unterminated string starting at" in prompts[2]
+    assert "source_refs_note" in prompts[3]
+    assert "allowed fields" in prompts[3]
 
 
 def test_stage_invalid_escape_feedback_is_precise_and_does_not_echo_raw(

@@ -43,6 +43,7 @@ from steps.document.smart_pipeline import (
     build_themes,
     canonical_json,
     enrich_cards,
+    filter_attestable_knowledge,
     inject_source_markers,
     parse_stage_result,
     parse_final_stage_result,
@@ -64,8 +65,8 @@ _TEMPLATES = (
     "05_smart_document.final",
     "05_smart_document.introduction",
 )
-_SCHEMAS = ("chapter", "theme", "final", "final_metadata", "introduction")
-_MAX_STAGE_ATTEMPTS = 3
+_SCHEMAS = ("chapter", "theme", "final", "introduction")
+_MAX_STAGE_ATTEMPTS = 4
 _QUALITY_NOTE_METRIC_KEYS = (
     "pdf_source_quality", "pdf_crosswalk_blocks", "pdf_crosswalk_visuals",
     "pdf_crosswalk_ambiguous", "pdf_crosswalk_visual_ambiguous",
@@ -138,21 +139,24 @@ class DocumentSmartStep(StepBase):
                     paper_map, packages, quality, schemas["chapter"], invocations,
                 )
                 enriched, knowledge, figures, source_map = enrich_cards(packages, cards)
+                attestable_knowledge = filter_attestable_knowledge(
+                    knowledge, source_map, source_manifest,
+                )
                 themes = build_themes(packages)
                 theme_results = self._run_themes(
                     paper_map, themes, enriched, knowledge, figures,
                     schemas["theme"], invocations,
                 )
                 final_result, final_figures, final_invocation = self._run_final(
-                    paper_map, theme_results, knowledge, figures,
-                    schemas["final"], schemas["final_metadata"], invocations,
+                    paper_map, theme_results, attestable_knowledge, figures,
+                    schemas["final"], invocations,
                 )
                 final_markdown = render_figures(
                     render_model_synthesis(final_result),
                     final_result["figure_placements"], final_figures, self.job_dir,
                 )
                 marked_final = inject_source_markers(
-                    final_markdown, knowledge, source_map,
+                    final_markdown, attestable_knowledge, source_map,
                     deduplicate_sources_by_evidence=False,
                 )
                 clean_final, final_exact, final_semantic = (
@@ -170,10 +174,12 @@ class DocumentSmartStep(StepBase):
                 self._persist_pending_stage_checkpoint(final_invocation)
 
                 introduction, introduction_invocation = self._run_introduction(
-                    paper_map, knowledge, schemas["introduction"], invocations,
+                    paper_map, attestable_knowledge,
+                    schemas["introduction"], invocations,
                 )
                 marked_introduction = inject_source_markers(
-                    introduction["introduction_markdown"], knowledge, source_map,
+                    introduction["introduction_markdown"],
+                    attestable_knowledge, source_map,
                     deduplicate_sources_by_evidence=False,
                 )
                 clean_introduction, intro_exact, intro_semantic = (
@@ -332,13 +338,23 @@ class DocumentSmartStep(StepBase):
     def _run_final(
         self, paper_map: Mapping[str, Any], themes: list[dict[str, Any]],
         knowledge: Mapping[str, Any], figures: Mapping[str, Any],
-        schema: Mapping[str, Any], metadata_schema: Mapping[str, Any],
-        invocations: list[AIInvocation],
+        schema: Mapping[str, Any], invocations: list[AIInvocation],
     ) -> tuple[dict[str, Any], dict[str, Any], AIInvocation]:
         theme_refs = [str(item["theme_id"]) for item in themes]
+        valid_knowledge = set(knowledge)
+        final_themes = [
+            {
+                **theme,
+                "figure_guides": [
+                    guide for guide in theme["figure_guides"]
+                    if set(guide["knowledge_refs"]) <= valid_knowledge
+                ],
+            }
+            for theme in themes
+        ]
         selected_figures = {
             guide["figure_ref"]
-            for theme in themes for guide in theme["figure_guides"]
+            for theme in final_themes for guide in theme["figure_guides"]
         }
         final_figures = {
             ref: {
@@ -350,11 +366,9 @@ class DocumentSmartStep(StepBase):
         }
         invocation = self.ai.fork("03-final")
         invocations.append(invocation)
-        schema_bundle = {"metadata": metadata_schema, "full": schema}
         result = self._call_stage_validated(
             invocation, "05_smart_document.final",
             {
-                "METADATA_SCHEMA": canonical_json(metadata_schema),
                 "PAPER_MAP": canonical_json(paper_map),
                 "EXPECTED_THEME_REFS": canonical_json(theme_refs),
                 "EXPECTED_KNOWLEDGE_REFS": canonical_json(sorted(knowledge)),
@@ -364,15 +378,18 @@ class DocumentSmartStep(StepBase):
                 "FIGURE_CATALOG": canonical_json(final_figures),
                 "THEME_SYNTHESES": canonical_json([
                     {key: value for key, value in theme.items() if key != "coverage_refs"}
-                    for theme in themes
+                    for theme in final_themes
                 ]),
             },
-            schema_bundle,
+            schema,
             lambda value: validate_final(
                 value, theme_refs, knowledge, list(final_figures),
             ),
-            parser=lambda raw, bundle: parse_final_stage_result(
-                raw, bundle["metadata"], bundle["full"],
+            parser=lambda raw, full_schema: parse_final_stage_result(
+                raw, full_schema,
+                paper_title=str(paper_map["title"]),
+                theme_refs=theme_refs,
+                themes=final_themes,
             ),
             response_format="text", defer_checkpoint=True,
         )

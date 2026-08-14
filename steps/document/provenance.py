@@ -433,17 +433,33 @@ def require_complete_document_marker_coverage(
     from shared.note_text import markdown_to_index_text
 
     marker_re = re.compile(r"\[\[source:[^\]]+\]\]")
-    expected = [
-        markdown_to_index_text(marker_re.sub("", line)).strip()
-        for line in marked_text.splitlines() if marker_re.search(line)
+    expected = []
+    for line in marked_text.splitlines():
+        markers = marker_re.findall(line)
+        if not markers:
+            continue
+        anchor = markdown_to_index_text(marker_re.sub("", line)).strip()
+        expected.append((
+            anchor,
+            frozenset(
+                marker.removeprefix("[[source:").removesuffix("]]")
+                for marker in markers
+            ),
+        ))
+    actual = [
+        (
+            str(item["anchor"]),
+            frozenset(
+                str(ref).removeprefix("seg_") for ref in item["source_segment_ids"]
+            ),
+        )
+        for item in [*exact, *semantic]
     ]
     if (
         not expected
-        or any(not anchor for anchor in expected)
+        or any(not anchor or not refs for anchor, refs in expected)
         or len(expected) != len(set(expected))
-        or set(expected) != {
-            str(item["anchor"]) for item in [*exact, *semantic]
-        }
+        or set(expected) != set(actual)
     ):
         raise ValueError("document note evidence mapping coverage is incomplete")
 

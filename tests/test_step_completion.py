@@ -624,6 +624,115 @@ class TestCloneReissue:
         manifest_path = await self._reissue(tmp_jobs_dir, tamper=True)
         assert not manifest_path.exists()
 
+    @pytest.mark.asyncio
+    async def test_rebound_output_mismatch_aborts_snapshot(self, tmp_jobs_dir):
+        from fastapi import HTTPException
+
+        from api.routes.jobs import _reissue_step_manifests
+
+        parent = _publish_done_manifest(
+            tmp_jobs_dir, "j_parent", "job", "03_structure",
+            outputs=[("intermediate/document.json", b"parent")],
+        )
+        _write(
+            tmp_jobs_dir / "j_child", "intermediate/document.json", b"child",
+        )
+        entry = parent["outputs"][0]
+        with pytest.raises(HTTPException, match="failed manifest validation"):
+            await _reissue_step_manifests(
+                LocalStorage(tmp_jobs_dir), parent_id="j_parent", new_id="j_child",
+                by_name={
+                    "03_structure": {"name": "03_structure", "scope": "job"},
+                },
+                reset_steps=set(), part_ids=[], rebound_outputs={
+                    "intermediate/document.json": {
+                        "old_size_bytes": entry["size_bytes"],
+                        "old_sha256": entry["sha256"],
+                        "size_bytes": len(b"different"),
+                        "sha256": "sha256:" + "d" * 64,
+                    },
+                },
+            )
+        assert not (
+            tmp_jobs_dir / "j_child/.flori/steps/03_structure/manifest.json"
+        ).exists()
+
+    @pytest.mark.asyncio
+    async def test_document_snapshot_rebinds_identity_and_original_evidence(
+        self, tmp_jobs_dir,
+    ):
+        import shutil
+
+        from api.routes.jobs import (
+            _rebind_document_snapshot_artifacts,
+            _reissue_step_manifests,
+        )
+        from shared.note_text import markdown_to_index_text
+        from shared.provenance import (
+            canonical_json_bytes,
+            validate_provenance_manifest,
+            validate_source_manifest,
+        )
+        from tests.steps.test_step_document import _fixture
+
+        parent = _fixture(tmp_jobs_dir)
+        outputs = []
+        for rel in (
+            "intermediate/document.json",
+            "intermediate/document_index.md",
+            "intermediate/pdf_page_support.json",
+            "intermediate/quality.json",
+            "intermediate/source_segments.json",
+            "output/provenance/original.json",
+        ):
+            path = parent / rel
+            if path.is_file():
+                outputs.append((rel, path.read_bytes()))
+        _publish_done_manifest(
+            tmp_jobs_dir, parent.name, "job", "03_structure", outputs=outputs,
+        )
+        child_id = "jobs_document_child"
+        child = tmp_jobs_dir / child_id
+        shutil.copytree(parent, child, ignore=shutil.ignore_patterns(".flori"))
+        storage = LocalStorage(tmp_jobs_dir)
+
+        replacements = await _rebind_document_snapshot_artifacts(
+            storage, parent_id=parent.name, new_id=child_id,
+        )
+        await _reissue_step_manifests(
+            storage, parent_id=parent.name, new_id=child_id,
+            by_name={
+                "03_structure": {
+                    "name": "03_structure", "scope": "job",
+                },
+            },
+            reset_steps=set(), part_ids=[], rebound_outputs=replacements,
+        )
+
+        document = json.loads((child / "intermediate/document.json").read_bytes())
+        quality = json.loads((child / "intermediate/quality.json").read_bytes())
+        source_bytes = (child / "intermediate/source_segments.json").read_bytes()
+        source = validate_source_manifest(json.loads(source_bytes))
+        note_bytes = (child / "intermediate/document_index.md").read_bytes()
+        provenance_bytes = (child / "output/provenance/original.json").read_bytes()
+        provenance = validate_provenance_manifest(
+            json.loads(provenance_bytes), source_manifest=source,
+            note_bytes=note_bytes,
+            normalized_body=markdown_to_index_text(note_bytes.decode("utf-8")),
+        )
+        assert document["job_id"] == child_id
+        assert quality["job_id"] == child_id
+        assert source["job_id"] == child_id
+        assert provenance["job_id"] == child_id
+        assert source_bytes == canonical_json_bytes(source)
+        assert provenance_bytes == canonical_json_bytes(provenance)
+        manifest = json.loads(
+            (child / ".flori/steps/03_structure/manifest.json").read_bytes()
+        )
+        entries = {item["path"]: item for item in manifest["outputs"]}
+        for rel in replacements:
+            assert entries[rel]["sha256"] == replacements[rel]["sha256"]
+
 
 # should_run 读端切换(dual:manifest 优先,.done fallback)
 

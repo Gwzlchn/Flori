@@ -333,9 +333,11 @@ async def test_v1_direct_sidecar_keeps_pre_v2_fingerprints(tmp_path: Path) -> No
         "chunk_char_end": chunk["char_end"],
         "anchor_start": anchor_start,
         "anchor_end": anchor_start + len("Claim evidence"),
-        "source_fingerprint": source_fingerprint,
+        "source_group_fingerprint": hashlib.sha256(
+            json.dumps([source_fingerprint], separators=(",", ":")).encode()
+        ).hexdigest(),
     })
-    assert records[0]["source_fingerprint"] == source_fingerprint
+    assert records[0]["sources"][0]["source_fingerprint"] == source_fingerprint
     assert records[0]["evidence_fingerprint"] == expected_evidence
     db = _database(tmp_path / "v1-direct.db")
     try:
@@ -383,8 +385,8 @@ async def test_canonical_evidence_reindex_is_idempotent_and_old_id_becomes_stale
     })
     body, records = await _records(note, storage)
     assert len(records) == 1
-    assert records[0]["source_ref"] == "document:body"
-    assert records[0]["source_segment_id"] == "paragraph:1"
+    assert records[0]["sources"][0]["source_ref"] == "document:body"
+    assert records[0]["sources"][0]["source_segment_id"] == "paragraph:1"
 
     db = _database(tmp_path / "canonical.db")
     try:
@@ -533,7 +535,7 @@ async def test_resolver_rejects_database_policy_fingerprint_drift(tmp_path: Path
         chunk_char_end=record["chunk_char_end"],
         anchor_start=anchor_start,
         anchor_end=anchor_start + len("Claim evidence"),
-        source_fingerprint=record["source_fingerprint"],
+        source_group_fingerprint=record["source_group_fingerprint"],
         provenance_schema_version=2,
         verification_policy="direct_locator_v1",
     )
@@ -543,8 +545,7 @@ async def test_resolver_rejects_database_policy_fingerprint_drift(tmp_path: Path
         "job_id": record["job_id"],
         "note_type": record["note_type"],
         "chunk_id": record["chunk_id"],
-        "source_ref": record["source_ref"],
-        "source_segment_id": record["source_segment_id"],
+        "source_group_fingerprint": record["source_group_fingerprint"],
         "evidence_fingerprint": wrong_fingerprint,
     })
     db = _database(tmp_path / "policy-drift.db")
@@ -709,10 +710,13 @@ async def test_resolver_batches_shared_artifacts_once_and_uses_real_content_rout
         )
         assert [item["evidence_id"] for item in items] == [*evidence_ids, unknown]
         assert [item["status"] for item in items[:2]] == ["valid", "valid"]
-        assert items[0]["link"]["href"].startswith(
+        assert all(item["link"]["href"].startswith(
             "/content/job-evidence?tab=notes&view=source"
-        )
-        assert "segment=paragraph%3A1" in items[0]["link"]["href"]
+        ) for item in items[:2])
+        assert {
+            item["sources"][0]["source_segment_id"] for item in items[:2]
+        } == {"paragraph:1", "paragraph:2"}
+        assert [item["sources"][0]["ordinal"] for item in items[:2]] == [0, 0]
         assert "exact=Claim+evidence" in items[0]["link"]["href"]
         assert items[2]["reason"] == "evidence_not_found"
         assert all(count == 1 for count in storage.opens.values())
@@ -771,13 +775,13 @@ async def test_resolver_memo_rehashes_large_source_only_after_version_change(
         storage.replace(source_path, b"b" * len(large_source))
         stale = await resolve_canonical_evidence(db, storage, evidence_id)
         assert stale is not None and stale["status"] == "stale"
-        assert stale["reason"] == "source_changed"
+        assert stale["reason"] == "source_group_member_source_changed"
         assert storage.opens[source_path] == 2
 
         storage.remove(source_path)
         missing = await resolve_canonical_evidence(db, storage, evidence_id)
         assert missing is not None and missing["status"] == "missing"
-        assert missing["reason"] == "source_missing"
+        assert missing["reason"] == "source_group_member_source_missing"
     finally:
         db.close()
 

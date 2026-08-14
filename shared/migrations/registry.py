@@ -16,6 +16,7 @@ from . import v0009_concept_projection_ledger as migration_v9
 from . import v0010_concept_replay_states as migration_v10
 from . import v0011_qoder_credit_accounting as migration_v11
 from . import v0012_concept_projector_version as migration_v12
+from . import v0013_canonical_evidence_groups as migration_v13
 from .runner import Migration
 
 
@@ -33,6 +34,7 @@ MIGRATION_MODULES: tuple[ModuleType, ...] = (
     migration_v10,
     migration_v11,
     migration_v12,
+    migration_v13,
 )
 
 

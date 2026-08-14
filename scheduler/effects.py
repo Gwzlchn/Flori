@@ -984,33 +984,49 @@ class EffectDispatcher:
             and evidence_note_type in {"smart", "translated", "original"}
         ) else None
         empty_reason = "truly_empty" if not key_terms else "no_canonical_evidence"
-        requested_ids: list[str] = []
+        requested_groups: list[list[str]] = []
+        requested_source_ids: set[str] = set()
         if note_type:
             for item in key_terms:
                 if not isinstance(item, dict):
                     continue
-                refs = item.get("evidence_source_segment_ids")
-                if not isinstance(refs, list):
+                flattened = item.get("evidence_source_segment_ids")
+                if isinstance(flattened, list):
+                    for ref in flattened:
+                        try:
+                            requested_source_ids.add(validate_source_segment_id(ref))
+                        except ValueError:
+                            continue
+                groups = item.get("evidence_source_segment_groups")
+                if not isinstance(groups, list):
                     continue
-                for ref in refs:
-                    try:
-                        segment_id = validate_source_segment_id(ref)
-                    except ValueError:
+                for group in groups:
+                    if not isinstance(group, list) or not group:
                         continue
-                    if segment_id not in requested_ids:
-                        if len(requested_ids) >= MAX_CONCEPT_EVIDENCE_SOURCE_IDS:
-                            raise ValueError(
-                                "concept evidence source refs exceed binding budget"
-                            )
-                        requested_ids.append(segment_id)
+                    normalized: list[str] = []
+                    for ref in group:
+                        try:
+                            segment_id = validate_source_segment_id(ref)
+                        except ValueError:
+                            normalized = []
+                            break
+                        if segment_id in normalized:
+                            normalized = []
+                            break
+                        normalized.append(segment_id)
+                    if normalized and normalized not in requested_groups:
+                        requested_groups.append(normalized)
+                        requested_source_ids.update(normalized)
+        if len(requested_source_ids) > MAX_CONCEPT_EVIDENCE_SOURCE_IDS:
+            raise ValueError("concept evidence source refs exceed binding budget")
 
-        canonical_by_segment = (
-            self.owner.db.canonical_evidence_ids_for_source_segments(
+        canonical_by_group = (
+            self.owner.db.canonical_evidence_ids_for_source_groups(
                 job_id=job_id,
                 note_type=note_type,
-                source_segment_ids=requested_ids,
+                source_segment_groups=requested_groups,
             )
-            if note_type and requested_ids else {}
+            if note_type and requested_groups else {}
         )
         glossary_rows = self.owner.db.list_glossary(domain)
         rows = [
@@ -1036,12 +1052,14 @@ class EffectDispatcher:
             )
             if resolved is None:
                 continue
-            refs = item.get("evidence_source_segment_ids")
-            if not isinstance(refs, list):
+            groups = item.get("evidence_source_segment_groups")
+            if not isinstance(groups, list):
                 continue
             evidence_ids = mapping.setdefault(resolved, [])
-            for ref in refs:
-                for evidence_id in canonical_by_segment.get(ref, []):
+            for group in groups:
+                if not isinstance(group, list):
+                    continue
+                for evidence_id in canonical_by_group.get(tuple(group), []):
                     if isinstance(evidence_id, str) and evidence_id not in evidence_ids:
                         evidence_ids.append(evidence_id)
             if not evidence_ids:

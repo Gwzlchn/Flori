@@ -2632,19 +2632,19 @@ class Database:
             note_type,
         )
 
-    def canonical_evidence_ids_for_source_segments(
+    def canonical_evidence_ids_for_source_groups(
         self,
         *,
         job_id: str,
         note_type: str,
-        source_segment_ids: list[str],
-    ) -> dict[str, list[str]]:
-        """把 source segment 映到当前 note snapshot 的 canonical IDs。"""
-        return _SearchRepository.canonical_evidence_ids_for_source_segments(
+        source_segment_groups: list[list[str]],
+    ) -> dict[tuple[str, ...], list[str]]:
+        """把完整 source group 映到当前 note snapshot 的 canonical IDs。"""
+        return _SearchRepository.canonical_evidence_ids_for_source_groups(
             self,
             job_id=job_id,
             note_type=note_type,
-            source_segment_ids=source_segment_ids,
+            source_segment_groups=source_segment_groups,
         )
 
     def canonical_evidence_ids_for_notes(
@@ -2670,9 +2670,12 @@ class Database:
         )
 
     @staticmethod
-    def _row_to_canonical_evidence(row: sqlite3.Row) -> dict:
+    def _row_to_canonical_evidence(
+        row: sqlite3.Row,
+        sources: list[dict] | None = None,
+    ) -> dict:
         return _DatabaseRowMappersExtra._row_to_canonical_evidence(
-            row,
+            row, sources,
         )
 
     def search_notes(

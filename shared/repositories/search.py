@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from .seams import db as _db
 
 from ..concept_projection import CURRENT_CONCEPT_PROJECTOR_VERSION
@@ -201,7 +203,29 @@ class SearchRepository:
             ).fetchall()
             result: dict[str, dict] = {}
             for row in rows:
-                item = self._row_to_canonical_evidence(row)
+                source_rows = self._conn.execute(
+                    "SELECT * FROM canonical_evidence_sources WHERE evidence_id=? "
+                    "ORDER BY ordinal",
+                    (row["evidence_id"],),
+                ).fetchall()
+                sources: list[dict] = []
+                for source in source_rows:
+                    try:
+                        locator = json.loads(str(source["locator_json"]))
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        locator = None
+                    sources.append({
+                        "ordinal": int(source["ordinal"]),
+                        "source_ref": source["source_ref"],
+                        "source_segment_id": source["source_segment_id"],
+                        "source_path": source["source_path"],
+                        "source_sha256": source["source_sha256"],
+                        "source_revision": source["source_revision"],
+                        "locator_kind": source["locator_kind"],
+                        "locator": locator,
+                        "source_fingerprint": source["source_fingerprint"],
+                    })
+                item = self._row_to_canonical_evidence(row, sources)
                 job = self._conn.execute(
                     "SELECT status, is_current FROM jobs WHERE id=?",
                     (row["job_id"],),
@@ -260,27 +284,31 @@ class SearchRepository:
             for evidence_id in _canonical_ids_from_evidence_json(row["evidence_json"])
         ))
 
-    def canonical_evidence_ids_for_source_segments(
+    def canonical_evidence_ids_for_source_groups(
         self,
         *,
         job_id: str,
         note_type: str,
-        source_segment_ids: list[str],
-    ) -> dict[str, list[str]]:
-        """把 source segment 映到当前 note snapshot 的 canonical IDs。"""
+        source_segment_groups: list[list[str]],
+    ) -> dict[tuple[str, ...], list[str]]:
+        """只把完整且顺序相同的来源组映到当前 canonical IDs。"""
         if (
-            not isinstance(source_segment_ids, list)
-            or len(source_segment_ids) > 500
+            not isinstance(source_segment_groups, list)
+            or len(source_segment_groups) > 500
             or any(
-                not isinstance(item, str) or not item.strip()
-                for item in source_segment_ids
+                not isinstance(group, list) or not group
+                or any(not isinstance(item, str) or not item.strip() for item in group)
+                or len(group) != len(set(group))
+                for group in source_segment_groups
             )
         ):
-            raise ValueError("source_segment_ids 必须是至多 500 个非空字符串")
-        normalized_segments = list(dict.fromkeys(source_segment_ids))
-        if not normalized_segments:
+            raise ValueError("source_segment_groups 必须是至多 500 个非空唯一来源组")
+        normalized_groups = list(dict.fromkeys(
+            tuple(group) for group in source_segment_groups
+        ))
+        if not normalized_groups:
             return {}
-        result = {segment_id: [] for segment_id in normalized_segments}
+        result = {group: [] for group in normalized_groups}
         with self._lock:
             chunk_rows = self._conn.execute(
                 """SELECT evidence_json FROM note_chunks
@@ -297,18 +325,25 @@ class SearchRepository:
             if not current_ids:
                 return result
             id_placeholders = ",".join("?" for _ in current_ids)
-            segment_placeholders = ",".join("?" for _ in normalized_segments)
             rows = self._conn.execute(
-                f"""SELECT evidence_id, source_segment_id
-                    FROM canonical_evidence
-                    WHERE job_id=? AND note_type=? AND status='valid'
-                      AND evidence_id IN ({id_placeholders})
-                      AND source_segment_id IN ({segment_placeholders})
-                    ORDER BY source_segment_id, evidence_id""",
-                (job_id, note_type, *current_ids, *normalized_segments),
+                f"""SELECT c.evidence_id, s.ordinal, s.source_segment_id
+                    FROM canonical_evidence c
+                    JOIN canonical_evidence_sources s
+                      ON s.evidence_id=c.evidence_id
+                    WHERE c.job_id=? AND c.note_type=? AND c.status='valid'
+                      AND c.evidence_id IN ({id_placeholders})
+                    ORDER BY c.evidence_id, s.ordinal""",
+                (job_id, note_type, *current_ids),
             ).fetchall()
+        by_evidence: dict[str, list[str]] = {}
         for row in rows:
-            result[str(row["source_segment_id"])].append(str(row["evidence_id"]))
+            by_evidence.setdefault(str(row["evidence_id"]), []).append(
+                str(row["source_segment_id"])
+            )
+        for evidence_id, members in by_evidence.items():
+            group = tuple(members)
+            if group in result:
+                result[group].append(evidence_id)
         return result
 
     def canonical_evidence_ids_for_notes(
@@ -636,11 +671,15 @@ class SearchRepository:
         )
         expected_fields = {
             "evidence_id", "schema_version", "job_id", "note_type", "chunk_id",
-            "section", "source_ref", "source_segment_id", "source_path", "source_sha256",
-            "source_revision", "note_path", "note_sha256", "provenance_path",
+            "section", "note_path", "note_sha256", "provenance_path",
             "provenance_sha256", "chunk_body_sha256", "chunk_char_start",
-            "chunk_char_end", "locator_kind", "locator_json",
-            "evidence_fingerprint", "source_fingerprint",
+            "chunk_char_end", "evidence_fingerprint", "source_group_fingerprint",
+            "sources",
+        }
+        source_fields = {
+            "ordinal", "source_ref", "source_segment_id", "source_path",
+            "source_sha256", "source_revision", "locator_kind", "locator_json",
+            "source_fingerprint",
         }
         seen: set[str] = set()
         for record in records:
@@ -652,6 +691,34 @@ class SearchRepository:
             if evidence_id in seen:
                 raise ValueError("canonical evidence id is duplicated")
             seen.add(evidence_id)
+            sources = record["sources"]
+            if (
+                not isinstance(sources, list) or not sources
+                or any(not isinstance(source, dict) or set(source) != source_fields
+                       for source in sources)
+                or [source["ordinal"] for source in sources] != list(range(len(sources)))
+                or len({source["source_segment_id"] for source in sources}) != len(sources)
+            ):
+                raise ValueError("canonical evidence source group is invalid")
+            source_group_fingerprint = hashlib.sha256(json.dumps(
+                [source["source_fingerprint"] for source in sources],
+                ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            if record["source_group_fingerprint"] != source_group_fingerprint:
+                raise ValueError("canonical evidence source group fingerprint is invalid")
+            expected_evidence_id = "ce_" + hashlib.sha256(json.dumps(
+                {
+                    "schema_version": record["schema_version"],
+                    "job_id": record["job_id"],
+                    "note_type": record["note_type"],
+                    "chunk_id": record["chunk_id"],
+                    "source_group_fingerprint": source_group_fingerprint,
+                    "evidence_fingerprint": record["evidence_fingerprint"],
+                },
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            if evidence_id != expected_evidence_id:
+                raise ValueError("canonical evidence id is invalid")
             chunk = connection.execute(
                 """SELECT job_id, note_type, section, char_start, char_end, body
                    FROM note_chunks WHERE chunk_id=?""",
@@ -670,13 +737,12 @@ class SearchRepository:
             connection.execute(
                 """INSERT INTO canonical_evidence
                    (evidence_id, schema_version, job_id, note_type, chunk_id, section,
-                    source_ref, source_segment_id, source_path, source_sha256, source_revision,
                     note_path, note_sha256, provenance_path, provenance_sha256,
                     chunk_body_sha256, chunk_char_start, chunk_char_end,
-                    locator_kind, locator_json, evidence_fingerprint,
-                    source_fingerprint, status, invalid_reason, validated_at,
+                    evidence_fingerprint, source_group_fingerprint,
+                    status, invalid_reason, validated_at,
                     created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                            'valid',NULL,?,?,?)
                    ON CONFLICT(evidence_id) DO UPDATE SET
                        status='valid', invalid_reason=NULL, validated_at=excluded.validated_at,
@@ -684,16 +750,32 @@ class SearchRepository:
                 (
                     record["evidence_id"], record["schema_version"], record["job_id"],
                     record["note_type"], record["chunk_id"], record["section"],
-                    record["source_ref"], record["source_segment_id"],
-                    record["source_path"], record["source_sha256"],
-                    record["source_revision"], record["note_path"], record["note_sha256"],
+                    record["note_path"], record["note_sha256"],
                     record["provenance_path"], record["provenance_sha256"],
                     record["chunk_body_sha256"], record["chunk_char_start"],
-                    record["chunk_char_end"], record["locator_kind"],
-                    record["locator_json"], record["evidence_fingerprint"],
-                    record["source_fingerprint"], now, now, now,
+                    record["chunk_char_end"], record["evidence_fingerprint"],
+                    record["source_group_fingerprint"], now, now, now,
                 ),
             )
+            connection.execute(
+                "DELETE FROM canonical_evidence_sources WHERE evidence_id=?",
+                (evidence_id,),
+            )
+            for source in sources:
+                connection.execute(
+                    """INSERT INTO canonical_evidence_sources
+                       (evidence_id, ordinal, source_ref, source_segment_id,
+                        source_path, source_sha256, source_revision, locator_kind,
+                        locator_json, source_fingerprint)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        evidence_id, source["ordinal"], source["source_ref"],
+                        source["source_segment_id"], source["source_path"],
+                        source["source_sha256"], source["source_revision"],
+                        source["locator_kind"], source["locator_json"],
+                        source["source_fingerprint"],
+                    ),
+                )
         rows = connection.execute(
             """SELECT chunk_id, evidence_id FROM canonical_evidence
                WHERE job_id=? AND note_type=? AND status='valid'

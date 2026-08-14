@@ -1005,7 +1005,7 @@ def test_stable_tree_copy_rejects_file_swapped_to_symlink(
     assert not (tmp_path / "copied" / "payload.txt").exists()
 
 
-def test_reconstructible_worker_cache_is_excluded_without_hiding_worker_state(
+def test_reconstructible_worker_runtime_is_excluded_without_hiding_worker_state(
     tmp_path: Path,
 ):
     sources = _fixture_roots(tmp_path / "source")
@@ -1017,6 +1017,14 @@ def test_reconstructible_worker_cache_is_excluded_without_hiding_worker_state(
     (blobs / "config.json").write_text("{}", encoding="utf-8")
     (cache / "config.json").symlink_to("../../blobs/config.json")
     (worker / "worker.json").write_text('{"id":"nas-cpu"}', encoding="utf-8")
+    qoder = worker / ".qoder"
+    auth = qoder / ".auth"
+    auth.mkdir(parents=True)
+    (auth / "user").write_text('{"account":"fixture"}', encoding="utf-8")
+    run = qoder / "logs" / "runs" / "run-1"
+    run.mkdir(parents=True)
+    (run / "session.log").write_text("runtime diagnostics", encoding="utf-8")
+    (qoder / "logs" / "latest").symlink_to("runs/run-1")
 
     archive = tmp_path / "backups" / "worker-cache.tar.gz"
     dr.create_snapshot(
@@ -1032,9 +1040,12 @@ def test_reconstructible_worker_cache_is_excluded_without_hiding_worker_state(
 
     declared = set(manifest["files"])
     assert "assets/data/workers/nas-cpu/worker.json" in declared
+    assert "assets/data/workers/nas-cpu/.qoder/.auth/user" in declared
     assert not any("/workers/nas-cpu/.cache/" in path for path in declared)
+    assert not any("/workers/nas-cpu/.qoder/logs/" in path for path in declared)
     assert manifest["assets"]["data"]["excluded_runtime_subtrees"] == [
         "workers/*/.cache",
+        "workers/*/.qoder/logs",
     ]
 
 
