@@ -308,6 +308,7 @@ def test_all_coverage_parts_fail_closed_before_combine() -> None:
         if step.get("name") == "Wait for every coverage producer"
     )
     assert "ci_wait_coverage.py --phase all" in wait_step["run"]
+    assert "--timeout 480" in wait_step["run"]
     assert wait_step["env"]["GH_TOKEN"] == "${{ github.token }}"
     assertion_step = next(
         step for step in gate["steps"]
@@ -373,7 +374,7 @@ def test_ci_first_layer_fits_account_slots_and_images_share_one_runner() -> None
     assert jobs["coverage-gate"]["needs"] == [
         "prepare-test-runtime", "detect", "build-images",
     ]
-    assert jobs["coverage-gate"]["timeout-minutes"] == 5
+    assert jobs["coverage-gate"]["timeout-minutes"] == 10
 
     for job_name in ("unit-normal", "unit-worker"):
         steps = jobs[job_name]["steps"]
