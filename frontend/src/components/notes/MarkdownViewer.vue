@@ -65,8 +65,8 @@ md.renderer.rules.image = (tokens: any, idx: any, options: any, env: any, self: 
   const token = tokens[idx]
   const src = token.attrGet('src') || ''
   if (src.startsWith('assets/') || src.startsWith('./assets/')) {
-    const filename = src.replace(/^\.?\/?(assets\/)/, '')
-    token.attrSet('src', `/api/jobs/${env.jobId}/assets/${filename}`)
+    const artifactPath = src.replace(/^\.\//, '')
+    token.attrSet('src', `/api/jobs/${env.jobId}/artifact?path=${encodeURIComponent(artifactPath)}`)
     token.attrSet('loading', 'lazy')
     token.attrSet('class', 'rounded-lg max-w-full my-2')
   }

@@ -21,6 +21,36 @@ describe('MarkdownViewer math', () => {
   })
 })
 
+describe('MarkdownViewer images', () => {
+  it('uses the artifact endpoint for a nested document image', () => {
+    const w = mount(MarkdownViewer, {
+      props: {
+        content: '![Figure](assets/document/figure.png)',
+        jobId: 'job_123',
+      },
+    })
+
+    const image = w.get('img')
+    expect(image.attributes('src')).toBe(
+      '/api/jobs/job_123/artifact?path=assets%2Fdocument%2Ffigure.png',
+    )
+    expect(image.attributes('loading')).toBe('lazy')
+  })
+
+  it('normalizes a leading dot without dropping the assets directory', () => {
+    const w = mount(MarkdownViewer, {
+      props: {
+        content: '![Frame](./assets/frame.png)',
+        jobId: 'job_123',
+      },
+    })
+
+    expect(w.get('img').attributes('src')).toBe(
+      '/api/jobs/job_123/artifact?path=assets%2Fframe.png',
+    )
+  })
+})
+
 // 术语链接(09 工单 P3):大小写不敏感 + zh_name/aliases 双语命中,统一链到实体主名。
 describe('MarkdownViewer term links', () => {
   const ENTITY = { term: 'Kelly Criterion', zh_name: '凯利准则', aliases: ['kelly formula'] }
