@@ -324,9 +324,24 @@ AI Worker 必须选择与 `FLORI_CLI_PROVIDER` 对应的镜像:`claude-cli` → 
 
 ## 6. 升级
 
+Flori 的默认生产形态是单用户个人NAS。后端、数据库schema或pipeline定义变化一律优先使用维护窗口冷迁移,
+不把零停机和旧新版本混部当作默认产品能力。纯前端发布不接触后端持久状态,仍可由ECS Watchtower独立滚动。
+
+标准流程:
+
+1. 暂停新投递、订阅同步和自动任务。
+2. 等待短任务完成;记录并取消或延后长任务。升级开始时不得遗留会被新版本静默继承的active Job。
+3. 构建或拉取目标版本,创建Exact DR并执行完整校验。
+4. 停止scheduler、API、mcp-http和全部Worker,形成单一停写边界。
+5. 同批启动同一目标版本;只允许一个迁移owner升级SQLite,其余进程等待并复验。
+6. 校验schema、migration ledger、readiness、Worker注册和组件版本。旧步骤定义失效时显式rerun/resubmit,
+   或执行本次版本自带的一次性离线迁移,不能依赖滚动混部自动修形。
+7. 恢复投递和订阅,完成本地与外部验收。
+
 ```bash
 git pull
 docker compose build
+# 在系统维护面暂停新投递/订阅,确认短任务已结束并记录需重跑的长任务。
 scripts/backup.sh
 # 从当前实际 compose profile 取完整长期持有者清单,覆盖 base 与 NAS override worker。
 # base部署使用 COMPOSE=(docker compose);NAS uptest使用下一行完整叠加命令。
@@ -339,6 +354,11 @@ mapfile -t FLORI_WRITERS < <("${COMPOSE[@]}" config --services \
 ```
 
 先用新版本的 DR 工具完成全资产备份，再停止所有持有 SQLite 的旧后端。同批启动同一版本的 api、scheduler、mcp-http 和 Worker 后，首个后端进程在跨进程锁内迁移，其余进程等待并复验；schema、ledger、readiness 和组件版本一致后才算升级完成。Redis 的持久状态不因容器重建而丢失。
+
+现有兼容实现继续按当前契约工作,但不要为日常NAS升级继续开发旧新scheduler/worker混部、active Job DAG自动换形、
+旧writer回写新schema、每种历史artifact schema永久兼容,或只为滚动发布服务的复杂generation换代。只有明确的
+零停机、多节点独立升级或无法排空的外部Worker需求经单独批准后,才能改变这一边界。冷迁移不降低Exact DR、
+迁移原子性、防重复AI计费、幂等提交、安全和证据真实性门禁。
 
 ### 6.1 SQLite 迁移门
 

@@ -71,7 +71,7 @@ ROADMAP.md                  → 里程碑和进度
 > 最终进入 `main` 的正式提交按本节执行。分支 checkpoint 只用于保存可恢复进度，合入前必须整理，不按正式提交发布。与某个 agent 的 harness 默认（如型号后缀、session 链接）不一致时，**以本节为准**（CLAUDE.md OVERRIDE 默认行为）。
 
 **交付单元与提交边界**
-- `main` 上每个价值提交对应一个可独立验收、可独立回滚、部署后完整可用的价值单元。提交边界由验收与回滚边界决定，不由 agent、文件数、代码行数或反馈轮次决定。`multi` 末尾或 `single commit-only` 后续晋级发布时,允许额外一个只承载版本与必要发布元数据的 `build(release)` 提交；它对应发布边界，不伪装成新的功能单元。
+- `main` 上每个价值提交对应一个可独立验收、可独立回滚、部署后完整可用的价值单元。提交边界由验收与回滚边界决定，不由 agent、文件数、代码行数或反馈轮次决定。一个完整发布项目只对应一个版本号,版本必须并入该项目最后一个价值提交;首次 push 前允许并要求用 amend/rebase/squash 整理,不得默认创建只改版本号的提交。
 - 同一功能的多 agent 实现、多轮评审和 UI 调整留在同一交付单元。只有契约、部署顺序或回滚边界确实独立时才拆分。
 - 实现与回归测试、对外接口与 `docs/03-contracts.md`、数据迁移与消费方必须在同一交付单元闭环，不得把不可 build、不可测或不可部署的中间状态留在 `main`。
 - 分支允许 `wip:` / `fixup!` checkpoint。checkpoint 不 bump 版本、不进入 `main`；integrator 合入前必须用 squash 方式把全部 checkpoint 整合为待提交 diff，通过价值门后再创建一个正式提交。紧急生产修复、独立 revert 和独立 CI 修复可形成小而完整的正式提交。
@@ -86,8 +86,8 @@ ROADMAP.md                  → 里程碑和进度
 - 只有 `change/ship/operate` 开工前选择三个 profile：规模 `single | multi`，风险 `normal | contract | critical`，发布范围 `review-first | commit-only | ci | full-deploy`。纯运行运维无代码发布时发布 profile 可记为“不涉及”。
 - `multi` 必须先画依赖 DAG，登记共享热点 owner、可并行节点、串行链和集成批次；`single` 不需要伪造 DAG。**实际修改或操作**安全边界、数据库迁移、灾备恢复、身份、凭据与权限默认属于 `critical`，必须执行威胁/不变量矩阵、恶意测试和独立审查；只读讨论这些主题仍是 `consult`，只在答案或设计中覆盖相关不变量与恢复边界。
 - 若只把上述高风险主题写成持久设计稿,执行模式是`change/review-first`,风险profile用`normal`(设计本身改外部契约时用`contract`),风险门标`critical-target`:记录设计级不变量/威胁/拒绝/回滚/恢复矩阵,实现依赖它之前做一次独立设计审查,但设计稿本身不运行恶意产品测试或发布门。
-- `review-first` 在用户确认前不得正式 commit、push 或部署；`commit-only`只形成已授权的本地无版本价值提交,不bump、不push,后续扩大到发布时另做唯一版本bump且不重写价值提交；`ci` 到最终 push 与 required jobs 全绿为止；`full-deploy` 还必须完成本地/NAS、ECS 与外部验证。用户明确授权的终止条件优先，但不得借 profile 降低契约、安全或数据完整性门禁。
-- 多单元在`review-first`阶段保留可识别候选,不创建正式价值commit。进入`ship`且用户授权commit后,才在发布分支为各独立回滚边界创建价值commit并按依赖批次集成；全部批次通过后只做一次版本发布、一次push和一次部署。
+- `review-first` 在用户确认前不得正式 commit、push 或部署；`commit-only`只形成已授权的本地无版本价值提交,不bump、不push；后续扩大到`ci/full-deploy`时,在首次push前amend该提交把版本并入,必要时先squash同项目checkpoint；`ci` 到最终 push 与 required jobs 全绿为止；`full-deploy` 还必须完成本地/NAS、ECS 与外部验证。用户明确授权的终止条件优先，但不得借 profile 降低契约、安全或数据完整性门禁。
+- 多单元在`review-first`阶段保留可识别候选,不创建正式价值commit。进入`ship`且用户授权commit后,才在发布分支为各独立回滚边界创建价值commit并按依赖批次集成；全部批次通过后由列车integrator把唯一版本bump amend进最后一个价值commit,或把整列车squash成一个完整项目commit,然后只push、CI和部署一次。只有相关价值提交已经push到共享远端且明确禁止改写历史时,才允许额外`build(release)`补版本,并在正文说明不能amend的原因。
 
 **集成责任**
 - 每个交付单元指定唯一 integrator；`multi` 另指定唯一列车 integrator，负责 DAG、批次集成、最终版本、push、部署和全局回收。单单元时两者是同一人。
@@ -203,9 +203,17 @@ flori/
      全量回归由 **CI 承担**：push/PR 自动跑后端普通混合预分 15 片 + worker 1 分片 + 真依赖 integration 两分组 + 覆盖率门(75%) + 前端 vitest（`.github/workflows/ci.yml`);schemathesis 独立每日 cron。
   2. **「子任务完成」判定** = 约定 scope 实现完成 + 相关用例绿 + 改动与验证清单已报告。子 agent 完成不等于交付单元可发布。
   3. **「交付单元完成」判定** = integrator 已整合全部 diff + 并集相关测试绿 + 本地 build 对应镜像 +（API 调用 或 Playwright MCP）手验通过 + 必要契约/文档已同步。
-  4. `single` 完成后按发布 profile 收口；`multi`在`review-first`保留候选,进入`ship`且授权commit后才创建不bump的本地价值commit。同一集成批次统一跑跨单元联调和镜像构建,不按每个单元重复全量构建。
+  4. `single` 完成后按发布 profile 收口；`multi`在`review-first`保留候选,进入`ship`且授权commit后才创建不bump的本地价值commit。同一集成批次统一跑跨单元联调和镜像构建,不按每个单元重复全量构建；首次push前把项目唯一版本amend进最终价值commit。
   5. `review-first` 停在用户可检查的未提交候选；`commit-only`形成已授权的本地无版本价值提交后停止；`ci` 由 integrator 统一 push 并追踪 required jobs；`full-deploy` 再完成 NAS 与 ECS 验证。后端发布一律三件套全建全滚（`scripts/build-uptest.sh scheduler api worker` + recreate 全部后端容器），前端-only 发布才可只滚 frontend。ECS 仍只走 git push → coverage gate → GHCR → Watchtower。
   6. **CI 红灯**：尚未发布的问题回到对应交付单元或列车，整理后在实验/发布分支 fix-forward，不向 `main` 连续推送试错微提交；已部署版本默认以小而完整的新发布修正，仅当线上功能明显坏才 `scripts/rollback.sh` 回滚。
+
+### 个人 NAS 默认升级边界(冷迁移优先)
+
+- 本项目是单用户个人NAS系统,后端、数据库schema或pipeline定义变化默认使用维护窗口冷迁移,不以零停机或旧新版本混部为产品要求。纯前端发布仍可由ECS Watchtower独立滚动。
+- 默认顺序:暂停新投递和订阅 → 等待短任务结束并记录/取消长任务 → 创建并校验Exact DR → 停止scheduler、API、mcp-http与全部Worker → 用同一版本镜像冷启动并由单一迁移owner升级数据库 → 校验schema/ledger/readiness/版本 → 对失效步骤显式重跑 → 恢复服务和投递 → 做外部验收。
+- 冷迁移发布前必须证明没有active Job被静默跨版本继承。旧Job需要新定义时通过显式rerun/resubmit或一次性离线迁移收敛,不能为了不停机继续扩展在线状态机。
+- 现有兼容代码不因本规则立即删除,但默认**不再开发**以下能力:旧新scheduler/worker混部,active Job DAG自动换形,旧writer回写新schema,每种历史artifact schema永久兼容,以及只为滚动升级服务的复杂generation换代。只有用户明确提出零停机、多节点独立升级或不可排空外部Worker,并单独批准相应复杂度时才能重开。
+- 安全、Exact DR、迁移原子性、防重复AI计费、提交幂等和证据真实性仍是硬门,不得以冷迁移为由放宽。普通审查只攻击本次变更边界；候选冻结后默认一次实现审查,`contract/critical`再加一次独立终审,P2/P3新范围进后续待办,不得把同一修复无限扩成平台重构。
 
 ### 本地活栈（NAS,override 叠加）
 ```
@@ -270,7 +278,7 @@ docker compose -f docker-compose.yml -f .local/docker-compose.uptest.yml --env-f
 以下来自历史 memory，作为跨会话稳定约定与踩坑记录。真实凭证不写入本文件。
 
 ### 规则与偏好
-- 版本递增按三档执行：普通改动 patch +1（逢 10 进位），大的重构 minor +1，架构级重构 major +1。版本代表一次实际发布：single 直接发布时由价值 commit bump；single 的 `commit-only` 后续晋级发布,或 multi 列车收口时,由额外的 `build(release)` commit bump；branch checkpoint、未发布价值 commit 与非发布治理 commit 不 bump。
+- 版本递增按三档执行：普通改动 patch +1（逢 10 进位），大的重构 minor +1，架构级重构 major +1。一个完整发布项目对应一个版本号:single直接发布在价值commit中bump;本地`commit-only`晋级或multi列车收口时,首次push前用amend/rebase/squash把版本并入最终价值commit。只有价值提交已push且禁止改写历史时才允许例外的`build(release)`纯版本提交;branch checkpoint、未发布价值commit与非发布治理不bump。
 - 提交格式以本文件「提交规范」为准，覆盖 agent harness 默认。禁止 `Claude-Session` URL、`(1M context)` 等后缀；正文只保留一行 `Co-Authored-By` trailer。
 - 每个交付单元只有唯一 integrator 可创建正式提交、push、部署和回收 worktree。后台 fork/agent 默认只在租约 scope 内实现、测试和报告，不得自走完整发布链。
 - 现在是单人开发，`frontend/` 与 `design/` 也归当前 agent，可改功能、设计、UI。对外接口仍以 `docs/03-contracts.md` 为契约；接口变更同提交更新契约文档。

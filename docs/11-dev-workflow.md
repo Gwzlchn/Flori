@@ -161,7 +161,7 @@ services:
 4. 唯一列车 integrator、发布分支、目标版本和最终 push/deploy 条件。
 5. 以候选标识为键的证据账本;优先使用checkpoint/tree SHA,未提交的`review-first`候选使用确定性diff digest。候选包含gitignored持久文件时,摘要必须显式覆盖这些文件。单元TXT只引用证据ID,不复制完整输出。
 
-`review-first`阶段各单元保留可识别候选,不创建正式价值commit。进入`ship`且用户授权commit后,每个独立回滚边界才在发布分支形成一个不bump的价值commit;全部批次通过后由列车integrator创建一个`build(release)`commit统一bump,再一次push、CI和部署。
+`review-first`阶段各单元保留可识别候选,不创建正式价值commit。进入`ship`且用户授权commit后,每个独立回滚边界才在发布分支形成一个不bump的价值commit;全部批次通过后由列车integrator在首次push前把唯一版本bump amend进最后一个价值commit,或把整列车squash为一个完整项目commit,再一次push、CI和部署。只有相关价值提交已经push到共享远端且明确禁止改写历史时,才允许额外`build(release)`补版本,正文必须说明不能amend的原因。
 
 ### 4.5 Worktree 租约与停滞回收
 
@@ -194,6 +194,7 @@ checkpoint 分支经 squash 后不会成为 `main` 祖先。integrator 必须先
 2. `normal` 默认一次实现审查;`contract` / `critical` 默认一次实现审查加一次独立终审。发现新的 P0/P1 类别可以重开门禁;同类小修继续在当前轮关闭,P2/P3 新范围进入后续工作项。
 3. reviewer 优先验证风险矩阵、diff 和未覆盖边界,复用满足§5全部匹配维度的已有证据;证据仍有效时不机械重跑全量套件。
 4. checkpoint 是可恢复保存点,不是审查或正式提交单位。多轮反馈继续写入同一工作项时间线。
+5. 候选进入终审前必须冻结。reviewer只把本次变更边界内的新P0/P1作为重开理由;同类修复在当前轮关闭,P2/P3或假设性的旧新版本混部需求进入后续待办。不得在候选持续漂移时串行启动无限轮独立审查。
 
 ### 4.7 提交规范
 
@@ -201,7 +202,7 @@ checkpoint 分支经 squash 后不会成为 `main` 祖先。integrator 必须先
 
 标题:
 
-- 单单元直接发布的价值commit,以及`single commit-only`晋级或多单元列车末尾的`build(release)`commit:`<type>(<scope>): <中文摘要>;<新版本>`。
+- 单单元直接发布的价值commit,`single commit-only`晋级时amend后的价值commit,以及多单元列车最后一个价值commit:`<type>(<scope>): <中文摘要>;<新版本>`。
 - 尚未单独push/部署的列车内价值commit,以及文档、公约、调研、测试或CI治理commit:`<type>(<scope>): <中文摘要>`,不带版本。
 - `type`只允许`feat/fix/refactor/chore/ops/contract/test/docs/perf/build`;`scope`使用受影响模块/领域的小写标识。
 - 摘要用中文说明“做了什么 + 为什么”,不写句号,逗号用半角`,`。
@@ -211,9 +212,10 @@ checkpoint 分支经 squash 后不会成为 `main` 祖先。integrator 必须先
 
 - 单一来源是`pyproject.toml`的`[project].version`;后端共用`shared.version.FLORI_VERSION`,前端从后端读取,`package.json`不跟随。
 - 普通改动patch+1并逢10进位;大重构minor+1且patch归0;架构级大重构major+1且后两段归0。
-- 版本代表一次实际发布。`single`直接发布在价值commit中bump一次;`single commit-only`晋级发布时新增一个`build(release)`commit统一bump;`multi`各价值commit不bump,列车末尾由唯一integrator创建一个`build(release)`commit统一bump。
+- 一个完整发布项目对应一个版本号。`single`直接发布在价值commit中bump一次;`single commit-only`晋级发布时在首次push前amend原价值commit并加入bump;`multi`的中间价值commit不bump,列车末尾在首次push前把唯一bump amend进最后一个价值commit,或把整列车squash成一个完整项目commit。
 - checkpoint、未单独发布的列车内价值commit和非发布治理commit不bump。若列车分成两次push/部署,每次都是独立发布并各bump一次。
-- `commit-only`的本地价值commit不bump。若之后扩大到`ci/full-deploy`,保留该价值commit并新增一次`build(release)`版本提交,不重写已审候选。
+- `commit-only`的本地价值commit不bump。若之后扩大到`ci/full-deploy`,允许并要求在首次push前amend/squash,把版本并回已审项目；测试证据优先绑定tree/diff,版本文件变化只补静态版本门,不机械重跑无关产品测试。
+- 只有相关价值commit已经push到共享远端且禁止改写历史时,才允许独立`build(release)`纯版本提交。它是历史不可改写的例外,不是multi或晋级发布的默认步骤;Git tag/GitHub Release承担发布标记。
 
 正文:
 
@@ -227,8 +229,8 @@ checkpoint 分支经 squash 后不会成为 `main` 祖先。integrator 必须先
 ```
 feat(scheduler): 实现 DAG 推进逻辑              # 列车内价值 commit,未单独发布
 feat(scheduler): 实现 DAG 推进逻辑;0.2.0        # single 直接发布
-build(release): 发布本列车已验收价值;0.3.0      # multi 统一发布
-build(release): 发布已审单元价值;0.3.1          # single commit-only 后续晋级
+fix(document): 重构论文知识链;0.3.0             # multi最后价值commit经amend承载唯一版本
+build(release): 补记已push项目版本;0.3.1        # 仅限共享历史不可改写的例外
 ```
 
 非发布治理示例:
@@ -277,7 +279,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 1. 记录模式、profile、验收目标、回滚边界、scope、唯一integrator和可复用证据;agent租约、热点owner、版本、部署等条件字段只在触发时填写。
 2. 实现与定向验证后按风险 profile 完成审查。
 3. integrator squash checkpoint,执行单元集成并同步契约、迁移、消费方和必要文档。
-4. `review-first`停在未提交候选;`commit-only`形成已授权的本地无版本价值提交后停止;直接进入`ci/full-deploy`的产品改动把价值commit作为发布commit并bump一次。已有`commit-only`价值commit后再扩大终点时,另建一次`build(release)`版本提交。纯文档、公约、调研、测试或CI治理仍不bump。
+4. `review-first`停在未提交候选;`commit-only`形成已授权的本地无版本价值提交后停止;直接进入`ci/full-deploy`的产品改动把价值commit作为发布commit并bump一次。已有`commit-only`价值commit后再扩大终点时,首次push前amend该commit把版本并回完整项目。纯文档、公约、调研、测试或CI治理仍不bump。
 5. 只执行当前模式到达的检查。使用worktree时核对并报告本任务分支;进入ship后才检查origin、CI、版本和部署。
 
 ### 6.3 多个交付单元
@@ -285,7 +287,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 1. 先冻结 DAG、串行热点链、集成批次、列车 integrator 和证据账本。
 2. 各单元按同一生命周期推进,只在依赖满足时做详细审计和实现。
 3. `review-first`单元完成后保留候选标识;进入`ship`且用户授权commit后才形成不bump的价值commit。每批只跑一次跨单元集成与镜像构建。
-4. 全部批次通过后创建一个发布 commit,一次 push、CI、版本发布和部署。
+4. 全部批次通过后把唯一版本amend进最后一个价值commit,或把整列车squash成一个完整项目commit;不得默认创建纯版本提交。随后一次push、CI、版本发布和部署。
 5. 按证据账本生成完成矩阵,再统一回收 worktree、checkpoint、临时分支和实验资源。
 
 只有使用worktree的change、ship或需要Git回收的operate在最终回复前检查本任务worktree、登记分支和`git status`。可用`.agents/skills/flori-delivery-train/scripts/delivery-snapshot.sh`合并机械查询;候选含gitignored持久文件时用`--extra <label=path>`纳入复合摘要。不要因其它会话存在无关worktree就扩展本任务scope。

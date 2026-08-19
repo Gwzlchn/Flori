@@ -151,6 +151,8 @@ def test_detect_uses_last_successful_run_and_fail_safe_classification() -> None:
     assert "backend=true" in classify_run
     assert "frontend=true" in classify_run
     assert "ci_pyproject_change.py" in classify_run
+    assert '--kind version "$BASE_SHA" "$HEAD_SHA"' in classify_run
+    assert 'pyproject_version" = "true"' in classify_run
     assert "ci_docker_change.py" in classify_run
     assert '"$HEAD_SHA" docker' in classify_run
     assert '"$HEAD_SHA" frontend' in classify_run

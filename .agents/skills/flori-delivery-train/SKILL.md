@@ -33,7 +33,7 @@ For `change`, `ship`, and `operate`, record:
 
 - Scale: `single` or `multi`.
 - Risk: `normal`, `contract`, or `critical`.
-- Release: `review-first`, `commit-only`, `ci`, or `full-deploy` when code delivery is involved. `commit-only` creates a local no-version value commit and stops before push; a later release adds the single version bump without rewriting that value commit.
+- Release: `review-first`, `commit-only`, `ci`, or `full-deploy` when code delivery is involved. `commit-only` creates a local no-version value commit and stops before push; if it later advances to release, amend/squash the still-local project commit before the first push so the version stays in the value commit.
 
 Actual changes to security boundaries, database migrations, backup/restore behavior, identity, credentials, authorization, or destructive production state default to `critical`. A read-only discussion or design review about those topics remains `consult`; include relevant invariants and recovery concerns in the answer without invoking implementation, test, or release gates.
 
@@ -55,16 +55,30 @@ A durable design for one of those boundaries is `change/review-first` with risk 
 2. Run new and directly related tests through `scripts/test.sh`. Use a unique `TEST_WARM_NAME` in a worktree. Do not run product tests for governance-only or ordinary read-only documentation work; use proportional static validation. A formal reviewer of a `contract` or `critical` candidate may rerun reviewer-scoped contract, risk-matrix, adversarial, or otherwise unverifiable tests without converting the review into `change`.
 3. Bind reusable evidence to candidate identity, inputs, command, runtime config, dependency image, and result. A candidate that includes ignored durable files uses a composite digest covering those files. Reuse the result only while the first five dimensions remain unchanged.
 4. Let implementers run targeted tests, reviewers challenge changed risks and unverifiable evidence, integrators run touched-path integration, and final CI run the full gate. Do not repeat the same full suite at every role.
-5. Default `normal` to one implementation review. Default `contract` and `critical` to one implementation review plus one independent final review. Reopen only for a new P0/P1 class.
+5. Default `normal` to one implementation review. Default `contract` and `critical` to one implementation review plus one independent final review. Freeze the candidate before final review and reopen only for a new P0/P1 inside the changed boundary; defer P2/P3 and hypothetical mixed-version support instead of growing the active unit.
 6. For `review-first`, leave the candidate inspectable and uncommitted until the user approves.
 
 ## Ship or operate only when selected
 
-- Preserve one value commit per acceptance/rollback boundary. Checkpoints are recovery points and must be squashed before main; do not create commits for agents or review rounds.
-- For `multi`, integrate by dependency batch, then bump once, push once, and deploy once. Run builds early only when build inputs changed.
+- Preserve one value commit per acceptance/rollback boundary. One complete released project has one version, carried by its final value commit. Checkpoints are recovery points and must be squashed before main; do not create commits for agents or review rounds.
+- Before the first push, amend a promoted `commit-only` unit or the final `multi` value commit to include the one version bump; the train may instead squash into one complete project commit. Do not create a version-only commit by default. Allow `build(release)` only when the value commits are already on a shared remote and history must not be rewritten, and record that reason. Use Git tags or GitHub Releases as release markers.
+- For `multi`, integrate by dependency batch, then amend/squash the version once, push once, and deploy once. Run builds early only when build inputs changed.
 - For content delivery, follow `.local/delivery/README.txt`; keep catalog, state, batch, Bug, and processing authorities separate.
 - For CI tuning, follow `docs/12-cicd.md` and use historical simulation plus bounded experiment cycles; do not churn main.
 - For production/destructive operations, require a precise target manifest, recoverable backup when needed, fail-closed checks, and post-operation reconciliation.
+
+## Default to cold upgrades on the personal NAS
+
+The default backend release model is a maintenance-window cold upgrade, not zero-downtime mixed-version operation:
+
+1. Pause new intake and subscriptions.
+2. Let short jobs finish; record and cancel or defer long jobs.
+3. Create and verify an exact DR generation.
+4. Stop Scheduler, API, MCP, and every Worker that can write current state.
+5. Start one product version, let one migration owner upgrade the database, and verify schema, ledger, readiness, and component versions.
+6. Explicitly rerun or resubmit invalidated steps, resume intake, and perform external acceptance.
+
+Do not extend old/new Scheduler or Worker coexistence, automatic active-DAG reshaping, old-writer-to-new-schema bridges, permanent support for every historical artifact schema, or generation machinery that exists only for rolling upgrades. Keep current compatibility code unless a bounded cleanup is separately authorized. Reopen such work only for an explicit zero-downtime or independently upgraded multi-node requirement. Exact DR, migration atomicity, idempotent commits, duplicate-AI-charge prevention, security, and evidence integrity remain mandatory.
 
 ## Close at the reached mode
 

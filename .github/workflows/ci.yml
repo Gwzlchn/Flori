@@ -529,8 +529,14 @@ jobs:
             backend=true
             frontend=true
           elif [ "${{ steps.f.outputs.pyproject }}" = "true" ]; then
-            pyproject_backend=$(python3 scripts/ci_pyproject_change.py "$BASE_SHA" "$HEAD_SHA")
-            [ "$pyproject_backend" = "true" ] && backend=true
+            pyproject_version=$(python3 scripts/ci_pyproject_change.py --kind version "$BASE_SHA" "$HEAD_SHA")
+            if [ "$pyproject_version" = "true" ]; then
+              backend=true
+              frontend=true
+            else
+              pyproject_backend=$(python3 scripts/ci_pyproject_change.py "$BASE_SHA" "$HEAD_SHA")
+              [ "$pyproject_backend" = "true" ] && backend=true
+            fi
           fi
           if [ "${{ steps.baseline.outputs.force_all }}" != "true" ] \
             && [ "${{ steps.f.outputs.docker }}" = "true" ]; then

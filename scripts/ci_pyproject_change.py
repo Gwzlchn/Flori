@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""判断 pyproject 是否有版本字段之外的语义变化."""
+"""分类 pyproject 的运行时变化与项目版本变化."""
 
 from __future__ import annotations
 
@@ -22,6 +22,17 @@ def project_version(data: dict[str, Any]) -> str | None:
     if isinstance(version, str) and VERSION_PATTERN.fullmatch(version):
         return version
     return None
+
+
+def has_project_version_change(base_content: str, head_content: str) -> bool:
+    """返回 project.version 字段是否变化,包含删除与非法值变化."""
+    base_data = tomllib.loads(base_content)
+    head_data = tomllib.loads(head_content)
+    base_project = base_data.get("project")
+    head_project = head_data.get("project")
+    base_version = base_project.get("version") if isinstance(base_project, dict) else None
+    head_version = head_project.get("version") if isinstance(head_project, dict) else None
+    return base_version != head_version
 
 
 def has_relevant_change(base_content: str, head_content: str) -> bool:
@@ -50,15 +61,31 @@ def git_file(revision: str) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print("usage: ci_pyproject_change.py <base-revision> <head-revision>", file=sys.stderr)
+    kind = "relevant"
+    revisions = argv[1:]
+    if len(argv) == 5 and argv[1:3] == ["--kind", "version"]:
+        kind = "version"
+        revisions = argv[3:]
+    elif len(argv) != 3:
+        revisions = []
+    if len(revisions) != 2:
+        print(
+            "usage: ci_pyproject_change.py [--kind version] "
+            "<base-revision> <head-revision>",
+            file=sys.stderr,
+        )
         return 2
 
     try:
-        changed = has_relevant_change(git_file(argv[1]), git_file(argv[2]))
+        base_content = git_file(revisions[0])
+        head_content = git_file(revisions[1])
+        if kind == "version":
+            changed = has_project_version_change(base_content, head_content)
+        else:
+            changed = has_relevant_change(base_content, head_content)
     except (OSError, subprocess.CalledProcessError, tomllib.TOMLDecodeError) as exc:
-        # 基线缺失或文件异常时宁可多构建一次,也不能漏掉依赖变化.
-        print(f"pyproject comparison failed, rebuilding backend: {exc}", file=sys.stderr)
+        # 基线缺失或文件异常时宁可多构建一次,也不能漏掉运行时或版本变化.
+        print(f"pyproject comparison failed, rebuilding product images: {exc}", file=sys.stderr)
         changed = True
 
     print("true" if changed else "false")
