@@ -180,3 +180,33 @@ async fn enforces_asset_size_and_extractor_timeout() {
         Some(ErrorCode::AttemptTimeout)
     );
 }
+
+#[tokio::test]
+async fn pinned_extractor_matches_the_offline_golden_when_enabled() {
+    let Some(python) = std::env::var_os("FLORI_PDF_TEST_PYTHON") else {
+        return;
+    };
+    let root = TestRoot::new();
+    let (input, artifact) = fixture();
+    let output = root.0.join("real-output");
+    let config = PdfExtractConfig {
+        pdfinfo: PathBuf::from("/usr/bin/pdfinfo"),
+        pdftotext: PathBuf::from("/usr/bin/pdftotext"),
+        python: PathBuf::from(python),
+        timeout: Duration::from_secs(30),
+        max_probe_output_bytes: 64 * 1024 * 1024,
+        max_structure_bytes: 50 * 1024 * 1024,
+        max_asset_bytes: 20 * 1024 * 1024,
+        max_assets: 128,
+    };
+    let structure = extract_pdf(&artifact, &input, &output, &config)
+        .await
+        .expect("run pinned extractor");
+
+    assert_eq!(structure.pages.len(), 1);
+    assert!(!structure.sections.is_empty());
+    assert_eq!(structure.figures.len(), 1);
+    assert_eq!(structure.tables.len(), 1);
+    assert!(output.join("figures/figure-001.png").is_file());
+    assert!(output.join("tables/table-001.png").is_file());
+}
