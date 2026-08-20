@@ -5,19 +5,21 @@
 mod error;
 mod protocol;
 mod runner;
+mod runner_upload;
 
 use std::sync::Arc;
 
 use axum::Router;
 use flori_core::ErrorCode;
-use flori_store::Store;
+use flori_store::{Store, artifact::NasArtifactStore};
 
 pub fn app(
     store: Arc<Store>,
+    artifacts: Arc<NasArtifactStore>,
     artifact_download_base: String,
     lease_ms: u64,
 ) -> Result<Router, ErrorCode> {
-    runner::routes(store, artifact_download_base, lease_ms)
+    runner::routes(store, artifacts, artifact_download_base, lease_ms)
 }
 
 #[cfg(test)]
@@ -38,6 +40,10 @@ mod tests {
         let root = temporary_root();
         fs::create_dir_all(&root).expect("create test root");
         let store = Arc::new(Store::open(root.join("flori.sqlite")).await.expect("store"));
+        let artifacts = Arc::new(
+            NasArtifactStore::new(root.join("artifacts"), 16 * 1024 * 1024)
+                .expect("artifact store"),
+        );
         store
             .create_runner_slot(
                 &CreateRunnerSlot {
@@ -59,7 +65,13 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                app(store, "http://localhost/artifacts".to_owned(), 60_000).expect("test config"),
+                app(
+                    store,
+                    artifacts,
+                    "http://localhost/artifacts".to_owned(),
+                    60_000,
+                )
+                .expect("test config"),
             )
             .await
             .expect("serve");

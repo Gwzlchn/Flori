@@ -11,29 +11,32 @@ use axum::{
     http::{HeaderMap, StatusCode, Uri, header::CONTENT_TYPE},
     middleware,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{post, put},
 };
 use flori_core::{
     ErrorCode, LogCursor, LogFrame, RegisterRunnerRequest, RegisterRunnerResponse,
     RenewLeaseResponse, RequestId, RunnerId, Sha256Digest, TaskClaim, UsageAck, UsageUpdate,
 };
-use flori_store::Store;
+use flori_store::{Store, artifact::NasArtifactStore};
 use sha2::{Digest, Sha256};
 
 use crate::{
     error::HttpError,
     protocol::{BearerToken, StrictBytes, StrictJson, StrictPath, require_v1},
+    runner_upload,
 };
 
 #[derive(Clone)]
-struct HttpState {
-    store: Arc<Store>,
+pub(super) struct HttpState {
+    pub(super) store: Arc<Store>,
+    pub(super) artifacts: Arc<NasArtifactStore>,
     artifact_download_base: Arc<str>,
     lease_ms: u64,
 }
 
 pub(super) fn routes(
     store: Arc<Store>,
+    artifacts: Arc<NasArtifactStore>,
     artifact_download_base: String,
     lease_ms: u64,
 ) -> Result<Router, ErrorCode> {
@@ -42,6 +45,7 @@ pub(super) fn routes(
     }
     let state = HttpState {
         store,
+        artifacts,
         artifact_download_base: artifact_download_base.into(),
         lease_ms,
     };
@@ -60,6 +64,26 @@ pub(super) fn routes(
             post(logs).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route("/runner/v1/attempts/{exec_id}/usage", post(usage))
+        .route(
+            "/runner/v1/attempts/{exec_id}/uploads",
+            post(runner_upload::start),
+        )
+        .route(
+            "/runner/v1/uploads/{upload_id}",
+            put(runner_upload::append).layer(DefaultBodyLimit::max(runner_upload::MAX_CHUNK_BYTES)),
+        )
+        .route(
+            "/runner/v1/uploads/{upload_id}/verify",
+            post(runner_upload::verify),
+        )
+        .route(
+            "/runner/v1/attempts/{exec_id}/complete",
+            post(runner_upload::complete),
+        )
+        .route(
+            "/runner/v1/attempts/{exec_id}/fail",
+            post(runner_upload::fail),
+        )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn(require_v1))
@@ -169,7 +193,7 @@ async fn usage(
     ))
 }
 
-async fn authenticate(
+pub(super) async fn authenticate(
     state: &HttpState,
     token: &BearerToken,
     now_ms: i64,
@@ -193,7 +217,7 @@ async fn method_not_allowed() -> HttpError {
     HttpError::method_not_allowed()
 }
 
-fn now_ms() -> Result<i64, HttpError> {
+pub(super) fn now_ms() -> Result<i64, HttpError> {
     let milliseconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| HttpError::new(ErrorCode::Internal))?
@@ -269,45 +293,5 @@ fn require_empty(body: &[u8]) -> Result<(), HttpError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn token_digest_is_canonical_and_stable() {
-        let Ok(digest) = token_digest("secret") else {
-            panic!("valid digest");
-        };
-        assert_eq!(
-            digest.as_str(),
-            "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"
-        );
-    }
-
-    #[test]
-    fn remote_download_base_requires_https() {
-        assert!(valid_download_base("https://flori.example/api/artifacts"));
-        assert!(valid_download_base("http://localhost/artifacts"));
-        assert!(!valid_download_base("http://flori.example/artifacts"));
-        assert!(!valid_download_base("https://flori.example/artifacts/"));
-    }
-
-    #[test]
-    fn ndjson_requires_content_type_final_newline_and_strict_frames() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            "application/x-ndjson".parse().expect("header"),
-        );
-        let line = concat!(
-            r#"{"sequence":1,"sha256":"2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b","line":"secret"}"#,
-            "\n"
-        );
-        assert_eq!(
-            parse_ndjson(&headers, line.as_bytes()).map_or(0, |v| v.len()),
-            1
-        );
-        assert!(parse_ndjson(&headers, line.trim_end().as_bytes()).is_err());
-        assert!(parse_ndjson(&HeaderMap::new(), line.as_bytes()).is_err());
-        assert!(parse_ndjson(&headers, line.replace('}', ",\"extra\":1}").as_bytes()).is_err());
-    }
-}
+#[path = "runner/tests.rs"]
+mod tests;
