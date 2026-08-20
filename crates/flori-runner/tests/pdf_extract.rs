@@ -57,20 +57,15 @@ fn fixture() -> (PathBuf, ResolvedArtifact) {
     )
 }
 
-fn config(root: &TestRoot, text_body: &str, python_body: &str) -> PdfExtractConfig {
+fn config(root: &TestRoot, python_body: &str) -> PdfExtractConfig {
     PdfExtractConfig {
-        pdfinfo: root.script("pdfinfo", "printf 'Pages: 1\\n'"),
-        pdftotext: root.script("pdftotext", text_body),
         python: root.script("python", python_body),
         timeout: Duration::from_secs(2),
-        max_probe_output_bytes: 4096,
         max_structure_bytes: 4096,
         max_asset_bytes: 4096,
         max_assets: 4,
     }
 }
-
-const DIGITAL_TEXT: &str = "printf 'this-page-has-more-than-thirty-two-visible-characters\\014'";
 
 const VALID_EXTRACTOR: &str = r#"
 output="$4"
@@ -87,14 +82,9 @@ async fn fake_extractor_emits_strict_structure_and_regions() {
     let root = TestRoot::new();
     let (input, artifact) = fixture();
     let output = root.0.join("output");
-    let extraction = extract_pdf(
-        &artifact,
-        &input,
-        &output,
-        &config(&root, DIGITAL_TEXT, VALID_EXTRACTOR),
-    )
-    .await
-    .expect("extract digital PDF");
+    let extraction = extract_pdf(&artifact, &input, &output, &config(&root, VALID_EXTRACTOR))
+        .await
+        .expect("extract digital PDF");
 
     assert_eq!(extraction.source_artifact_id, artifact.artifact_id);
     assert_eq!(extraction.figures.len(), 1);
@@ -104,24 +94,6 @@ async fn fake_extractor_emits_strict_structure_and_regions() {
     )
     .expect("strict normalized structure");
     assert_eq!(stored, extraction);
-}
-
-#[tokio::test]
-async fn scanned_pdf_never_invokes_extractor() {
-    let root = TestRoot::new();
-    let (input, artifact) = fixture();
-    let marker = root.0.join("invoked");
-    let python = format!("touch '{}'", marker.display());
-    let result = extract_pdf(
-        &artifact,
-        &input,
-        &root.0.join("output"),
-        &config(&root, "printf 'short\\014'", &python),
-    )
-    .await;
-
-    assert_eq!(result.err(), Some(ErrorCode::UnsupportedScannedPdf));
-    assert!(!marker.exists());
 }
 
 #[tokio::test]
@@ -146,13 +118,7 @@ async fn rejects_unknown_json_symlinks_and_undeclared_files() {
         let root = TestRoot::new();
         let (input, artifact) = fixture();
         let output = root.0.join("output");
-        let result = extract_pdf(
-            &artifact,
-            &input,
-            &output,
-            &config(&root, DIGITAL_TEXT, &script),
-        )
-        .await;
+        let result = extract_pdf(&artifact, &input, &output, &config(&root, &script)).await;
         assert_eq!(result.err(), Some(expected));
         assert!(!output.exists(), "failed output must be removed");
     }
@@ -162,7 +128,7 @@ async fn rejects_unknown_json_symlinks_and_undeclared_files() {
 async fn enforces_asset_size_and_extractor_timeout() {
     let root = TestRoot::new();
     let (input, artifact) = fixture();
-    let mut limited = config(&root, DIGITAL_TEXT, VALID_EXTRACTOR);
+    let mut limited = config(&root, VALID_EXTRACTOR);
     limited.max_asset_bytes = 8;
     assert_eq!(
         extract_pdf(&artifact, &input, &root.0.join("large"), &limited)
@@ -171,7 +137,7 @@ async fn enforces_asset_size_and_extractor_timeout() {
         Some(ErrorCode::ArtifactTooLarge)
     );
 
-    let mut timeout = config(&root, DIGITAL_TEXT, "while true; do :; done");
+    let mut timeout = config(&root, "while true; do :; done");
     timeout.timeout = Duration::from_millis(20);
     assert_eq!(
         extract_pdf(&artifact, &input, &root.0.join("timeout"), &timeout)
@@ -190,11 +156,8 @@ async fn pinned_extractor_matches_the_offline_golden_when_enabled() {
     let (input, artifact) = fixture();
     let output = root.0.join("real-output");
     let config = PdfExtractConfig {
-        pdfinfo: PathBuf::from("/usr/bin/pdfinfo"),
-        pdftotext: PathBuf::from("/usr/bin/pdftotext"),
         python: PathBuf::from(python),
         timeout: Duration::from_secs(30),
-        max_probe_output_bytes: 64 * 1024 * 1024,
         max_structure_bytes: 50 * 1024 * 1024,
         max_asset_bytes: 20 * 1024 * 1024,
         max_assets: 128,

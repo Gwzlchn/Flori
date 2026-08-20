@@ -8,12 +8,16 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
 use super::network::{MAX_REDIRECTS, parse_http_url, pinned_client};
+use super::scan::require_digital_pdf;
 
 type ExpectedPdf<'a> = Option<(u64, &'a Sha256Digest)>;
 
 #[derive(Clone, Debug)]
 pub struct PdfAcquireConfig {
+    pub pdfinfo: PathBuf,
+    pub pdftotext: PathBuf,
     pub max_bytes: u64,
+    pub max_probe_output_bytes: usize,
     pub timeout: Duration,
 }
 
@@ -22,11 +26,31 @@ pub async fn acquire_pdf(
     destination: &Path,
     config: &PdfAcquireConfig,
 ) -> Result<Sha256Digest, ErrorCode> {
-    if config.max_bytes == 0 || config.timeout.is_zero() {
+    if !config.pdfinfo.is_absolute()
+        || !config.pdftotext.is_absolute()
+        || config.max_bytes == 0
+        || config.max_probe_output_bytes == 0
+        || config.timeout.is_zero()
+    {
         return Err(ErrorCode::InvalidRequest);
     }
     let (url, expected) = source_url(source)?;
-    download(url, destination, config, expected).await
+    let digest = download(url, destination, config, expected).await?;
+    let scan = require_digital_pdf(
+        &config.pdfinfo,
+        &config.pdftotext,
+        destination,
+        config.timeout,
+        config.max_probe_output_bytes,
+    )
+    .await;
+    if let Err(error) = scan {
+        fs::remove_file(destination)
+            .await
+            .map_err(|_| ErrorCode::StorageUnavailable)?;
+        return Err(error);
+    }
+    Ok(digest)
 }
 
 fn source_url(source: &ResolvedSource) -> Result<(Url, ExpectedPdf<'_>), ErrorCode> {

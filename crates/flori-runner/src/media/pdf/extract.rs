@@ -9,18 +9,14 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::process::run_bounded;
-use super::scan::require_digital_pdf;
 
 const EXTRACTOR: &[u8] = include_bytes!("extractor.py");
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 #[derive(Clone, Debug)]
 pub struct PdfExtractConfig {
-    pub pdfinfo: PathBuf,
-    pub pdftotext: PathBuf,
     pub python: PathBuf,
     pub timeout: Duration,
-    pub max_probe_output_bytes: usize,
     pub max_structure_bytes: u64,
     pub max_asset_bytes: u64,
     pub max_assets: usize,
@@ -34,7 +30,6 @@ pub async fn extract_pdf(
 ) -> Result<DocumentStructure, ErrorCode> {
     if pdf.kind != flori_core::ArtifactKind::SourceOriginal
         || pdf.media_type != "application/pdf"
-        || config.max_probe_output_bytes == 0
         || config.max_structure_bytes == 0
         || config.max_asset_bytes == 0
         || config.max_assets == 0
@@ -44,14 +39,6 @@ pub async fn extract_pdf(
         return Err(ErrorCode::CorruptState);
     }
     verify_input(input, pdf).await?;
-    require_digital_pdf(
-        &config.pdfinfo,
-        &config.pdftotext,
-        input,
-        config.timeout,
-        config.max_probe_output_bytes,
-    )
-    .await?;
     let result = extract_inner(pdf, input, output_dir, config).await;
     if result.is_err() {
         let _ = fs::remove_dir_all(output_dir).await;

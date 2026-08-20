@@ -93,7 +93,10 @@ async fn local_http_is_rejected_before_a_connection() {
         &source,
         &root.join("paper.pdf"),
         &PdfAcquireConfig {
+            pdfinfo: "/usr/bin/pdfinfo".into(),
+            pdftotext: "/usr/bin/pdftotext".into(),
             max_bytes: 1024,
+            max_probe_output_bytes: 4096,
             timeout: Duration::from_millis(100),
         },
     )
