@@ -1,8 +1,20 @@
-use std::{ffi::OsString, fmt, path::Path, time::Duration};
+use std::{
+    ffi::OsString,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use flori_core::{ArtifactId, VideoKeyframe};
 use serde::Deserialize;
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+    sync::watch,
+};
 
 #[path = "video/subtitle.rs"]
 mod subtitle;
@@ -52,14 +64,6 @@ pub(crate) enum VideoMediaError {
     ToolTimedOut,
     OutputTooLarge,
 }
-
-impl fmt::Display for VideoMediaError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "video media executor failed: {self:?}")
-    }
-}
-
-impl std::error::Error for VideoMediaError {}
 
 pub(crate) async fn probe_video(
     ffprobe: &Path,
@@ -214,23 +218,71 @@ async fn run_tool(
         .env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(timeout, command.output())
+    let mut child = command.spawn().map_err(|_| VideoMediaError::ToolFailed)?;
+    let stdout = child.stdout.take().ok_or(VideoMediaError::ToolFailed)?;
+    let stderr = child.stderr.take().ok_or(VideoMediaError::ToolFailed)?;
+    let total = Arc::new(AtomicUsize::new(0));
+    let (limit_tx, mut limit_rx) = watch::channel(false);
+    let _limit_guard = limit_tx.clone();
+    let stdout_task = tokio::spawn(read_bounded(
+        stdout,
+        max_output_bytes,
+        total.clone(),
+        limit_tx.clone(),
+    ));
+    let stderr_task = tokio::spawn(read_bounded(stderr, max_output_bytes, total, limit_tx));
+    let status = tokio::select! {
+        status = child.wait() => status.map_err(|_| VideoMediaError::ToolFailed)?,
+        () = tokio::time::sleep(timeout) => {
+            let _ = child.kill().await;
+            return Err(VideoMediaError::ToolTimedOut);
+        }
+        result = limit_rx.changed() => {
+            let _ = result;
+            let _ = child.kill().await;
+            return Err(VideoMediaError::OutputTooLarge);
+        }
+    };
+    let stdout = stdout_task.await.map_err(|_| VideoMediaError::ToolFailed)?;
+    stderr_task
         .await
-        .map_err(|_| VideoMediaError::ToolTimedOut)?
-        .map_err(|_| VideoMediaError::ToolFailed)?;
-    let total_bytes = output
-        .stdout
-        .len()
-        .checked_add(output.stderr.len())
-        .filter(|total| *total <= max_output_bytes);
-    if total_bytes.is_none() {
-        return Err(VideoMediaError::OutputTooLarge);
-    }
-    if !output.status.success() {
+        .map_err(|_| VideoMediaError::ToolFailed)??;
+    if !status.success() {
         return Err(VideoMediaError::ToolFailed);
     }
-    Ok(output.stdout)
+    stdout
+}
+
+async fn read_bounded(
+    mut reader: impl AsyncRead + Unpin,
+    max: usize,
+    total: Arc<AtomicUsize>,
+    limit: watch::Sender<bool>,
+) -> Result<Vec<u8>, VideoMediaError> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8_192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|_| VideoMediaError::ToolFailed)?;
+        if read == 0 {
+            return Ok(output);
+        }
+        if total
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(read).filter(|next| *next <= max)
+            })
+            .is_err()
+        {
+            let _ = limit.send(true);
+            return Err(VideoMediaError::OutputTooLarge);
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
 }
 
 fn parse_duration_ms(value: &str) -> Result<u64, VideoMediaError> {
