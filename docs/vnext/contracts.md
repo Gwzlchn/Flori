@@ -6,7 +6,7 @@
 
 - 契约修订固定为 `flori.v1`。HTTP 和 Runner 请求必须带 `X-Flori-Protocol: 1`；缺失或其它值返回 `protocol_mismatch`，不协商版本。
 - 所有业务 ID 是小写规范形式 UUIDv7。只有 SQLite 自增事件序号不是 UUID。
-- 时间点是 UTC Unix 毫秒整数，时间段是非负毫秒整数，金额和 credits 使用整数微单位。
+- 时间点是 UTC Unix 毫秒整数，时间段是非负毫秒整数，金额和 credits 使用整数微单位。Qoder 返回的十进制 credits 以四舍五入方式收敛到最近的微单位。
 - SHA-256 是 64 位小写十六进制；文件大小使用非负整数 byte。
 - API、Pipeline 和 manifest 输入拒绝未知字段。可选字段缺失与显式 `null` 不混用。
 - JSON 只允许由封闭 Rust 类型产生的规范序列化；不得以 `Value` 或任意字段袋进入 domain/contract。

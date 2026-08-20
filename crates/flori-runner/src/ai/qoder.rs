@@ -4,6 +4,10 @@ use flori_core::{AiModelCapability, AiResultEnvelope, Executor, UsageOrigin, Usa
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
+mod credits;
+
+use credits::credits_to_micros;
+
 pub const QODERCLI_VERSION: &str = "1.1.26";
 pub const QODERCLI_PROGRAM: &str = "qodercli";
 const MAX_PROBE_BYTES: usize = 64 * 1024;
@@ -246,56 +250,6 @@ struct JsonResult {
     origin: Option<serde::de::IgnoredAny>,
     uuid: serde::de::IgnoredAny,
     session_id: serde::de::IgnoredAny,
-}
-
-fn credits_to_micros(text: &str) -> Result<u64, QoderError> {
-    if text.starts_with('-') {
-        return Err(QoderError::InvalidCredits);
-    }
-    let (mantissa, exponent) =
-        text.split_once(['e', 'E'])
-            .map_or((text, 0), |(value, exponent)| {
-                exponent
-                    .parse::<i32>()
-                    .map(|exponent| (value, exponent))
-                    .unwrap_or(("", i32::MIN))
-            });
-    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    if whole.is_empty()
-        || !whole
-            .bytes()
-            .chain(fraction.bytes())
-            .all(|b| b.is_ascii_digit())
-    {
-        return Err(QoderError::InvalidCredits);
-    }
-    let digits = format!("{whole}{fraction}");
-    let fraction_len = i32::try_from(fraction.len()).map_err(|_| QoderError::InvalidCredits)?;
-    let scale = exponent
-        .checked_sub(fraction_len)
-        .and_then(|value| value.checked_add(6))
-        .ok_or(QoderError::InvalidCredits)?;
-    let mut value = digits
-        .parse::<u64>()
-        .map_err(|_| QoderError::InvalidCredits)?;
-    if scale < 0 {
-        let discarded = usize::try_from(-scale).map_err(|_| QoderError::InvalidCredits)?;
-        if discarded > digits.len()
-            || !digits[digits.len() - discarded..]
-                .bytes()
-                .all(|b| b == b'0')
-        {
-            return Err(QoderError::InvalidCredits);
-        }
-        value = digits[..digits.len() - discarded]
-            .parse::<u64>()
-            .unwrap_or(0);
-    } else {
-        for _ in 0..scale {
-            value = value.checked_mul(10).ok_or(QoderError::InvalidCredits)?;
-        }
-    }
-    Ok(value)
 }
 
 fn envelope_executor(envelope: &AiResultEnvelope) -> Executor {

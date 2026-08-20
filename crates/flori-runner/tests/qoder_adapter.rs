@@ -165,16 +165,21 @@ fn result_decodes_the_strict_envelope_and_only_reports_credits() {
 }
 
 #[test]
-fn credits_are_exact_micros_and_never_fabricated() {
+fn credits_are_rounded_to_micros_and_never_fabricated() {
     for (credits, expected) in [
         ("0", 0),
         ("0.000001", 1),
+        ("0.0000004", 0),
+        ("0.0000005", 1),
         ("1e-6", 1),
         ("2.5", 2_500_000),
         ("12.345678", 12_345_678),
+        ("2.2035934999999999", 2_203_593),
+        ("2.2035935075000004", 2_203_594),
+        ("18446744073709.5516154", u64::MAX),
         ("18446744073709.551615", u64::MAX),
     ] {
-        let parsed = parse_note(&result_output(DOCUMENT_NOTE, credits)).expect("exact credits");
+        let parsed = parse_note(&result_output(DOCUMENT_NOTE, credits)).expect("rounded credits");
         assert!(matches!(
             parsed.usage,
             UsageUpdate::Final {
@@ -184,7 +189,12 @@ fn credits_are_exact_micros_and_never_fabricated() {
         ));
     }
 
-    for credits in ["-1", "0.0000001", "18446744073710"] {
+    for credits in [
+        "-1",
+        "18446744073709.5516155",
+        "18446744073710",
+        "1e2147483647",
+    ] {
         assert_eq!(
             parse_note(&result_output(DOCUMENT_NOTE, credits)).err(),
             Some(QoderError::InvalidCredits),
