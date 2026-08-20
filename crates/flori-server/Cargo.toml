@@ -6,7 +6,14 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+axum.workspace = true
 flori-core.workspace = true
+flori-pipeline.workspace = true
+flori-store = { path = "../flori-store", version = "=0.0.0" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

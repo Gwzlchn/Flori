@@ -16,6 +16,7 @@ rust-version = "1.95"
 version = "0.0.0"
 
 [workspace.dependencies]
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 flori-core = { path = "crates/flori-core", version = "=0.0.0" }
 flori-pipeline = { path = "crates/flori-pipeline", version = "=0.0.0" }
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls"] }
