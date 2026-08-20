@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::network::{MAX_REDIRECTS, parse_http_url, pinned_client};
 use super::scan::require_digital_pdf;
+use crate::RunnerClient;
 
 type ExpectedPdf<'a> = Option<(u64, &'a Sha256Digest)>;
 
@@ -22,6 +23,7 @@ pub struct PdfAcquireConfig {
 }
 
 pub async fn acquire_pdf(
+    client: &RunnerClient,
     source: &ResolvedSource,
     destination: &Path,
     config: &PdfAcquireConfig,
@@ -34,8 +36,17 @@ pub async fn acquire_pdf(
     {
         return Err(ErrorCode::InvalidRequest);
     }
-    let (url, expected) = source_url(source)?;
-    let digest = download(url, destination, config, expected).await?;
+    let digest = if source.kind == SourceKind::PdfUpload {
+        let input = source.input.as_ref().ok_or(ErrorCode::CorruptState)?;
+        client
+            .download_source_input(input, destination)
+            .await
+            .map_err(|error| error.code())?;
+        input.sha256.clone()
+    } else {
+        let (url, expected) = source_url(source)?;
+        download(url, destination, config, expected).await?
+    };
     let scan = require_digital_pdf(
         &config.pdfinfo,
         &config.pdftotext,

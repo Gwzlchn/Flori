@@ -90,6 +90,7 @@ async fn local_http_is_rejected_before_a_connection() {
     let root = std::env::temp_dir().join(format!("flori-http-{}", ArtifactId::generate()));
     std::fs::create_dir(&root).expect("create test root");
     let result = acquire_pdf(
+        &crate::RunnerClient::new("http://localhost", "test-token").expect("client"),
         &source,
         &root.join("paper.pdf"),
         &PdfAcquireConfig {
