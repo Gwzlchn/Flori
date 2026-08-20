@@ -1,9 +1,14 @@
 use std::fmt::Write as _;
 
-use axum::{Json, Router, extract::State, http::Uri, routing::post};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::Uri,
+    routing::{get, post},
+};
 use flori_core::{
-    CreateJobRequest, CreateRemoteSource, CreatedJob, CreatedSource, ErrorCode, JobId,
-    RerunJobRequest, Sha256Digest, SourceId, SourceKind,
+    CreateJobRequest, CreateRemoteSource, CreatedJob, CreatedSource, ErrorCode, JobId, JobView,
+    RerunJobRequest, Sha256Digest, SourceId, SourceKind, SourceView,
 };
 use flori_store::CreateSource;
 use sha2::{Digest, Sha256};
@@ -17,8 +22,34 @@ use crate::{
 pub(super) fn routes() -> Router<HttpState> {
     Router::new()
         .route("/api/v1/sources", post(create_source))
+        .route("/api/v1/sources/{source_id}", get(get_source))
         .route("/api/v1/sources/{source_id}/jobs", post(create_job))
+        .route("/api/v1/jobs/{job_id}", get(get_job))
         .route("/api/v1/jobs/{job_id}/rerun", post(rerun_job))
+}
+
+async fn get_source(
+    State(state): State<HttpState>,
+    StrictPath(source_id): StrictPath<SourceId>,
+) -> Result<Json<SourceView>, HttpError> {
+    state
+        .store
+        .get_source(source_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| HttpError::new(ErrorCode::NotFound))
+}
+
+async fn get_job(
+    State(state): State<HttpState>,
+    StrictPath(job_id): StrictPath<JobId>,
+) -> Result<Json<JobView>, HttpError> {
+    state
+        .store
+        .get_job(job_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| HttpError::new(ErrorCode::NotFound))
 }
 
 async fn rerun_job(
