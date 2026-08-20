@@ -1,15 +1,19 @@
 use std::{fmt::Write, fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    AiModelCapability, AiTool, AiUsageState, AttemptId, CompiledTaskSpec, CreateRunnerSlot,
-    CredentialId, DomainId, ErrorCode, Executor, JobId, JobTrigger, LogFrame, PipelineId,
-    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
-    PromptSnapshotPrompt, RegisterRunnerRequest, ResolvedTaskInputs, RunnerId, RunnerTool,
-    RunnerToolCapability, Sha256Digest, TaskId, TaskInputBindings, TaskInputReference, UsageOrigin,
-    UsageUpdate,
+    AiModelCapability, AiTool, AiUsageState, ArtifactDeclaration, ArtifactKind, ArtifactWhen,
+    AttemptId, CompiledTaskSpec, CreateRunnerSlot, CredentialId, DomainId, ErrorCode, Executor,
+    JobId, JobTrigger, LogFrame, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
+    PromptSnapshotProfile, PromptSnapshotPrompt, RegisterRunnerRequest, ResolvedTaskInputs,
+    RunnerId, RunnerTool, RunnerToolCapability, Sha256Digest, StartUploadRequest, TaskId,
+    TaskInputBindings, TaskInputReference, UploadState, UsageOrigin, UsageUpdate,
+    VerifyUploadRequest,
 };
 use flori_pipeline::compile;
-use flori_store::{CreateJob, CreateSource, Store};
+use flori_store::{
+    CreateJob, CreateSource, Store,
+    artifact::{NasArtifactStore, UploadRecord},
+};
 use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 
@@ -48,9 +52,9 @@ struct Foundation {
     store: Store,
     pool: SqlitePool,
     runner_id: RunnerId,
+    source_id: flori_core::SourceId,
     job_id: JobId,
     task_id: TaskId,
-    credential_value: String,
 }
 
 async fn foundation(database: &TestDatabase, runner_tags: &[&str]) -> Foundation {
@@ -94,24 +98,6 @@ async fn foundation(database: &TestDatabase, runner_tags: &[&str]) -> Foundation
         })
         .await
         .expect("source");
-    let credential_id = CredentialId::generate();
-    let credential_value = "TEST_COOKIE_\"LINE\nVALUE".to_owned();
-    sqlx::query(
-        "INSERT INTO credentials(id,kind,name,plaintext_value,created_at_ms,updated_at_ms) \
-         VALUES(?,'bilibili_cookie',?,?,2,2)",
-    )
-    .bind(credential_id.to_string())
-    .bind(format!("credential-{credential_id}"))
-    .bind(&credential_value)
-    .execute(&pool)
-    .await
-    .expect("credential");
-    sqlx::query("UPDATE sources SET credential_id=? WHERE id=?")
-        .bind(credential_id.to_string())
-        .bind(source_id.to_string())
-        .execute(&pool)
-        .await
-        .expect("attach credential");
     let prompt = "write note";
     let snapshot = PromptSnapshot {
         profile: PromptSnapshotProfile {
@@ -179,6 +165,10 @@ async fn foundation(database: &TestDatabase, runner_tags: &[&str]) -> Foundation
                         tool: RunnerTool::QoderCli,
                         version: "1.0".into(),
                     },
+                    RunnerToolCapability {
+                        tool: RunnerTool::YtDlp,
+                        version: "1.0".into(),
+                    },
                 ],
                 ai_models: vec![AiModelCapability {
                     model: "gpt-5.6".into(),
@@ -193,9 +183,9 @@ async fn foundation(database: &TestDatabase, runner_tags: &[&str]) -> Foundation
         store,
         pool,
         runner_id,
+        source_id,
         job_id,
         task_id: task_id.parse().expect("task ID"),
-        credential_value,
     }
 }
 
@@ -227,6 +217,38 @@ async fn pipeline_object_must_exactly_match_its_canonical_json() {
 async fn concurrent_poll_has_one_winner_and_secret_exists_only_in_claim() {
     let database = TestDatabase::new();
     let foundation = foundation(&database, &["media"]).await;
+    let credential_value = "TEST_COOKIE_VALUE";
+    attach_credential(
+        &foundation.pool,
+        foundation.source_id,
+        "youtube_cookie",
+        credential_value,
+    )
+    .await;
+    sqlx::query("UPDATE sources SET kind='youtube_video' WHERE id=?")
+        .bind(foundation.source_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("video source kind");
+    let spec_json: String = sqlx::query_scalar("SELECT spec_json FROM tasks WHERE id=?")
+        .bind(foundation.task_id.to_string())
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("task spec");
+    let mut spec: CompiledTaskSpec = serde_json::from_str(&spec_json).expect("strict spec");
+    spec.executor = Executor::VideoAcquire;
+    let bindings = TaskInputBindings::VideoAcquire {
+        source: TaskInputReference::Source,
+    };
+    sqlx::query(
+        "UPDATE tasks SET executor='video.acquire',spec_json=?,input_bindings_json=? WHERE id=?",
+    )
+    .bind(serde_json::to_string(&spec).expect("video spec"))
+    .bind(serde_json::to_string(&bindings).expect("video bindings"))
+    .bind(foundation.task_id.to_string())
+    .execute(&foundation.pool)
+    .await
+    .expect("video acquire task");
     let store = Arc::new(foundation.store);
     let (left, right) = tokio::join!(
         store.poll_and_claim(foundation.runner_id, 10, 70, "https://flori.example"),
@@ -240,11 +262,11 @@ async fn concurrent_poll_has_one_winner_and_secret_exists_only_in_claim() {
     assert_eq!(claim.attempt_no, 1);
     assert_eq!(
         claim.secret_inputs.credential.expect("cookie").value,
-        foundation.credential_value
+        credential_value
     );
     assert!(matches!(
         claim.resolved_inputs,
-        ResolvedTaskInputs::DocumentAcquire { .. }
+        ResolvedTaskInputs::VideoAcquire { .. }
     ));
     let persisted: String =
         sqlx::query_scalar("SELECT spec_json || input_bindings_json FROM tasks WHERE id=?")
@@ -252,13 +274,35 @@ async fn concurrent_poll_has_one_winner_and_secret_exists_only_in_claim() {
             .fetch_one(&foundation.pool)
             .await
             .expect("persisted task");
-    assert!(!persisted.contains(&foundation.credential_value));
+    assert!(!persisted.contains(credential_value));
     let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM attempts WHERE task_id=?")
         .bind(foundation.task_id.to_string())
         .fetch_one(&foundation.pool)
         .await
         .expect("attempt count");
     assert_eq!(attempts, 1);
+}
+
+#[tokio::test]
+async fn claim_rejects_platform_cookie_attached_to_the_wrong_source_kind() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database, &["media"]).await;
+    attach_credential(
+        &foundation.pool,
+        foundation.source_id,
+        "bilibili_cookie",
+        "WRONG_SOURCE_COOKIE",
+    )
+    .await;
+    let result = foundation
+        .store
+        .poll_and_claim(foundation.runner_id, 10, 70, "https://flori.example")
+        .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("PDF source must not receive a platform cookie"),
+    };
+    assert_eq!(error.code(), ErrorCode::CredentialUnavailable);
 }
 
 #[tokio::test]
@@ -372,6 +416,14 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
         .await
         .expect("poll")
         .expect("claim");
+    let credential_value = "TEST_COOKIE_\"LINE\nVALUE";
+    attach_credential(
+        &foundation.pool,
+        foundation.source_id,
+        "bilibili_cookie",
+        credential_value,
+    )
+    .await;
     let first = frame(1, r#"{"message":"first"}"#);
     assert_eq!(
         foundation
@@ -430,7 +482,7 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
             .append_log_frames(
                 foundation.runner_id,
                 claim.exec_id,
-                &[frame(2, &json_escaped(&foundation.credential_value))],
+                &[frame(2, &json_escaped(credential_value))],
                 15,
             )
             .await
@@ -508,6 +560,331 @@ async fn log_limit_counts_the_complete_ndjson_frame() {
 }
 
 #[tokio::test]
+async fn attempt_upload_recovers_cursor_and_rename_crash_windows() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database, &["media"]).await;
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
+    let claim = foundation
+        .store
+        .poll_and_claim(foundation.runner_id, 10, 70, "https://flori.example")
+        .await
+        .expect("poll")
+        .expect("claim");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .start_attempt_upload(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &StartUploadRequest {
+                        name: "undeclared".into(),
+                        media_type: "application/octet-stream".into(),
+                        size_bytes: 3,
+                        sha256: digest("abc"),
+                    },
+                    11,
+                )
+                .await,
+        ),
+        ErrorCode::ArtifactUndeclared
+    );
+    let request = StartUploadRequest {
+        name: "original".into(),
+        media_type: "application/pdf".into(),
+        size_bytes: 3,
+        sha256: digest("abc"),
+    };
+    let upload = foundation
+        .store
+        .start_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &request,
+            12,
+        )
+        .await
+        .expect("start upload");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .append_attempt_upload(
+                    &artifacts,
+                    foundation.runner_id,
+                    upload.upload_id,
+                    0,
+                    &digest("wrong"),
+                    b"abc",
+                    13,
+                )
+                .await,
+        ),
+        ErrorCode::DigestMismatch
+    );
+    let record = UploadRecord::new(
+        upload.upload_id,
+        &upload.artifact.name,
+        &upload.artifact.relative_path,
+        upload.artifact.size_bytes,
+        upload.artifact.sha256.clone(),
+        "original",
+        100 * 1024 * 1024,
+    )
+    .expect("upload record");
+    assert_eq!(
+        artifacts
+            .append_chunk(&record, 0, &digest("abc"), b"abc")
+            .expect("fsync before cursor"),
+        3
+    );
+    let cursor = foundation
+        .store
+        .append_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            upload.upload_id,
+            0,
+            &digest("abc"),
+            b"abc",
+            14,
+        )
+        .await
+        .expect("reconcile file-ahead cursor");
+    assert_eq!(cursor.received_bytes, 3);
+    assert_eq!(
+        foundation
+            .store
+            .append_attempt_upload(
+                &artifacts,
+                foundation.runner_id,
+                upload.upload_id,
+                0,
+                &digest("abc"),
+                b"abc",
+                15,
+            )
+            .await
+            .expect("duplicate chunk")
+            .received_bytes,
+        3
+    );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .append_attempt_upload(
+                    &artifacts,
+                    foundation.runner_id,
+                    upload.upload_id,
+                    0,
+                    &digest("abd"),
+                    b"abd",
+                    16,
+                )
+                .await,
+        ),
+        ErrorCode::Conflict
+    );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .verify_attempt_upload(
+                    &artifacts,
+                    foundation.runner_id,
+                    upload.upload_id,
+                    &VerifyUploadRequest {
+                        size_bytes: 3,
+                        sha256: digest("bad"),
+                    },
+                    17,
+                )
+                .await,
+        ),
+        ErrorCode::DigestMismatch
+    );
+    sqlx::query("UPDATE uploads SET state='verified' WHERE id=?")
+        .bind(upload.upload_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("verified before rename");
+    let mut verified = record;
+    verified
+        .restore_progress(3, UploadState::Verified)
+        .expect("verified record");
+    artifacts
+        .move_verified(&verified)
+        .expect("rename before DB state");
+    foundation
+        .store
+        .verify_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            upload.upload_id,
+            &VerifyUploadRequest {
+                size_bytes: 3,
+                sha256: digest("abc"),
+            },
+            18,
+        )
+        .await
+        .expect("rename crash converges");
+    let resumed = foundation
+        .store
+        .start_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &request,
+            19,
+        )
+        .await
+        .expect("resume same upload");
+    assert_eq!(resumed.upload_id, upload.upload_id);
+    assert_eq!(resumed.received_bytes, 3);
+}
+
+#[tokio::test]
+async fn attempt_upload_enforces_wildcard_names_counts_sizes_and_fence() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database, &["media"]).await;
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
+    let claim = foundation
+        .store
+        .poll_and_claim(foundation.runner_id, 10, 70, "https://flori.example")
+        .await
+        .expect("poll")
+        .expect("claim");
+    let spec_json: String = sqlx::query_scalar("SELECT spec_json FROM tasks WHERE id=?")
+        .bind(foundation.task_id.to_string())
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("spec");
+    let mut spec: CompiledTaskSpec = serde_json::from_str(&spec_json).expect("strict spec");
+    spec.artifacts.push(ArtifactDeclaration {
+        name: "figures".into(),
+        kind: ArtifactKind::Figure,
+        path: "output/figures/*".into(),
+        required: false,
+        when: ArtifactWhen::OnSuccess,
+        max_files: Some(1),
+        max_bytes: 3,
+    });
+    sqlx::query("UPDATE tasks SET spec_json=? WHERE id=?")
+        .bind(serde_json::to_string(&spec).expect("spec JSON"))
+        .bind(foundation.task_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("wildcard declaration");
+    for (name, size, expected) in [
+        ("figures/../bad", 3, ErrorCode::ArtifactUndeclared),
+        ("figures/large.png", 4, ErrorCode::ArtifactTooLarge),
+    ] {
+        assert_eq!(
+            store_error_code(
+                foundation
+                    .store
+                    .start_attempt_upload(
+                        &artifacts,
+                        foundation.runner_id,
+                        claim.exec_id,
+                        &StartUploadRequest {
+                            name: name.into(),
+                            media_type: "image/png".into(),
+                            size_bytes: size,
+                            sha256: digest("abc"),
+                        },
+                        11,
+                    )
+                    .await,
+            ),
+            expected
+        );
+    }
+    foundation
+        .store
+        .start_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &StartUploadRequest {
+                name: "figures/one.png".into(),
+                media_type: "image/png".into(),
+                size_bytes: 3,
+                sha256: digest("abc"),
+            },
+            12,
+        )
+        .await
+        .expect("first wildcard");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .start_attempt_upload(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &StartUploadRequest {
+                        name: "figures/two.png".into(),
+                        media_type: "image/png".into(),
+                        size_bytes: 3,
+                        sha256: digest("abc"),
+                    },
+                    13,
+                )
+                .await,
+        ),
+        ErrorCode::ArtifactTooLarge
+    );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .start_attempt_upload(
+                    &artifacts,
+                    RunnerId::generate(),
+                    claim.exec_id,
+                    &StartUploadRequest {
+                        name: "original".into(),
+                        media_type: "application/pdf".into(),
+                        size_bytes: 3,
+                        sha256: digest("abc"),
+                    },
+                    14,
+                )
+                .await,
+        ),
+        ErrorCode::StaleAttempt
+    );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .start_attempt_upload(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &StartUploadRequest {
+                        name: "original".into(),
+                        media_type: "application/pdf".into(),
+                        size_bytes: 3,
+                        sha256: digest("abc"),
+                    },
+                    70,
+                )
+                .await,
+        ),
+        ErrorCode::LeaseExpired
+    );
+}
+
+#[tokio::test]
 async fn usage_bridge_is_idempotent_and_only_existing_usage_can_finish_late() {
     let database = TestDatabase::new();
     let foundation = foundation(&database, &["media"]).await;
@@ -534,6 +911,21 @@ async fn usage_bridge_is_idempotent_and_only_existing_usage_can_finish_late() {
         model: "gpt-5.6".into(),
         effort: "high".into(),
     };
+    let wrong_tool = UsageUpdate::Started {
+        invocation_key: "wrong-tool".into(),
+        tool: AiTool::CodexCli,
+        model: "gpt-5.6".into(),
+        effort: "high".into(),
+    };
+    assert_eq!(
+        foundation
+            .store
+            .apply_usage_update(foundation.runner_id, exec_id, &wrong_tool, 11)
+            .await
+            .expect_err("runner did not register Codex")
+            .code(),
+        ErrorCode::UsageConflict
+    );
     let first = foundation
         .store
         .apply_usage_update(foundation.runner_id, exec_id, &started, 11)
@@ -626,4 +1018,37 @@ fn json_escaped(value: &str) -> String {
         .expect("JSON string")
         .trim_matches('"')
         .to_owned()
+}
+
+fn store_error_code<T>(result: Result<T, flori_store::StoreError>) -> ErrorCode {
+    match result {
+        Err(error) => error.code(),
+        Ok(_) => panic!("expected Store error"),
+    }
+}
+
+async fn attach_credential(
+    pool: &SqlitePool,
+    source_id: flori_core::SourceId,
+    kind: &str,
+    value: &str,
+) {
+    let credential_id = CredentialId::generate();
+    sqlx::query(
+        "INSERT INTO credentials(id,kind,name,plaintext_value,created_at_ms,updated_at_ms) \
+         VALUES(?,?,?,?,2,2)",
+    )
+    .bind(credential_id.to_string())
+    .bind(kind)
+    .bind(format!("credential-{credential_id}"))
+    .bind(value)
+    .execute(pool)
+    .await
+    .expect("credential");
+    sqlx::query("UPDATE sources SET credential_id=? WHERE id=?")
+        .bind(credential_id.to_string())
+        .bind(source_id.to_string())
+        .execute(pool)
+        .await
+        .expect("attach credential");
 }

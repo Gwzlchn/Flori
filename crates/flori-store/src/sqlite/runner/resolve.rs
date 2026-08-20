@@ -2,12 +2,13 @@ use std::str::FromStr;
 
 use super::super::StoreError;
 use flori_core::{
-    ArtifactId, ArtifactKind, CredentialKind, ErrorCode, Executor, PromptSnapshot,
-    ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource, ResolvedSourceInput,
-    ResolvedTaskInputs, SecretCredential, SecretInputs, Sha256Digest, SourceId, SourceInputId,
-    SourceKind, TaskInputBindings, TaskInputReference,
+    ArtifactId, ArtifactKind, ErrorCode, PromptSnapshot, ResolvedArtifact, ResolvedProfile,
+    ResolvedPrompt, ResolvedSource, ResolvedSourceInput, ResolvedTaskInputs, Sha256Digest,
+    SourceId, SourceInputId, SourceKind, TaskInputBindings, TaskInputReference,
 };
 use sqlx::{Row, Sqlite, Transaction};
+
+pub(super) use super::credential::secret_inputs;
 
 pub(super) async fn resolved_inputs(
     transaction: &mut Transaction<'_, Sqlite>,
@@ -86,39 +87,6 @@ pub(super) async fn resolved_inputs(
         }
     };
     Ok(resolved)
-}
-pub(super) async fn secret_inputs(
-    transaction: &mut Transaction<'_, Sqlite>,
-    job_id: &str,
-    executor: Executor,
-) -> Result<SecretInputs, StoreError> {
-    if !matches!(
-        executor,
-        Executor::DocumentAcquire | Executor::VideoAcquire | Executor::VideoSubscription
-    ) {
-        return Ok(SecretInputs::default());
-    }
-    let row = sqlx::query(
-        "SELECT c.kind,c.plaintext_value FROM jobs j JOIN sources s ON s.id=j.source_id \
-         LEFT JOIN credentials c ON c.id=s.credential_id WHERE j.id=?",
-    )
-    .bind(job_id)
-    .fetch_optional(&mut **transaction)
-    .await?
-    .ok_or_else(|| StoreError::new(ErrorCode::CorruptState))?;
-    let kind: Option<String> = row.try_get("kind")?;
-    let value: Option<String> = row.try_get("plaintext_value")?;
-    match (kind, value) {
-        (None, None) => Ok(SecretInputs::default()),
-        (Some(kind), Some(value)) => Ok(SecretInputs {
-            credential: Some(SecretCredential {
-                kind: serde_json::from_str::<CredentialKind>(&format!("\"{kind}\""))
-                    .map_err(|_| corrupt())?,
-                value,
-            }),
-        }),
-        _ => Err(StoreError::new(ErrorCode::CorruptState)),
-    }
 }
 async fn resolve_source(
     transaction: &mut Transaction<'_, Sqlite>,

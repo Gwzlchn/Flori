@@ -1,6 +1,9 @@
+mod credential;
 mod log;
 mod normalize;
 mod poll;
 mod registration;
 mod resolve;
+mod upload;
+mod upload_io;
 mod usage_bridge;

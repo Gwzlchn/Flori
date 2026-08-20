@@ -1,7 +1,13 @@
-use flori_core::{AiUsageId, AiUsageState, AttemptId, ErrorCode, RunnerId, UsageAck, UsageUpdate};
+use flori_core::{
+    AiTool, AiUsageId, AiUsageState, AttemptId, ErrorCode, RegisterRunnerRequest, RunnerId,
+    RunnerTool, RunnerTools, UsageAck, UsageUpdate,
+};
 use sqlx::Row;
 
-use super::super::{FinalAiUsage, StartAiUsage, Store, StoreError};
+use super::{
+    super::super::{FinalAiUsage, StartAiUsage, Store, StoreError},
+    normalize::capabilities,
+};
 
 impl Store {
     pub async fn apply_usage_update(
@@ -15,8 +21,9 @@ impl Store {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
         }
         let row = sqlx::query(
-            "SELECT a.runner_id,a.model,a.effort,t.id AS task_id,t.executor,j.id AS job_id \
+            "SELECT a.runner_id,a.model,a.effort,r.tools_json,t.id AS task_id,t.executor,j.id AS job_id \
              FROM attempts a JOIN tasks t ON t.id=a.task_id JOIN jobs j ON j.id=t.job_id \
+             JOIN runners r ON r.id=a.runner_id \
              WHERE a.id=?",
         )
         .bind(attempt_id.to_string())
@@ -35,10 +42,19 @@ impl Store {
                 model,
                 effort,
             } => {
+                let tools_json: String = row.try_get("tools_json")?;
+                let tools: RunnerTools =
+                    serde_json::from_str(&tools_json).map_err(|_| corrupt())?;
+                let normalized = capabilities(&RegisterRunnerRequest {
+                    tools: tools.clone(),
+                    ai_models: Vec::new(),
+                })?;
                 if !row.try_get::<String, _>("executor")?.starts_with("ai.")
                     || row.try_get::<Option<String>, _>("model")?.as_deref() != Some(model.as_str())
                     || row.try_get::<Option<String>, _>("effort")?.as_deref()
                         != Some(effort.as_str())
+                    || normalized.tools_json != tools_json
+                    || !tools.iter().any(|entry| entry.tool == runner_tool(*tool))
                 {
                     return Err(StoreError::new(ErrorCode::UsageConflict));
                 }
@@ -93,6 +109,13 @@ impl Store {
                 AiUsageState::Started
             },
         })
+    }
+}
+
+const fn runner_tool(tool: AiTool) -> RunnerTool {
+    match tool {
+        AiTool::QoderCli => RunnerTool::QoderCli,
+        AiTool::CodexCli => RunnerTool::CodexCli,
     }
 }
 

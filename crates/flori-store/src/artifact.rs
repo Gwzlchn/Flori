@@ -1,7 +1,7 @@
 use std::{
     fmt,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -10,9 +10,11 @@ use sha2::{Digest, Sha256};
 
 mod path;
 mod record;
+mod recovery;
 
 pub use path::{retained_artifact_path, source_input_path, task_artifact_path};
 pub use record::UploadRecord;
+pub use recovery::RecoveryAction;
 
 #[derive(Debug)]
 pub struct ArtifactStoreError {
@@ -54,16 +56,6 @@ impl std::error::Error for ArtifactStoreError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecoveryAction {
-    ResumeReceiving,
-    MoveVerified,
-    MarkMoved,
-    RetryCommit,
-    DeleteFilesThenLedger,
-    DeleteLedger,
-}
-
 pub struct NasArtifactStore {
     root: PathBuf,
     max_size_bytes: u64,
@@ -92,16 +84,39 @@ impl NasArtifactStore {
         offset: u64,
         bytes: &[u8],
     ) -> Result<(), ArtifactStoreError> {
+        let digest = sha256(bytes);
+        upload.received_bytes = self.append_chunk(upload, offset, &digest, bytes)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_upload(&self, upload: &UploadRecord) -> Result<(), ArtifactStoreError> {
         upload.revalidate()?;
-        if upload.state != UploadState::Receiving {
-            return Err(ArtifactStoreError::with_code(ErrorCode::Conflict));
+        if upload.expected_size_bytes > self.max_size_bytes {
+            return Err(ArtifactStoreError::with_code(ErrorCode::ArtifactTooLarge));
+        }
+        Ok(())
+    }
+
+    pub fn append_chunk(
+        &self,
+        upload: &UploadRecord,
+        offset: u64,
+        chunk_sha256: &flori_core::Sha256Digest,
+        bytes: &[u8],
+    ) -> Result<u64, ArtifactStoreError> {
+        upload.revalidate()?;
+        if upload.state != UploadState::Receiving || sha256(bytes) != *chunk_sha256 {
+            return Err(ArtifactStoreError::with_code(
+                if upload.state != UploadState::Receiving {
+                    ErrorCode::Conflict
+                } else {
+                    ErrorCode::DigestMismatch
+                },
+            ));
         }
         let next = offset
             .checked_add(bytes.len() as u64)
             .ok_or_else(|| ArtifactStoreError::with_code(ErrorCode::ArtifactTooLarge))?;
-        if offset != upload.received_bytes {
-            return Err(ArtifactStoreError::with_code(ErrorCode::Conflict));
-        }
         if next > upload.expected_size_bytes
             || next > upload.declared_max_size_bytes
             || next > self.max_size_bytes
@@ -110,14 +125,37 @@ impl NasArtifactStore {
         }
         let relative = upload.staging_relative_path();
         let path = self.safe_path(&relative, true)?;
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        if file.metadata()?.len() != offset {
+        let file_len = fs::metadata(&path).map_or_else(
+            |error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(0)
+                } else {
+                    Err(ArtifactStoreError::from(error))
+                }
+            },
+            |metadata| Ok(metadata.len()),
+        )?;
+        if offset < upload.received_bytes {
+            if next > upload.received_bytes || file_len < next {
+                return Err(ArtifactStoreError::with_code(ErrorCode::Conflict));
+            }
+            self.verify_range(&path, offset, bytes, chunk_sha256)?;
+            return Ok(upload.received_bytes);
+        }
+        if offset != upload.received_bytes {
             return Err(ArtifactStoreError::with_code(ErrorCode::Conflict));
         }
+        if file_len == next && file_len > upload.received_bytes {
+            self.verify_range(&path, offset, bytes, chunk_sha256)?;
+            return Ok(next);
+        }
+        if file_len != upload.received_bytes {
+            return Err(ArtifactStoreError::with_code(ErrorCode::Conflict));
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         file.write_all(bytes)?;
         file.sync_data()?;
-        upload.received_bytes = next;
-        Ok(())
+        Ok(next)
     }
 
     pub fn verify_staging(&self, upload: &UploadRecord) -> Result<(), ArtifactStoreError> {
@@ -126,66 +164,6 @@ impl NasArtifactStore {
             return Err(ArtifactStoreError::with_code(ErrorCode::DigestMismatch));
         }
         self.check_exact(&upload.staging_relative_path(), upload)
-    }
-
-    pub fn move_verified(&self, upload: &UploadRecord) -> Result<(), ArtifactStoreError> {
-        match self.recovery_action(upload, true)? {
-            RecoveryAction::MoveVerified => {
-                let final_path = self.safe_path(Path::new(&upload.final_relative_path), true)?;
-                fs::rename(self.root.join(upload.staging_relative_path()), final_path)?;
-                Ok(())
-            }
-            RecoveryAction::MarkMoved | RecoveryAction::RetryCommit => Ok(()),
-            _ => Err(ArtifactStoreError::with_code(ErrorCode::Conflict)),
-        }
-    }
-
-    pub fn recovery_action(
-        &self,
-        upload: &UploadRecord,
-        owner_valid: bool,
-    ) -> Result<RecoveryAction, ArtifactStoreError> {
-        upload.revalidate()?;
-        let staging = upload.staging_relative_path();
-        let has_staging = self.file_len(&staging)?.is_some();
-        let final_path = Path::new(&upload.final_relative_path);
-        let has_final = self.file_len(final_path)?.is_some();
-        if !owner_valid {
-            return Ok(if has_staging || has_final {
-                RecoveryAction::DeleteFilesThenLedger
-            } else {
-                RecoveryAction::DeleteLedger
-            });
-        }
-        if upload.expected_size_bytes > self.max_size_bytes {
-            return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState));
-        }
-        let action = match (upload.state, has_staging, has_final) {
-            (UploadState::Receiving, true, false) => {
-                let length = self.file_len(&staging)?;
-                if length != Some(upload.received_bytes)
-                    || length.is_some_and(|length| length > upload.expected_size_bytes)
-                {
-                    return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState));
-                }
-                RecoveryAction::ResumeReceiving
-            }
-            (UploadState::Verified, true, false) => RecoveryAction::MoveVerified,
-            (UploadState::Verified, false, true) => RecoveryAction::MarkMoved,
-            (UploadState::Moved, false, true) => RecoveryAction::RetryCommit,
-            _ => return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState)),
-        };
-        if upload.state != UploadState::Receiving {
-            self.check_exact(if has_staging { &staging } else { final_path }, upload)
-                .map_err(|error| {
-                    if error.code() == ErrorCode::StorageUnavailable {
-                        error
-                    } else {
-                        ArtifactStoreError::with_code(ErrorCode::CorruptState)
-                    }
-                })?;
-        }
-        Ok(action)
     }
 
     fn file_len(&self, relative: &Path) -> Result<Option<u64>, ArtifactStoreError> {
@@ -225,6 +203,23 @@ impl NasArtifactStore {
             .all(|(actual, hex)| *actual == (hex_value(hex[0]) << 4 | hex_value(hex[1])))
         {
             return Err(ArtifactStoreError::with_code(ErrorCode::DigestMismatch));
+        }
+        Ok(())
+    }
+
+    fn verify_range(
+        &self,
+        path: &Path,
+        offset: u64,
+        expected: &[u8],
+        expected_sha256: &flori_core::Sha256Digest,
+    ) -> Result<(), ArtifactStoreError> {
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut actual = vec![0_u8; expected.len()];
+        file.read_exact(&mut actual)?;
+        if sha256(&actual) != *expected_sha256 || actual != expected {
+            return Err(ArtifactStoreError::with_code(ErrorCode::Conflict));
         }
         Ok(())
     }
@@ -279,4 +274,14 @@ fn hex_value(byte: u8) -> u8 {
     } else {
         byte - b'a' + 10
     }
+}
+
+fn sha256(bytes: &[u8]) -> flori_core::Sha256Digest {
+    let digest = Sha256::digest(bytes);
+    let mut value = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    flori_core::Sha256Digest::parse(value).expect("SHA-256 formatter is canonical")
 }

@@ -16,6 +16,7 @@ pub struct UploadRecord {
     pub(super) received_bytes: u64,
     pub(super) state: UploadState,
     pub(super) declared_max_size_bytes: u64,
+    declaration_name: String,
 }
 
 impl UploadRecord {
@@ -29,7 +30,7 @@ impl UploadRecord {
         declared_max_size_bytes: u64,
     ) -> Result<Self, ArtifactStoreError> {
         let name = name.into();
-        if name != declared_name {
+        if !logical_name_matches(&name, declared_name) {
             return Err(ArtifactStoreError::with_code(ErrorCode::ArtifactUndeclared));
         }
         let upload = Self {
@@ -41,6 +42,7 @@ impl UploadRecord {
             received_bytes: 0,
             state: UploadState::Receiving,
             declared_max_size_bytes,
+            declaration_name: declared_name.to_owned(),
         };
         upload.revalidate()?;
         Ok(upload)
@@ -76,8 +78,25 @@ impl UploadRecord {
         self.expected_size_bytes
     }
 
+    #[must_use]
+    pub(crate) fn expected_sha256(&self) -> &Sha256Digest {
+        &self.expected_sha256
+    }
+
+    #[must_use]
+    pub(crate) fn received_bytes(&self) -> u64 {
+        self.received_bytes
+    }
+
+    #[must_use]
+    pub(crate) fn state(&self) -> UploadState {
+        self.state
+    }
+
     pub(super) fn revalidate(&self) -> Result<(), ArtifactStoreError> {
-        validate_name(&self.name)?;
+        if !logical_name_matches(&self.name, &self.declaration_name) {
+            return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState));
+        }
         validate_final_path(&self.final_relative_path)?;
         if self.expected_size_bytes > self.declared_max_size_bytes {
             return Err(ArtifactStoreError::with_code(ErrorCode::ArtifactTooLarge));
@@ -90,4 +109,13 @@ impl UploadRecord {
         }
         Ok(())
     }
+}
+
+fn logical_name_matches(name: &str, declaration_name: &str) -> bool {
+    if name == declaration_name {
+        return validate_name(name).is_ok();
+    }
+    name.strip_prefix(declaration_name)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+        .is_some_and(|basename| validate_name(basename).is_ok())
 }
