@@ -117,7 +117,7 @@ SQLite 开启 foreign keys 和 WAL；Home Core 是唯一 writer。所有外键�
 | `search_chunks` | FTS5 trigram：`chunk_id` UNINDEXED、`source_id` UNINDEXED、`job_id` UNINDEXED、`artifact_id` UNINDEXED、`title`、`body`; 只索引 current Job，少于3字符的规范化查询对 current chunk使用受限 LIKE |
 | `search_chunk_evidence` | `chunk_id`、`evidence_id` FK CASCADE；PK(`chunk_id`,`evidence_id`) |
 
-这些 `*_json` 列只保存以下正式类型：`PromptSnapshot`、`CompiledTaskSpec`、`ResolvedTaskInputs`、`RunnerTags/Tools/AiModels`、`JobEvent`、`PendingSourceCommit`、`PendingMaterializeCommit`。读取失败即 `corrupt_state` 并停止相关写入，不做宽松解析。
+这些 `*_json` 列只保存以下正式类型：`PromptSnapshot`、`CompiledTaskSpec`、`TaskInputBindings`、`RunnerTags/Tools/AiModels`、`JobEvent`、`PendingSourceCommit`、`PendingMaterializeCommit`。`TaskInputBindings` 是创建 Job 时固化的符号引用；Runner claim 中的 `ResolvedTaskInputs` 是前序 Artifact 就绪后生成的具体输入，两者不得混用。读取失败或引用语义不合法即 `corrupt_state` 并停止相关写入，不做宽松解析。
 
 Source必须属于一个Domain。Source只能加入同Domain的Collection；subscription Source还必须是该Domain的 `bilibili_channel` 或 `youtube_channel`。这些跨行不变量在同一写事务检查。
 
