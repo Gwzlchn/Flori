@@ -6,6 +6,7 @@ use std::{
 
 use flori_core::AiTool;
 use flori_runner::RunnerClient;
+use reqwest::Url;
 
 const SERVER_URL: &str = "FLORI_SERVER_URL";
 const TOKEN: &str = "FLORI_RUNNER_TOKEN";
@@ -15,6 +16,7 @@ const SPOOL_DIR: &str = "FLORI_RUNNER_SPOOL_DIR";
 const HOME_DIR: &str = "HOME";
 const QODER_CONFIG_DIR: &str = "QODER_CONFIG_DIR";
 const CODEX_CONFIG_DIR: &str = "CODEX_HOME";
+const AI_PROXY_URL: &str = "FLORI_AI_PROXY_URL";
 
 pub(crate) struct RuntimeConfig {
     pub(crate) tool: AiTool,
@@ -24,6 +26,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) spool_dir: PathBuf,
     pub(crate) home_dir: PathBuf,
     pub(crate) tool_config_dir: PathBuf,
+    pub(crate) proxy_url: Option<Url>,
 }
 
 pub(crate) struct MediaRuntimeConfig {
@@ -70,10 +73,14 @@ pub(crate) fn parse(
         AiTool::CodexCli => CODEX_CONFIG_DIR,
     };
     let tool_config_dir = required_path(&mut environment, config_name)?;
+    let proxy_url = match tool {
+        AiTool::QoderCli => Some(required_proxy_url(&mut environment)?),
+        AiTool::CodexCli => None,
+    };
 
     let client = RunnerClient::new(&server_url, token)
         .map_err(|_| RuntimeConfigError::InvalidEnvironment(SERVER_URL))?;
-    Ok(RuntimeConfig {
+    let config = RuntimeConfig {
         tool,
         client,
         model,
@@ -81,7 +88,10 @@ pub(crate) fn parse(
         spool_dir,
         home_dir,
         tool_config_dir,
-    })
+        proxy_url,
+    };
+    debug_assert_eq!(config.proxy_url.is_some(), config.tool == AiTool::QoderCli);
+    Ok(config)
 }
 
 pub(crate) fn parse_media(
@@ -138,4 +148,28 @@ fn required_path(
             .any(|part| matches!(part, Component::CurDir | Component::ParentDir)))
     .then_some(path)
     .ok_or(RuntimeConfigError::InvalidEnvironment(name))
+}
+
+fn required_proxy_url(
+    environment: &mut impl FnMut(&str) -> Option<OsString>,
+) -> Result<Url, RuntimeConfigError> {
+    let value = required_text(environment, AI_PROXY_URL)?;
+    if value
+        .strip_prefix("http://")
+        .is_none_or(|authority| authority.is_empty() || authority.starts_with('/'))
+        || value.ends_with('/')
+    {
+        return Err(RuntimeConfigError::InvalidEnvironment(AI_PROXY_URL));
+    }
+    let url =
+        Url::parse(&value).map_err(|_| RuntimeConfigError::InvalidEnvironment(AI_PROXY_URL))?;
+    (url.scheme() == "http"
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
+    .ok_or(RuntimeConfigError::InvalidEnvironment(AI_PROXY_URL))
 }
