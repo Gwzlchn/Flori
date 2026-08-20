@@ -49,6 +49,13 @@ impl Harness {
         .execute(&pool)
         .await
         .expect("domain");
+        sqlx::query(
+            "INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES('document_note','note',?,0)",
+        )
+        .bind(digest(b"note").as_str())
+        .execute(&pool)
+        .await
+        .expect("prompt");
         let yaml = include_bytes!("../../../pipelines/pdf.yml");
         let compilation = compile("pdf", yaml).expect("compile pipeline");
         let pipeline_id = PipelineId::generate();

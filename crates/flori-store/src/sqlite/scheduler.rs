@@ -5,6 +5,7 @@ mod expire;
 mod job;
 mod pipeline;
 mod publish;
+mod request_job;
 mod rerun;
 mod rerun_ai;
 mod rerun_artifact;

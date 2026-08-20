@@ -4,7 +4,7 @@ use super::{
     super::{Store, StoreError},
     attempt::promote_ready,
     pipeline::valid_compilation,
-    snapshot::freeze_prompt_snapshot,
+    snapshot::{current_prompt_snapshot, freeze_prompt_snapshot},
     wire::{executor, job_trigger, source_kind},
 };
 use flori_core::{
@@ -104,6 +104,14 @@ impl Store {
             transaction.rollback().await?;
             return Err(StoreError::new(ErrorCode::PipelineInvalid));
         }
+        let current_snapshot =
+            current_prompt_snapshot(&mut transaction, domain_id, &required_prompts).await?;
+        let (_, current_snapshot_sha256) =
+            freeze_prompt_snapshot(&current_snapshot, domain_id, &required_prompts)?;
+        if current_snapshot_sha256 != prompt_snapshot_sha256 {
+            transaction.rollback().await?;
+            return Err(StoreError::new(ErrorCode::Conflict));
+        }
         validate_rerun(&mut transaction, input, &source_id).await?;
         let active: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM jobs WHERE source_id=? AND state IN ('queued','running')",
@@ -180,7 +188,7 @@ fn validate_input(input: CreateJob<'_>, compilation: &Compilation) -> Result<(),
     Ok(())
 }
 
-async fn source_context(
+pub(super) async fn source_context(
     pool: &sqlx::SqlitePool,
     source_id: &str,
 ) -> Result<(SourceKind, DomainId), StoreError> {

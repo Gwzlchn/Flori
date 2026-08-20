@@ -2,8 +2,8 @@ use std::{fmt::Write, fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
     ArtifactManifest, AttemptId, AttemptState, CollectionId, CompiledTaskSpec,
-    CompleteAttemptRequest, DomainId, ErrorCode, Executor, FailAttemptRequest, JobId, JobInputs,
-    JobTrigger, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
+    CompleteAttemptRequest, CreateJobRequest, DomainId, ErrorCode, Executor, FailAttemptRequest,
+    JobId, JobInputs, JobTrigger, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
     PromptSnapshotProfile, PromptSnapshotPrompt, RunnerId, Sha256Digest, SourceId, SourceKind,
     TaskId, TaskInputBindings, TaskInputReference, TaskState,
 };
@@ -406,6 +406,8 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
     sqlx::query("INSERT INTO collections(id,domain_id,name,kind,enabled,created_at_ms,updated_at_ms) VALUES(?,?,'Reading','manual',1,0,0)")
         .bind(collection_id.to_string()).bind(domain_id.to_string())
         .execute(&pool).await.expect("collection");
+    sqlx::query("INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES('document_note','write a note',?,0)")
+        .bind(digest("write a note").as_str()).execute(&pool).await.expect("prompt");
     let yaml = include_bytes!("../../../pipelines/pdf.yml");
     let compilation = compile("pdf", yaml).expect("compile frozen PDF pipeline");
     let pipeline_id = PipelineId::generate();
@@ -476,6 +478,22 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
             sha256: digest("write a note"),
         }],
     };
+    let requested = CreateJobRequest {
+        request_key: "job-initial".into(),
+        pipeline_id,
+        inputs: JobInputs { translate: false },
+    };
+    let first_job = store
+        .create_requested_job(source_id, &requested, 4)
+        .await
+        .expect("requested initial job");
+    assert_eq!(
+        store
+            .create_requested_job(source_id, &requested, 4)
+            .await
+            .expect("idempotent requested job"),
+        first_job
+    );
     let initial = CreateJob {
         source_id,
         pipeline_revision_id: revision_id,
@@ -483,22 +501,11 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
         rerun_of_job_id: None,
         prompt_snapshot_id: PromptSnapshotId::generate(),
         prompt_snapshot: &prompt_snapshot,
-        request_key: "job-initial",
+        request_key: "job-low-level",
         request_sha256: &"3".repeat(64),
         inputs: JobInputs { translate: false },
         created_at_ms: 4,
     };
-    let first_job = store
-        .create_job(initial, &compilation)
-        .await
-        .expect("initial job");
-    assert_eq!(
-        store
-            .create_job(initial, &compilation)
-            .await
-            .expect("idempotent job"),
-        first_job
-    );
     let states: Vec<(String, String)> =
         sqlx::query_as("SELECT task_key,state FROM tasks WHERE job_id=? ORDER BY task_key")
             .bind(first_job.to_string())
@@ -522,7 +529,7 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
     assert_eq!(stored_snapshot.1, digest(&stored_snapshot.0).as_str());
     assert_eq!(
         serde_json::from_str::<JobInputs>(&stored_snapshot.2).expect("strict job inputs"),
-        initial.inputs
+        requested.inputs
     );
     let frozen_tasks: Vec<(String, String)> = sqlx::query_as(
         "SELECT spec_json,input_bindings_json FROM tasks WHERE job_id=? ORDER BY task_key",

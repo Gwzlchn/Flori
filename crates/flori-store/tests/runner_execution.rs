@@ -73,6 +73,13 @@ async fn foundation(database: &TestDatabase, runner_tags: &[&str]) -> Foundation
     .execute(&pool)
     .await
     .expect("domain");
+    sqlx::query(
+        "INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES('document_note','write note',?,0)",
+    )
+    .bind(digest("write note").as_str())
+    .execute(&pool)
+    .await
+    .expect("prompt");
     let compilation =
         compile("pdf", include_bytes!("../../../pipelines/pdf.yml")).expect("compile PDF pipeline");
     let pipeline_id = PipelineId::generate();
