@@ -41,6 +41,32 @@ pub(super) async fn reconcile(
             return Err(corrupt());
         }
     }
+    if rows[0].try_get::<Option<String>, _>("runner_id")?.is_none() {
+        if rows[0].try_get::<String, _>("executor")? != "core.validate"
+            || rows[0].try_get::<String, _>("attempt_state")? != "leased"
+            || rows[0].try_get::<String, _>("task_state")? != "leased"
+            || rows[0].try_get::<String, _>("job_state")? != "running"
+            || rows[0]
+                .try_get::<Option<String>, _>("current_attempt_id")?
+                .as_deref()
+                != Some(owner_id)
+        {
+            return Err(corrupt());
+        }
+        let job_id = rows[0]
+            .try_get::<String, _>("job_id")?
+            .parse()
+            .map_err(|_| corrupt())?;
+        let task_id = rows[0]
+            .try_get::<String, _>("task_id")?
+            .parse()
+            .map_err(|_| corrupt())?;
+        transaction.rollback().await?;
+        store
+            .resume_pdf_validation(artifacts, job_id, task_id, attempt_id, now_ms)
+            .await?;
+        return Ok(());
+    }
     let active = active_owner(&rows[0], owner_id, now_ms)?;
     let mut records = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -103,7 +129,7 @@ async fn load_rows(
         "SELECT u.id,u.commit_json,u.name,u.target_id,u.staging_path,u.final_relative_path, \
          u.expected_size_bytes,u.expected_sha256,u.received_bytes,u.state,a.id AS attempt_id, \
          a.runner_id,a.state AS attempt_state,a.lease_expires_at_ms,a.last_log_sequence, \
-         t.id AS task_id, \
+         t.id AS task_id,t.executor, \
          t.state AS task_state,t.current_attempt_id,t.spec_json,j.id AS job_id, \
          j.state AS job_state,j.source_id FROM uploads u JOIN attempts a ON a.id=u.owner_id \
          JOIN tasks t ON t.id=a.task_id JOIN jobs j ON j.id=t.job_id \

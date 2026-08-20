@@ -53,7 +53,13 @@ impl Store {
             )
             .await?;
         self.persist_pdf_validation(
-            artifacts, job_id, task_id, attempt_id, pending, &bytes, now_ms,
+            artifacts,
+            job_id,
+            task_id,
+            attempt_id,
+            Some(pending),
+            &bytes,
+            now_ms,
         )
         .await
     }

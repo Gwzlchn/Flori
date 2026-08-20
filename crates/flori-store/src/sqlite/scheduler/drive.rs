@@ -18,8 +18,8 @@ impl Store {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
         }
         let row = sqlx::query(
-            "SELECT t.id,t.job_id,t.executor FROM tasks t JOIN jobs j ON j.id=t.job_id \
-             WHERE t.state='ready' AND j.state='running' \
+            "SELECT t.id,t.job_id,t.executor,t.state,t.current_attempt_id FROM tasks t \
+             JOIN jobs j ON j.id=t.job_id WHERE t.state IN ('ready','leased') AND j.state='running' \
              AND t.executor IN ('core.validate','core.publish') ORDER BY j.created_at_ms,t.task_key LIMIT 1",
         )
         .fetch_optional(&self.pool)
@@ -35,8 +35,23 @@ impl Store {
             .try_get::<String, _>("id")?
             .parse()
             .map_err(|_| corrupt())?;
-        let attempt_id = AttemptId::generate();
+        let state: String = row.try_get("state")?;
+        if state == "leased" && row.try_get::<String, _>("executor")? != "core.validate" {
+            return Err(corrupt());
+        }
+        let attempt_id = if state == "leased" {
+            row.try_get::<Option<String>, _>("current_attempt_id")?
+                .ok_or_else(corrupt)?
+                .parse()
+                .map_err(|_| corrupt())?
+        } else {
+            AttemptId::generate()
+        };
         let result = match row.try_get::<String, _>("executor")?.as_str() {
+            "core.validate" if state == "leased" => self
+                .resume_pdf_validation(artifacts, job_id, task_id, attempt_id, now_ms)
+                .await
+                .map(|_| ()),
             "core.validate" => self
                 .validate_pdf_job(artifacts, job_id, task_id, attempt_id, now_ms)
                 .await
