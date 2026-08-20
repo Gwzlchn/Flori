@@ -14,6 +14,7 @@ mod pdf_evidence;
 mod runner_claim;
 mod runner_protocol;
 mod video;
+mod video_evidence;
 
 pub use artifact::*;
 pub use document::*;
@@ -27,6 +28,7 @@ pub use pdf_evidence::*;
 pub use runner_claim::*;
 pub use runner_protocol::*;
 pub use video::*;
+pub use video_evidence::*;
 
 pub const CONTRACT_REVISION: &str = "flori.v1";
 pub const PIPELINE_COMPILER_VERSION: u8 = 1;
