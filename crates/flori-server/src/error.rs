@@ -40,6 +40,12 @@ impl HttpError {
         error.body.error.message = "HTTP method is not allowed".to_owned();
         error
     }
+
+    pub(crate) fn payload_too_large() -> Self {
+        let mut error = Self::new(ErrorCode::ArtifactTooLarge);
+        error.status = StatusCode::PAYLOAD_TOO_LARGE;
+        error
+    }
 }
 
 impl IntoResponse for HttpError {

@@ -1,6 +1,7 @@
 use axum::{
     Json,
-    extract::{FromRequest, FromRequestParts, Request},
+    body::Bytes,
+    extract::{FromRequest, FromRequestParts, Path, Request},
     http::{header::AUTHORIZATION, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -60,6 +61,45 @@ where
         Json::<T>::from_request(request, state)
             .await
             .map(|Json(value)| Self(value))
+            .map_err(|_| HttpError::new(ErrorCode::InvalidRequest))
+    }
+}
+
+pub(crate) struct StrictBytes(pub(crate) Bytes);
+
+impl<S> FromRequest<S> for StrictBytes
+where
+    S: Send + Sync,
+{
+    type Rejection = HttpError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Bytes::from_request(request, state)
+            .await
+            .map(Self)
+            .map_err(|rejection| {
+                if rejection.into_response().status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+                    HttpError::payload_too_large()
+                } else {
+                    HttpError::new(ErrorCode::InvalidRequest)
+                }
+            })
+    }
+}
+
+pub(crate) struct StrictPath<T>(pub(crate) T);
+
+impl<T, S> FromRequestParts<S> for StrictPath<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = HttpError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Path::<T>::from_request_parts(parts, state)
+            .await
+            .map(|Path(value)| Self(value))
             .map_err(|_| HttpError::new(ErrorCode::InvalidRequest))
     }
 }
