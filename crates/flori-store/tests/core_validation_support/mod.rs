@@ -8,7 +8,10 @@ use flori_store::{Store, artifact::NasArtifactStore};
 use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 
+mod crash;
 mod seed;
+
+pub(super) use crash::assert_reserved;
 
 const DOCUMENT: &str = include_str!("../../../../tests/fixtures/vnext/expected/document.json");
 const NOTE: &str = include_str!("../../../../tests/fixtures/vnext/expected/pdf-smart-note.md");
@@ -31,6 +34,15 @@ pub(super) struct Reserved {
     pub(super) upload_id: UploadId,
     pub(super) final_path: String,
     pub(super) bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CrashPoint {
+    LedgerOnly,
+    FsyncAhead,
+    Verified,
+    RenamedAhead,
+    Moved,
 }
 
 impl Fixture {
