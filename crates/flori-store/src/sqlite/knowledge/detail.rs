@@ -56,9 +56,17 @@ impl Store {
         if !attempts.is_empty() {
             return Err(StoreError::new(ErrorCode::CorruptState));
         }
+        let source_id = parse_id(&row, "source_id")?;
+        let artifacts = self.job_artifacts(job_id).await?;
+        if artifacts.iter().any(|artifact| {
+            artifact.source_id != source_id
+                || !tasks.iter().any(|task| task.task_id == artifact.task_id)
+        }) {
+            return Err(StoreError::new(ErrorCode::CorruptState));
+        }
         Ok(Some(JobView {
             job_id: parse_id(&row, "id")?,
-            source_id: parse_id(&row, "source_id")?,
+            source_id,
             pipeline_revision_id: parse_id(&row, "pipeline_revision_id")?,
             trigger: parse_job_trigger(&row.try_get::<String, _>("trigger")?)?,
             state: parse_job_state(&row.try_get::<String, _>("state")?)?,
@@ -66,7 +74,7 @@ impl Store {
             error_code: parse_optional_error(&row, "error_code")?,
             error_message: row.try_get("error_message")?,
             tasks,
-            artifacts: self.job_artifacts(job_id).await?,
+            artifacts,
         }))
     }
 

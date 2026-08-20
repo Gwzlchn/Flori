@@ -55,6 +55,21 @@ async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
     );
     assert_error(
         &harness
+            .get(&format!(
+                "/api/v1/sources/{}",
+                flori_core::SourceId::generate()
+            ))
+            .await,
+        404,
+        ErrorCode::NotFound,
+    );
+    assert_error(
+        &harness.get("/api/v1/jobs/not-a-uuid").await,
+        400,
+        ErrorCode::InvalidRequest,
+    );
+    assert_error(
+        &harness
             .get(&format!("/api/v1/jobs/{}", JobId::generate()))
             .await,
         404,
@@ -71,23 +86,63 @@ async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
         .execute(&mut *connection)
         .await
         .expect("corrupt job state");
-    assert_error(
-        &harness
-            .get(&format!("/api/v1/jobs/{}", harness.current_job_id))
-            .await,
-        500,
-        ErrorCode::CorruptState,
-    );
+    assert_corrupt_job(&harness).await;
     sqlx::query("UPDATE jobs SET state='succeeded' WHERE id=?")
         .bind(harness.current_job_id.to_string())
         .execute(&mut *connection)
         .await
         .expect("restore job state");
+    let foreign_task_id = flori_core::TaskId::generate();
+    sqlx::query(
+        "INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state, \
+         attempt_limit,timeout_ms) SELECT ?,?,'foreign',executor,spec_json,input_bindings_json, \
+         'succeeded',attempt_limit,timeout_ms FROM tasks WHERE id=?",
+    )
+    .bind(foreign_task_id.to_string())
+    .bind(harness.previous_job_id.to_string())
+    .bind(harness.note_task_id.to_string())
+    .execute(&mut *connection)
+    .await
+    .expect("foreign task");
+    sqlx::query("UPDATE artifacts SET task_id=? WHERE job_id=? AND name='smart_note'")
+        .bind(foreign_task_id.to_string())
+        .bind(harness.current_job_id.to_string())
+        .execute(&mut *connection)
+        .await
+        .expect("cross-job artifact task");
+    assert_corrupt_job(&harness).await;
+    sqlx::query("UPDATE artifacts SET task_id=? WHERE job_id=? AND name='smart_note'")
+        .bind(harness.note_task_id.to_string())
+        .bind(harness.current_job_id.to_string())
+        .execute(&mut *connection)
+        .await
+        .expect("restore artifact task");
+    sqlx::query("PRAGMA foreign_keys=OFF")
+        .execute(&mut *connection)
+        .await
+        .expect("allow cross-source fixture");
+    sqlx::query("UPDATE artifacts SET source_id=? WHERE job_id=? AND name='smart_note'")
+        .bind(flori_core::SourceId::generate().to_string())
+        .bind(harness.current_job_id.to_string())
+        .execute(&mut *connection)
+        .await
+        .expect("cross-source artifact");
+    assert_corrupt_job(&harness).await;
+    sqlx::query("UPDATE artifacts SET source_id=? WHERE job_id=? AND name='smart_note'")
+        .bind(harness.source_id.to_string())
+        .bind(harness.current_job_id.to_string())
+        .execute(&mut *connection)
+        .await
+        .expect("restore artifact source");
     sqlx::query("UPDATE tasks SET spec_json='{}' WHERE id=?")
         .bind(harness.note_task_id.to_string())
         .execute(&mut *connection)
         .await
         .expect("corrupt task spec");
+    assert_corrupt_job(&harness).await;
+}
+
+async fn assert_corrupt_job(harness: &Harness) {
     assert_error(
         &harness
             .get(&format!("/api/v1/jobs/{}", harness.current_job_id))
