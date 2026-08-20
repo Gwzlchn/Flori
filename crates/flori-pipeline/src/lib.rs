@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use source::{RawInput, RawTask, input_reference};
 
+pub use flori_core::ArtifactDeclaration;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompileError {
     code: ErrorCode,
@@ -73,18 +75,6 @@ pub struct CompiledTask {
     pub timeout_ms: u64,
     #[serde(default)]
     pub artifacts: Vec<ArtifactDeclaration>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArtifactDeclaration {
-    pub name: String,
-    pub kind: ArtifactKind,
-    pub path: String,
-    pub required: bool,
-    pub when: ArtifactWhen,
-    pub max_files: Option<u16>,
-    pub max_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

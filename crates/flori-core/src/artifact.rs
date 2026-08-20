@@ -1,7 +1,19 @@
 use serde::{Deserialize, Deserializer, Serialize, de};
 use utoipa::ToSchema;
 
-use crate::{ArtifactKind, AttemptId, JobId, TaskId};
+use crate::{ArtifactKind, ArtifactWhen, AttemptId, JobId, TaskId};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactDeclaration {
+    pub name: String,
+    pub kind: ArtifactKind,
+    pub path: String,
+    pub required: bool,
+    pub when: ArtifactWhen,
+    pub max_files: Option<u16>,
+    pub max_bytes: u64,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub enum ArtifactManifestSchema {

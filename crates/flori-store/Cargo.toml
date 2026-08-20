@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 flori-core.workspace = true
+flori-pipeline.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 

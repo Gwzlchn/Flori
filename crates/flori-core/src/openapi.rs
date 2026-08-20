@@ -1,15 +1,15 @@
 use utoipa::OpenApi;
 
 use crate::{
-    AiTool, AiUsageId, AiUsageState, ArtifactId, ArtifactKind, ArtifactManifest,
-    ArtifactManifestEntry, ArtifactManifestSchema, ArtifactOrigin, ArtifactRetention, ArtifactWhen,
-    AttemptId, AttemptState, CollectionId, CollectionKind, ConceptOccurrenceId, CredentialId,
-    CredentialKind, DomainId, ErrorCode, EvidenceId, EvidenceLocatorKind, Executor, GlossaryTermId,
-    GlossaryTermState, JobEventKind, JobEventScope, JobId, JobState, JobTrigger, PipelineId,
-    PipelineRevisionId, PromptSnapshotId, QrSessionId, RequestId, RerunMode, RunnerId, RunnerState,
-    RunnerTool, SearchChunkId, Sha256Digest, SourceId, SourceInputId, SourceKind,
-    SystemHealthStatus, TaskId, TaskLogLevel, TaskState, UploadId, UploadOwnerKind, UploadState,
-    UsageOrigin,
+    AiTool, AiUsageId, AiUsageState, ArtifactDeclaration, ArtifactId, ArtifactKind,
+    ArtifactManifest, ArtifactManifestEntry, ArtifactManifestSchema, ArtifactOrigin,
+    ArtifactRetention, ArtifactWhen, AttemptId, AttemptState, CollectionId, CollectionKind,
+    ConceptOccurrenceId, CredentialId, CredentialKind, DomainId, ErrorCode, EvidenceId,
+    EvidenceLocatorKind, Executor, GlossaryTermId, GlossaryTermState, JobEventKind, JobEventScope,
+    JobId, JobState, JobTrigger, PipelineId, PipelineRevisionId, PromptSnapshotId, QrSessionId,
+    RequestId, RerunMode, RunnerId, RunnerState, RunnerTool, SearchChunkId, Sha256Digest, SourceId,
+    SourceInputId, SourceKind, SystemHealthStatus, TaskId, TaskLogLevel, TaskState, UploadId,
+    UploadOwnerKind, UploadState, UsageOrigin,
 };
 
 #[derive(OpenApi)]
@@ -62,6 +62,7 @@ use crate::{
     SystemHealthStatus,
     JobEventKind,
     ErrorCode,
+    ArtifactDeclaration,
     ArtifactManifestSchema,
     ArtifactManifest,
     ArtifactManifestEntry,
@@ -94,6 +95,7 @@ mod tests {
         assert!(schemas.contains_key("SourceKind"));
         assert!(schemas.contains_key("Executor"));
         assert!(schemas.contains_key("ErrorCode"));
+        assert!(schemas.contains_key("ArtifactDeclaration"));
         assert!(schemas.contains_key("ArtifactManifestSchema"));
         assert!(schemas.contains_key("ArtifactManifest"));
         assert!(schemas.contains_key("ArtifactManifestEntry"));
