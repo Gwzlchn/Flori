@@ -93,6 +93,7 @@ fn remote_runner_requires_https() {
         ErrorCode::InvalidRequest
     );
     RunnerClient::new("http://localhost:8080", "token").expect("loopback test transport");
+    RunnerClient::new("http://[::1]:8080", "token").expect("IPv6 loopback test transport");
 }
 
 #[tokio::test]

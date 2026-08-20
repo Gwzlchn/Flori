@@ -56,6 +56,10 @@ impl RunnerClient {
             Url::parse(base_url).map_err(|_| ClientError::local(ErrorCode::InvalidRequest))?;
         let local_http = base_url.scheme() == "http"
             && base_url.host_str().is_some_and(|host| {
+                let host = host
+                    .strip_prefix('[')
+                    .and_then(|host| host.strip_suffix(']'))
+                    .unwrap_or(host);
                 host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
             });
         if !(base_url.scheme() == "https" || local_http)
