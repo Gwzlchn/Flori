@@ -175,9 +175,9 @@ Server 校验上传后生成严格 manifest：
 
 manifest 是服务端控制文件，不是额外 Artifact kind。Server 在 upload 开始时生成 `target_id` 和最终路径。上传先写 `.staging`；同文件系统 rename 后把ledger置 `moved`，SQLite 成功事务再插入 Artifact、删除 upload行、完成Task并推进DAG。
 
-启动恢复按 upload行执行唯一三态算法：`receiving/verified` 应只有 staging；`moved` 应只有 final且还没有目标数据库行；upload行已删除则必须已有目标行。rename后、state更新前崩溃允许 `verified + only final`，校验摘要后收敛为moved。业务事务失败后保持 `moved + only final` 等待幂等重试，不反向rename。
+启动恢复只遍历 upload ledger，不扫描文件系统猜owner。`receiving` 允许 cursor为0且文件尚未创建，或 staging长度位于已提交cursor和声明上限之间；后一种只表示一次fsync已成功而cursor事务未提交，客户端必须从旧cursor重发同一chunk并逐字节收敛。`verified + staging` 继续rename，`verified + only final` 校验摘要后CAS为moved，`moved + only final` 保持等待原业务请求幂等提交。其它文件组合、摘要或路径不一致一律 `corrupt_state`。
 
-有效owner从现有状态续传或继续提交。Attempt已fence、source/materialize请求已取消或超过清理TTL即为失效owner：先删除现有staging/final，再删除ledger；若在两步之间崩溃，重启遇到“失效owner + 无文件”直接删除ledger。只有有效owner出现无文件、两份文件或不匹配摘要才是 `corrupt_state`。所有路径来自ledger，不扫描猜测。
+有效owner从现有状态续传或继续提交。Attempt已fence、source/materialize请求已取消或超过清理TTL即为失效owner：先删除现有staging/final，再删除ledger；若在两步之间崩溃，重启遇到“失效owner + 无文件”直接删除ledger。除 `receiving + cursor=0` 外，有效owner出现无文件、两份文件或不匹配摘要都是 `corrupt_state`。所有路径来自ledger，不扫描猜测。
 
 过期 Attempt 的 upload、log、completion 和新 usage start 全部拒绝。唯一例外是该 Attempt 已存在的 usage started 行可由原 Runner补一次 final；它不能改变 Task状态或创建新计费项。
 
@@ -191,7 +191,7 @@ manifest 是服务端控制文件，不是额外 Artifact kind。Server 在 uplo
 
 `retention=source` 输入可直接绑定，因为其寿命本来就是整个 Source。新 Job的 `input_bindings_json` 只能指向自身 Artifact或同Source的 `retention=source` Artifact。重试必须先比较ledger request摘要，再从冻结commit继续。
 
-所有需要持久日志的 Runner Task 都声明 `task_log`；AI Task 还声明 `ai_audit`。未声明文件只存在于 Attempt 临时目录，结束后删除，UI 不提供访问。`core.*` 的状态变化进入 `job_events`，不伪造 Runner 日志 Artifact。
+所有需要持久日志的 Runner Task 都声明一个 `task_log`；AI Task 还声明 `ai_audit`。Task认领事务预建服务端日志ledger，logs endpoint把严格 `TaskLogLine` 原始JSON加换行写入其staging文件。`task_log` 不在Runner提交的manifest摘要中；Server终态时独立校验sequence、摘要和声明，再与Runner上传的entry一起提交。未声明文件只存在于 Attempt 临时目录，结束后删除，UI 不提供访问。`core.*` 的状态变化进入 `job_events`，不伪造 Runner 日志 Artifact。
 
 ### Artifact 内容类型
 
@@ -239,7 +239,7 @@ Rust core 为下列结构定义唯一 Serde 类型；JSON都带精确 `schema=fl
 
 ## 日志与 SSE
 
-Runner 对每个 Attempt 从 sequence 1 连续上传 UTF-8 NDJSON 帧。重复 sequence 且内容摘要相同是幂等成功；相同 sequence 不同内容返回 `log_sequence_conflict`；跳号返回 `log_sequence_gap`。服务端写 staging 日志并更新 `last_log_sequence`，终态时按声明提交 `task_log`。
+Runner 对每个 Attempt 从 sequence 1 连续上传 UTF-8 NDJSON 帧。`LogFrame.line` 必须是一个完整、严格的 `TaskLogLine` JSON；重复 sequence 且内容摘要相同是幂等成功，相同 sequence 不同内容返回 `log_sequence_conflict`，跳号返回 `log_sequence_gap`。服务端先fsync staging日志，再更新 `last_log_sequence`；终态时按声明提交 `task_log`。成功Attempt至少需要一帧，失败Attempt允许提交已收到的部分日志或没有日志。
 
 SSE 是单向提示，不是状态真相：
 

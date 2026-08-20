@@ -17,6 +17,14 @@ WP04 只提供三个 Compose 入口：
 
 WP04 的 prod 入口只校验镜像和拓扑，不代表业务服务已可部署。Server、Runner、SQLite、网络隧道和健康检查分别在后续业务 WP 闭环。
 
+WP09 后 Server 控制面可用显式命令启动：
+
+```text
+flori-server serve <listen> <sqlite> <artifact-root> <artifact-download-base> <max-artifact-bytes> <lease-ms>
+```
+
+进程先严格打开当前SQLite schema和NAS根，再按upload ledger完成恢复；只有恢复成功才绑定 `listen`。参数缺失、旧schema、损坏ledger、非法下载base或NAS错误都会直接退出。Compose prod仍是拓扑骨架，WP15前不把这条命令描述为生产部署方案；真实AI/PDF/媒体执行器分别由WP10-WP12交付。
+
 ## 镜像
 
 首版只发布：

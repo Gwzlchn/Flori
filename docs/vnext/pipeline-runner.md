@@ -323,7 +323,7 @@ secret_inputs
 
 `resolved_inputs` 的 Artifact 只给经过授权、短期有效的 HTTPS 下载 URL和摘要。`secret_inputs` 只在目标 download Task claim 中带 cookie 值，不进入任何持久 Task JSON。
 
-若 Task声明 `task_log`，认领事务同时创建对应 upload ledger；logs endpoint只按sequence追加这个staging文件。Attempt终态时Server计算摘要并按 `when=always` 提交已有日志。Runner失联时允许提交已收到的部分日志，但缺失的required log/audit只阻止Task成功，不阻止Attempt过期或Job失败。
+若 Task声明 `task_log`，认领事务同时创建唯一的服务端 upload ledger；logs endpoint只按sequence追加这个staging文件。`LogFrame.line` 是完整 `TaskLogLine` JSON，不是任意文本。Attempt终态时Server计算摘要并按 `when=always` 提交已有日志；Runner不显式上传同名文件，也不把 `task_log` 计入终态manifest摘要。Runner失联时允许提交已收到的部分日志，但缺失的required log/audit只阻止Task成功，不阻止Attempt过期或Job失败。
 
 默认 lease 60 秒，Runner 每 20 秒调用续租。服务端可在部署配置中调节，但必须满足 renew 小于 lease 的一半。Task timeout 到达、Job取消、Runner禁用或 lease 到期后，`exec_id` 立即失效。
 
@@ -349,7 +349,7 @@ HTTP wire 细节固定如下：
 - `uploads` 返回 `upload_id`、当前 `received_bytes` 和Server生成的完整 manifest entry。Runner不能修改该entry。
 - `PUT /uploads/{upload_id}` body是原始字节，必须带十进制 `Upload-Offset` 和小写十六进制 `X-Flori-Chunk-SHA256`；响应当前cursor。
 - `verify` body重复提交声明的 `{size_bytes,sha256}`，响应同一个Server manifest entry。
-- Runner把全部已验证entry按name排序构造 `flori.artifact.v1` manifest并提交其规范JSON SHA-256；Server从ledger独立构造同一manifest并比较摘要。
+- Runner把自己通过uploads端点提交并验证的entry按name排序，构造 `flori.artifact.v1` manifest并提交规范JSON SHA-256；服务端拥有的 `task_log` 不在该摘要中。Server先从ledger独立验证Runner摘要，再把日志和其它entry一起原子提交。
 - `fail` 只提交封闭 `error_code` 和可选manifest摘要，不接收Runner自定义message；所有非2xx响应使用统一 `ErrorResponse`。
 
 相同请求的幂等边界：
@@ -367,7 +367,7 @@ Runner API没有“修改 Task”“选择下一个 Task”“发布 Source”�
 
 - Runner 断线：lease 到期，Attempt 变 expired；有 retry 时 Task 回 ready，否则失败。
 - Job 取消：pending/ready Task直接 canceled；leased Attempt先 fence再 canceled。迟到文件和状态写入全部拒绝；只允许原 Runner把已登记的 usage started 行补成 final。
-- Server 重启：SQLite 恢复 Task/Attempt；`.staging/uploads` 按 uploads 表续传或删除。
+- Server 重启：先打开SQLite和NAS，只按uploads表恢复或删除 `.staging/uploads`，成功后才绑定监听端口；任何路径、摘要或owner不变量损坏都直接退出。`receiving` 允许一个已fsync但cursor尚未提交的chunk，Runner从旧cursor重发并收敛。
 - 隧道断线：poll、上传和 UI 暂停，Home Core 状态不产生副本。
 - 同一 Task多次 Attempt各自保留已声明 log/audit；只有成功 Attempt能提交业务 Artifact。
 - Task永久失败时，一个事务先fence全部活跃Attempt、把其它非终态Task置canceled，再把失败Task和Job置failed；current/previous不变。之后任何Attempt业务写入还会因父Job非running被拒绝。

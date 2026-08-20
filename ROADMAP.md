@@ -12,8 +12,10 @@ vNext 在同一仓库的 `rust-vnext` 分支开发。`main` 在 WP16 前仍是 P
 | WP03 契约冻结与独立终审 | 完成 | `flori.v1`，P0/P1 为 0 |
 | WP04 Rust 工程与 CI 骨架 | 完成 | 统一命令和类型链可运行 |
 | WP05-WP07 首批产品实现 | 完成 | SQLite、NAS Artifact 与 Pipeline 编译器已闭环 |
-| WP08 Job 调度 | 开放 | 只消费 WP05-WP07 的公开接口 |
-| WP09-WP15 后续产品实现 | 未开放 | 按下方依赖推进 |
+| WP08 Job 调度 | 完成 | 初次、整条和从 Task 重跑已通过真实 SQLite/NAS 验收 |
+| WP09 Runner 协议 | 完成 | 出站 HTTP、日志、usage、Artifact 和恢复已闭环 |
+| WP10 AI Runner | 开放 | 只接 QoderCLI 与 CodexCLI 执行器 |
+| WP11-WP15 后续产品实现 | 未开放 | 按下方依赖推进 |
 | WP16 冷切换 | 未开放 | 全部验收并获得生产授权 |
 
 ## 依赖
@@ -52,7 +54,9 @@ WP05、WP06、WP07 可并行。WP11、WP12、WP13 在共享核心稳定后可并
 
 主 Agent 独占 Cargo.lock、workspace 根、CI、Compose、最终集成和 `rust-vnext`。三个子任务都不得新增 `flori.v1` 之外的表、状态、endpoint、DSL 字段、Artifact kind、crate、Provider、兼容或 fallback。
 
-下一步只开放 WP08。它负责 Job 创建、整条重跑、从 Task 重跑、DAG 推进和 current/previous 原子轮换；不得在调度层复制 SQLite、Artifact 或 Pipeline 模型。WP09 及后续业务仍未启动。
+WP08 与 WP09 已完成：同一 PDF Pipeline 已通过真实 SQLite、NAS、TCP Server 和 RunnerClient 跑完 DAG，整条重跑会生成全新 ID，从 Task 重跑会物化上游 Artifact，发布事务只轮换 current/previous 指针。旧 previous 的物理 Artifact 回收、delete_source 和长期保留仍属于 WP15，不在调度器增加第二套 GC。
+
+下一步只开放 WP10。它只实现 QoderCLI 与 CodexCLI 的实际执行、版本锁、websearch 探测和 usage 审计；不得在该工作包补公共 CRUD、PDF 内容处理、第三 Provider、fallback 或通用 executor 框架。
 
 ## 工作包
 
