@@ -1,0 +1,27 @@
+{
+  "kind": "document",
+  "document_kind": "paper",
+  "language": "en",
+  "pages": [
+    {"page": 1, "width_pt": 595.276, "height_pt": 841.89}
+  ],
+  "sections": [
+    {"heading": "1. Pipeline", "page": 1},
+    {"heading": "2. Publication", "page": 1}
+  ],
+  "figures": [
+    {
+      "page": 1,
+      "bbox_pt_top_left": [72.0, 220.0, 522.0, 320.0],
+      "caption": "Figure 1: Declared outputs form the only publishable artifact set."
+    }
+  ],
+  "tables": [
+    {
+      "page": 1,
+      "bbox_pt_top_left": [54.0, 372.0, 540.0, 468.0],
+      "caption": "Table 1: Evidence locator examples",
+      "representation": "page_region_and_text"
+    }
+  ]
+}

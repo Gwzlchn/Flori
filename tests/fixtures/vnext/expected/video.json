@@ -1,0 +1,21 @@
+{
+  "kind": "video",
+  "duration_ms": 3000,
+  "width": 320,
+  "height": 180,
+  "parts": [
+    {"index": 1, "title": "local-video", "start_ms": 0, "end_ms": 3000}
+  ],
+  "transcript": [
+    {"start_ms": 0, "end_ms": 1000, "text": "A source creates one pipeline job."},
+    {"start_ms": 1000, "end_ms": 2000, "text": "Each task emits only declared artifacts."},
+    {"start_ms": 2000, "end_ms": 3000, "text": "Successful publication rotates current and previous."}
+  ],
+  "keyframes": [
+    {
+      "at_ms": 1000,
+      "path": "keyframe-1000ms.jpg",
+      "sha256": "dea5b2fcf0d6801fe58cf77f3594e547aa88aa0bf04b32f1d43d97afbc0d9f3f"
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+schema: flori.fixture-set.v1
+name: vnext-minimum-golden
+license: CC0-1.0
+privacy: synthetic-only
+
+offline:
+  digital_pdf:
+    path: digital-paper.pdf
+    sha256: 368c54b18bfed66586e74c297205cf8036e902bbb1c6208b9f35825b088233bd
+    media_type: application/pdf
+    expected: expected/document.json
+    invariant: text layer is non-empty and page count is one
+  scanned_pdf:
+    path: scanned-paper.pdf
+    sha256: 3b99b4d933adb381ab5dc1cc48f83a51cbe34e12d93877225acd2e79666bf0c2
+    media_type: application/pdf
+    invariant: trimmed text layer is empty and detection returns unsupported_scanned_pdf
+  local_video:
+    path: local-video.mp4
+    sha256: 3cd46336569e51d6f489b4d9bf597a850bbb3ec6be0653cd38297159126ed397
+    media_type: video/mp4
+    expected: expected/video.json
+    invariant: duration is 3000 ms at 320x180 and 10 fps
+    scenarios:
+      subtitle_first:
+        subtitle_binding: local-video.srt
+        expected_path: platform_subtitle
+      whisper_dispatch:
+        subtitle_binding: omitted
+        expected_path: whisper
+        acceptance: dispatch only; transcription quality waits for hardware evaluation
+  subtitle:
+    path: local-video.srt
+    media_type: application/x-subrip
+    invariant: three ordered non-overlapping cues cover 0 through 3000 ms
+  keyframe:
+    path: keyframe-1000ms.jpg
+    sha256: dea5b2fcf0d6801fe58cf77f3594e547aa88aa0bf04b32f1d43d97afbc0d9f3f
+    media_type: image/jpeg
+    invariant: evidence timestamp is 1000 ms
+
+expected_outputs:
+  mechanical_note: expected/mechanical-note.md
+  smart_note: expected/smart-note.md
+  evidence: expected/evidence.json
+  search: expected/search.json
+
+external:
+  arxiv:
+    canonical_ref: arxiv:1706.03762
+    url: https://arxiv.org/abs/1706.03762
+    run: manual_external
+  pdf_url:
+    canonical_ref: url:https://arxiv.org/pdf/1706.03762
+    url: https://arxiv.org/pdf/1706.03762
+    run: manual_external
+  bilibili_video:
+    canonical_ref: bilibili:BV1GJ411x7h7
+    run: manual_external
+  bilibili_channel:
+    canonical_ref: bilibili-up:546195
+    fanout_limit: 2
+    run: manual_external
+  youtube_video:
+    canonical_ref: youtube:dQw4w9WgXcQ
+    run: manual_external
+  youtube_channel:
+    canonical_ref: youtube-channel:UCuAXFkgsw1L7xaCfnd5JJOw
+    fanout_limit: 2
+    run: manual_external
+
+tool_expectations:
+  pdf_probe: pdfinfo and pdftotext for the pre-extract scan gate
+  pdf_extract: short-lived document extractor selected by a Runner executor
+  media_probe: ffprobe
+  media_process: yt-dlp or yutto plus FFmpeg; Whisper only when subtitles are absent
+  ai: QoderCLI or CodexCLI through an AI Runner

@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "evidence_id": "ev-pdf-figure-1",
+      "source_kind": "pdf",
+      "page": 1,
+      "bbox_pt_top_left": [72.0, 220.0, 522.0, 320.0],
+      "quote": "Figure 1: Declared outputs form the only publishable artifact set."
+    },
+    {
+      "evidence_id": "ev-video-artifact",
+      "source_kind": "video",
+      "start_ms": 1000,
+      "end_ms": 2000,
+      "keyframe_at_ms": 1000,
+      "quote": "Each task emits only declared artifacts."
+    }
+  ]
+}

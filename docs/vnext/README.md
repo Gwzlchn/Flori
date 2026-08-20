@@ -12,7 +12,7 @@
 | Pipeline YAML、重跑和 Runner 协议 | [pipeline-runner.md](pipeline-runner.md) |
 | Rust/TypeScript 规则、测试和 Agent 流程 | [development.md](development.md) |
 | 镜像、环境和冷切换 | [deployment.md](deployment.md) |
-| 离线黄金样本 | WP02 完成后由本表链接到 fixture manifest |
+| 离线黄金样本 | [tests/fixtures/vnext/README.md](../../tests/fixtures/vnext/README.md) |
 
 ## 权威顺序
 
