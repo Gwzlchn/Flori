@@ -8,8 +8,64 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use flori_core::ArtifactId;
-use video::{VideoMediaError, extract_keyframes, probe_video};
+use flori_core::{ArtifactId, TranscriptManifest};
+use video::{VideoMediaError, extract_keyframes, mechanical_note, normalize_srt, probe_video};
+
+const SUBTITLE: &str = include_str!("../../../tests/fixtures/vnext/local-video.srt");
+const TRANSCRIPT: &str = include_str!("../../../tests/fixtures/vnext/expected/transcript.json");
+
+#[test]
+fn normalizes_golden_subtitle_and_keeps_mechanical_note_faithful() {
+    let expected: TranscriptManifest = serde_json::from_str(TRANSCRIPT).expect("golden transcript");
+    let actual = normalize_srt(
+        expected.source_artifact_id,
+        "en",
+        expected.duration_ms,
+        SUBTITLE,
+    )
+    .expect("normalize golden SRT");
+    assert_eq!(actual, expected);
+
+    let note = mechanical_note(&actual).expect("mechanical note");
+    let mut previous = 0;
+    for cue in &actual.cues {
+        let position = note[previous..]
+            .find(&cue.text)
+            .map(|offset| offset + previous)
+            .expect("every subtitle fact is present");
+        previous = position + cue.text.len();
+    }
+    assert!(note.starts_with("# 机械笔记\n"));
+    assert!(note.contains("00:00:01.000-00:00:02.000"));
+    assert!(!note.contains("AI 分析"));
+}
+
+#[test]
+fn rejects_overlapping_out_of_range_and_malformed_subtitles() {
+    let source = ArtifactId::generate();
+    let overlap =
+        "1\n00:00:00,000 --> 00:00:02,000\none\n\n2\n00:00:01,999 --> 00:00:03,000\ntwo\n";
+    assert_eq!(
+        normalize_srt(source, "en", 3_000, overlap),
+        Err(VideoMediaError::InvalidSubtitle)
+    );
+    let out_of_range = "1\n00:00:00,000 --> 00:00:03,001\none\n";
+    assert_eq!(
+        normalize_srt(source, "en", 3_000, out_of_range),
+        Err(VideoMediaError::InvalidSubtitle)
+    );
+    let malformed = "2\n00:00:00,000 --> 00:00:01,000\none\n";
+    assert_eq!(
+        normalize_srt(source, "en", 3_000, malformed),
+        Err(VideoMediaError::InvalidSubtitle)
+    );
+    let mut invalid = normalize_srt(source, "en", 3_000, SUBTITLE).expect("valid baseline");
+    invalid.cues[1].start_ms = 999;
+    assert_eq!(
+        mechanical_note(&invalid),
+        Err(VideoMediaError::InvalidSubtitle)
+    );
+}
 
 #[tokio::test]
 async fn probes_video_streams_and_duration_with_frozen_arguments() {

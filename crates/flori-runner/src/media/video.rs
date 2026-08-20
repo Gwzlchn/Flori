@@ -4,6 +4,11 @@ use flori_core::{ArtifactId, VideoKeyframe};
 use serde::Deserialize;
 use tokio::process::Command;
 
+#[path = "video/subtitle.rs"]
+mod subtitle;
+
+pub(crate) use subtitle::{mechanical_note, normalize_srt};
+
 const MAX_KEYFRAMES: usize = 12;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +46,7 @@ impl FrameOutput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VideoMediaError {
     InvalidProbe,
+    InvalidSubtitle,
     InvalidFrameRequest,
     ToolFailed,
     ToolTimedOut,
