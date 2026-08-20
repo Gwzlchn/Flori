@@ -402,7 +402,7 @@ async fn run_runner_task(client: &RunnerClient, claim: &TaskClaim) {
                     input_tokens: Some(10),
                     output_tokens: Some(20),
                     cost_micros: None,
-                    credits_micros: Some(1),
+                    credits_micros: None,
                 },
             )
             .await
