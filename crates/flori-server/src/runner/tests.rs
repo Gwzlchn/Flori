@@ -15,7 +15,9 @@ fn token_digest_is_canonical_and_stable() {
 fn remote_download_base_requires_https() {
     assert!(valid_download_base("https://flori.example/api/artifacts"));
     assert!(valid_download_base("http://localhost/artifacts"));
+    assert!(valid_download_base("http://[::1]:8080/artifacts"));
     assert!(!valid_download_base("http://flori.example/artifacts"));
+    assert!(!valid_download_base("http://[2001:db8::1]:8080/artifacts"));
     assert!(!valid_download_base("https://flori.example/artifacts/"));
 }
 

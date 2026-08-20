@@ -257,11 +257,15 @@ fn valid_download_base(value: &str) -> bool {
     if value.ends_with('/') || uri.query().is_some() {
         return false;
     }
+    let host = authority.host();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
     uri.scheme_str() == Some("https")
         || uri.scheme_str() == Some("http")
-            && (authority.host() == "localhost"
-                || authority
-                    .host()
+            && (host == "localhost"
+                || host
                     .parse::<IpAddr>()
                     .is_ok_and(|address| address.is_loopback()))
 }
