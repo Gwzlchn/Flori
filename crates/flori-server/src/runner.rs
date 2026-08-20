@@ -248,6 +248,9 @@ fn lease_expiry(now_ms: i64, lease_ms: u64) -> Result<i64, HttpError> {
 }
 
 fn valid_download_base(value: &str) -> bool {
+    if value.contains('#') {
+        return false;
+    }
     let Ok(uri) = value.parse::<Uri>() else {
         return false;
     };

@@ -25,6 +25,12 @@ fn remote_download_base_requires_https() {
     assert!(!valid_download_base(
         "https://user:pass@flori.example/artifacts"
     ));
+    assert!(!valid_download_base(
+        "https://flori.example/artifacts#fragment"
+    ));
+    assert!(!valid_download_base(
+        "https://flori.example/artifacts/#fragment"
+    ));
     assert!(!valid_download_base("https://flori.example/artifacts/"));
 }
 
