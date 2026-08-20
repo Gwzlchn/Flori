@@ -3,8 +3,8 @@ use utoipa::ToSchema;
 
 use crate::{
     AiTool, ArtifactDeclaration, ArtifactId, ArtifactKind, AttemptId, CredentialKind, DomainId,
-    EvidenceId, Executor, JobId, RunnerTool, Sha256Digest, SourceId, SourceInputId, SourceKind,
-    TaskId,
+    EvidenceEntry, EvidenceId, Executor, JobId, RunnerTool, Sha256Digest, SourceId, SourceInputId,
+    SourceKind, TaskId,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -135,11 +135,12 @@ pub struct TermEntry {
     pub evidence_ids: Vec<EvidenceId>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TermsManifest {
     pub schema: TermsManifestSchema,
     pub terms: Vec<TermEntry>,
+    pub evidence_candidates: Vec<EvidenceEntry>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -171,7 +172,7 @@ pub enum AiResultSchema {
     V1,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "executor", deny_unknown_fields)]
 pub enum AiResultEnvelope {
     #[serde(rename = "ai.document_translate")]

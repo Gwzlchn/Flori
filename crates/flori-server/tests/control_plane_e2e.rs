@@ -353,7 +353,7 @@ fn artifact_body(kind: ArtifactKind) -> (&'static str, &'static [u8]) {
         ArtifactKind::Summary => ("text/markdown", b"# Summary\n"),
         ArtifactKind::Terms => (
             "application/json",
-            br#"{"schema":"flori.terms.v1","terms":[]}"#,
+            br#"{"schema":"flori.terms.v1","terms":[],"evidence_candidates":[]}"#,
         ),
         ArtifactKind::AiAudit => ("application/json", br#"{"tool":"codex_cli","status":"ok"}"#),
         _ => panic!("unexpected required runner artifact: {kind:?}"),
@@ -690,7 +690,7 @@ async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
         run_runner_task(&harness.client, &claim).await;
     }
 
-    let envelope = r#"{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"AI note","summary_markdown":"AI summary","terms":{"schema":"flori.terms.v1","terms":[]}}"#;
+    let envelope = r#"{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"AI note","summary_markdown":"AI summary","terms":{"schema":"flori.terms.v1","terms":[],"evidence_candidates":[]}}"#;
     let agent = format!(
         r#"{{"type":"item.completed","item":{{"id":"item","type":"agent_message","text":{}}}}}"#,
         serde_json::to_string(envelope).expect("nested result")
@@ -808,7 +808,7 @@ async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
     assert_eq!(artifact("summary"), b"AI summary");
     assert_eq!(
         artifact("terms"),
-        br#"{"schema":"flori.terms.v1","terms":[]}"#
+        br#"{"schema":"flori.terms.v1","terms":[],"evidence_candidates":[]}"#
     );
     let audit: AiAudit = serde_json::from_slice(&artifact("audit")).expect("strict AI audit");
     assert_eq!(

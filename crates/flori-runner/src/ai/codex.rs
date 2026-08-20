@@ -10,7 +10,7 @@ pub struct CodexCommand {
     pub stdin: String,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct CodexParsedOutput {
     pub result: AiResultEnvelope,
     pub usage: UsageUpdate,

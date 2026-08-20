@@ -6,7 +6,7 @@ use flori_runner::{
     qoder_version_command as version_command,
 };
 
-const DOCUMENT_NOTE: &str = r#"{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"note","summary_markdown":"summary","terms":{"schema":"flori.terms.v1","terms":[]}}"#;
+const DOCUMENT_NOTE: &str = r#"{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"note","summary_markdown":"summary","terms":{"schema":"flori.terms.v1","terms":[],"evidence_candidates":[]}}"#;
 const TRANSLATION: &str = r#"{"executor":"ai.document_translate","schema":"flori.ai_result.v1","translation_markdown":"translated"}"#;
 
 fn result_output(envelope: &str, credits: &str) -> Vec<u8> {

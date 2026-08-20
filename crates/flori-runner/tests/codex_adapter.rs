@@ -23,6 +23,7 @@ fn document_note() -> AiResultEnvelope {
         terms: TermsManifest {
             schema: TermsManifestSchema::V1,
             terms: Vec::new(),
+            evidence_candidates: Vec::new(),
         },
     }
 }
