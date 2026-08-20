@@ -288,6 +288,12 @@ async fn upload_resumes_and_complete_rejects_corrupt_artifact() {
         .append_upload_chunk(started.upload_id, 0, b"P".to_vec())
         .await
         .expect("first chunk");
+    let oversized = harness
+        .client
+        .append_upload_chunk(started.upload_id, 1, vec![0; 8 * 1024 * 1024 + 1])
+        .await
+        .expect_err("oversized chunk rejected before storage");
+    assert_eq!(oversized.code(), ErrorCode::ArtifactTooLarge);
     let resumed = harness
         .client
         .start_upload(claim.exec_id, &request)
@@ -402,7 +408,7 @@ async fn fail_commits_only_always_artifacts() {
 }
 
 #[tokio::test]
-async fn expired_lease_and_oversized_chunk_are_rejected() {
+async fn expired_lease_is_rejected() {
     let harness = Harness::new(1).await;
     let claim = harness.client.poll().await.expect("poll").expect("claim");
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -420,15 +426,5 @@ async fn expired_lease_and_oversized_chunk_are_rejected() {
         .await
         .expect_err("expired lease rejects upload");
     assert_eq!(expired.code(), ErrorCode::LeaseExpired);
-    let oversized = harness
-        .client
-        .append_upload_chunk(
-            flori_core::UploadId::generate(),
-            0,
-            vec![0; 8 * 1024 * 1024 + 1],
-        )
-        .await
-        .expect_err("oversized chunk rejected before storage");
-    assert_eq!(oversized.code(), ErrorCode::ArtifactTooLarge);
     harness.close().await;
 }
