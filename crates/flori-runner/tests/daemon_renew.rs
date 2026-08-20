@@ -20,7 +20,7 @@ async fn local_lease_deadline_kills_cli_while_renew_is_stalled() {
         &root,
         "qoder-slow",
         &format!(
-            "cat >/dev/null\nwhile :; do :; done\ntouch '{}'\n",
+            "(sleep 0.65; touch '{}') &\ncat >/dev/null\nwhile :; do :; done\n",
             finished.display()
         ),
     );
