@@ -123,9 +123,9 @@ pub(super) async fn run(
     let output_sha256 = digest(&process.stdout)?;
     let timed_out = process.termination == AiProcessTermination::TimedOut;
     let result = if timed_out {
-        Err(ErrorCode::AttemptTimeout)
+        Err((ErrorCode::AttemptTimeout, unavailable(invocation_key)))
     } else if process.termination == AiProcessTermination::Canceled {
-        Err(ErrorCode::TaskCanceled)
+        Err((ErrorCode::TaskCanceled, unavailable(invocation_key)))
     } else {
         match config.tool {
             AiTool::QoderCli => qoder_parse_result(
@@ -136,7 +136,17 @@ pub(super) async fn run(
                 invocation_key.to_owned(),
             )
             .map(|parsed| (parsed.envelope, parsed.usage, Vec::new()))
-            .map_err(qoder_error),
+            .map_err(|error| {
+                let code = qoder_error(error);
+                let usage = crate::ai::qoder::parse_usage(
+                    process.exit_code,
+                    &process.stdout,
+                    config.max_output_bytes,
+                    invocation_key.to_owned(),
+                )
+                .unwrap_or_else(|_| unavailable(invocation_key));
+                (code, usage)
+            }),
             AiTool::CodexCli => {
                 let stdout =
                     String::from_utf8(process.stdout).map_err(|_| ErrorCode::ExecutorFailed)?;
@@ -150,13 +160,13 @@ pub(super) async fn run(
                     &result,
                 )
                 .map(|parsed| (parsed.result, parsed.usage, urls(parsed.websearch)))
-                .map_err(|_| ErrorCode::ExecutorFailed)
+                .map_err(|_| (ErrorCode::ExecutorFailed, unavailable(invocation_key)))
             }
         }
     };
     let (result, usage, websearch_urls) = match result {
         Ok((result, usage, urls)) => (Ok(result), Some(usage), urls),
-        Err(error) => (Err(error), Some(unavailable(invocation_key)), Vec::new()),
+        Err((error, usage)) => (Err(error), Some(usage), Vec::new()),
     };
     Ok(InvocationOutcome {
         result,
@@ -398,6 +408,30 @@ mod tests {
                 })
             ));
         }
+
+        let outer = r#"{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"num_turns":1,"result":"not a Flori envelope","stop_reason":"end_turn","total_cost_usd":0,"total_credits":1.25,"usage":{},"modelUsage":{},"permission_denials":[],"fast_mode_state":"off","origin":"headless","uuid":"fake","session_id":"fake"}"#;
+        let executable = root.script(
+            "invalid-envelope",
+            &format!("cat >/dev/null\nprintf '%s' '{outer}'\n"),
+        );
+        let outcome = invoke(
+            &root,
+            AiTool::QoderCli,
+            executable,
+            Executor::AiDocumentNote,
+            "prompt".into(),
+            2_000,
+        )
+        .await;
+        assert_eq!(outcome.result, Err(ErrorCode::ExecutorFailed));
+        assert!(matches!(
+            outcome.usage,
+            Some(UsageUpdate::Final {
+                origin: UsageOrigin::Observed,
+                credits_micros: Some(1_250_000),
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

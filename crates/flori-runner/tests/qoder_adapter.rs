@@ -148,6 +148,13 @@ fn result_decodes_the_strict_envelope_and_only_reports_credits() {
             credits_micros: Some(2_500_001),
         }
     );
+    let with_origin = String::from_utf8(result_output(DOCUMENT_NOTE, "1"))
+        .expect("fixture UTF-8")
+        .replace(
+            "\"uuid\":\"fake-uuid\"",
+            "\"origin\":\"headless\",\"uuid\":\"fake-uuid\"",
+        );
+    parse_note(with_origin.as_bytes()).expect("locked optional origin");
 
     let decimal_locator = format!(
         r#"{{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"note","summary_markdown":"summary","terms":{}}}"#,

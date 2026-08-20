@@ -171,6 +171,33 @@ pub fn parse_result(
     executor: Executor,
     invocation_key: String,
 ) -> Result<QoderResult, QoderError> {
+    let result = parse_outer(exit_code, stdout, max_output_bytes)?;
+    let usage = usage(&result, invocation_key)?;
+    let envelope: AiResultEnvelope =
+        serde_json::from_str(&result.result).map_err(|_| QoderError::InvalidOutput)?;
+    if envelope_executor(&envelope) != executor {
+        return Err(QoderError::InvalidOutput);
+    }
+    Ok(QoderResult { envelope, usage })
+}
+
+pub(crate) fn parse_usage(
+    exit_code: Option<i32>,
+    stdout: &[u8],
+    max_output_bytes: usize,
+    invocation_key: String,
+) -> Result<UsageUpdate, QoderError> {
+    usage(
+        &parse_outer(exit_code, stdout, max_output_bytes)?,
+        invocation_key,
+    )
+}
+
+fn parse_outer(
+    exit_code: Option<i32>,
+    stdout: &[u8],
+    max_output_bytes: usize,
+) -> Result<JsonResult, QoderError> {
     if exit_code != Some(0) {
         return Err(QoderError::NonZeroExit(exit_code));
     }
@@ -182,22 +209,17 @@ pub fn parse_result(
     if result.kind != "result" || result.subtype != "success" || result.is_error {
         return Err(QoderError::InvalidOutput);
     }
-    let credits_micros = credits_to_micros(result.total_credits.get())?;
-    let envelope: AiResultEnvelope =
-        serde_json::from_str(&result.result).map_err(|_| QoderError::InvalidOutput)?;
-    if envelope_executor(&envelope) != executor {
-        return Err(QoderError::InvalidOutput);
-    }
-    Ok(QoderResult {
-        envelope,
-        usage: UsageUpdate::Final {
-            invocation_key,
-            origin: UsageOrigin::Observed,
-            input_tokens: None,
-            output_tokens: None,
-            cost_micros: None,
-            credits_micros: Some(credits_micros),
-        },
+    Ok(result)
+}
+
+fn usage(result: &JsonResult, invocation_key: String) -> Result<UsageUpdate, QoderError> {
+    Ok(UsageUpdate::Final {
+        invocation_key,
+        origin: UsageOrigin::Observed,
+        input_tokens: None,
+        output_tokens: None,
+        cost_micros: None,
+        credits_micros: Some(credits_to_micros(result.total_credits.get())?),
     })
 }
 
@@ -221,6 +243,7 @@ struct JsonResult {
     model_usage: serde::de::IgnoredAny,
     permission_denials: serde::de::IgnoredAny,
     fast_mode_state: serde::de::IgnoredAny,
+    origin: Option<serde::de::IgnoredAny>,
     uuid: serde::de::IgnoredAny,
     session_id: serde::de::IgnoredAny,
 }
