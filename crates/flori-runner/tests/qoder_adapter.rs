@@ -158,6 +158,7 @@ fn credits_are_exact_micros_and_never_fabricated() {
         ("1e-6", 1),
         ("2.5", 2_500_000),
         ("12.345678", 12_345_678),
+        ("18446744073709.551615", u64::MAX),
     ] {
         let parsed = parse_note(&result_output(DOCUMENT_NOTE, credits)).expect("exact credits");
         assert!(matches!(
