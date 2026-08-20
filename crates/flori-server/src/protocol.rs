@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{FromRequest, FromRequestParts, Path, Request},
-    http::{header::AUTHORIZATION, request::Parts},
+    http::{HeaderMap, header::AUTHORIZATION, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -25,6 +25,24 @@ impl BearerToken {
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn optional(headers: &HeaderMap) -> Result<Option<Self>, HttpError> {
+        let mut values = headers.get_all(AUTHORIZATION).iter();
+        let Some(value) = values.next() else {
+            return Ok(None);
+        };
+        if values.next().is_some() {
+            return Err(HttpError::unauthorized());
+        }
+        let value = value.to_str().map_err(|_| HttpError::unauthorized())?;
+        let Some(token) = value.strip_prefix("Bearer ") else {
+            return Ok(None);
+        };
+        if !valid_token(token) {
+            return Err(HttpError::unauthorized());
+        }
+        Ok(Some(Self(token.to_owned())))
+    }
 }
 
 impl<S> FromRequestParts<S> for BearerToken
@@ -34,17 +52,7 @@ where
     type Rejection = HttpError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let mut headers = parts.headers.get_all(AUTHORIZATION).iter();
-        let value = headers
-            .next()
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .filter(|token| valid_token(token))
-            .ok_or_else(HttpError::unauthorized)?;
-        if headers.next().is_some() {
-            return Err(HttpError::unauthorized());
-        }
-        Ok(Self(value.to_owned()))
+        Self::optional(&parts.headers)?.ok_or_else(HttpError::unauthorized)
     }
 }
 
@@ -120,5 +128,19 @@ mod tests {
     fn bearer_token_rejects_whitespace_and_empty_values() {
         assert!(valid_token("token-._~09AZaz"));
         assert!(!valid_token("token with spaces"));
+    }
+
+    #[test]
+    fn optional_bearer_leaves_edge_basic_auth_to_the_public_route() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, "Basic Zmxvcmk6cGFzcw==".parse().unwrap());
+        assert!(matches!(BearerToken::optional(&headers), Ok(None)));
+        headers.insert(AUTHORIZATION, "Bearer runner-token".parse().unwrap());
+        let Ok(Some(token)) = BearerToken::optional(&headers) else {
+            panic!("valid bearer token");
+        };
+        assert_eq!(token.expose(), "runner-token");
+        headers.append(AUTHORIZATION, "Bearer duplicate".parse().unwrap());
+        assert!(BearerToken::optional(&headers).is_err());
     }
 }

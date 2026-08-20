@@ -24,6 +24,7 @@ struct Harness {
 struct SeededJob {
     job_id: JobId,
     publish_id: TaskId,
+    note_artifact_id: ArtifactId,
     evidence_id: EvidenceId,
     evidence_path: PathBuf,
     note_path: PathBuf,
@@ -178,6 +179,7 @@ impl Harness {
         SeededJob {
             job_id,
             publish_id,
+            note_artifact_id,
             evidence_id,
             evidence_path,
             note_path,
@@ -271,6 +273,17 @@ async fn valid_publish_builds_current_evidence_and_fts_then_switches_determinist
         .expect("current evidence");
     assert_eq!(evidence.job_id, first.job_id);
     assert_eq!(evidence.source_id, harness.source_id);
+    assert_eq!(
+        harness
+            .store
+            .get_current_artifact(first.note_artifact_id)
+            .await
+            .expect("Artifact query")
+            .expect("current Artifact")
+            .0
+            .job_id,
+        first.job_id,
+    );
     let hit: (String, String) = sqlx::query_as(
         "SELECT sc.job_id,sce.evidence_id FROM search_chunks sc JOIN sources s ON s.current_job_id=sc.job_id JOIN search_chunk_evidence sce ON sce.chunk_id=sc.chunk_id WHERE search_chunks MATCH '\"firsttoken\"' LIMIT 1",
     ).fetch_one(&harness.pool).await.expect("current FTS hit");
@@ -336,6 +349,25 @@ async fn valid_publish_builds_current_evidence_and_fts_then_switches_determinist
             .await
             .expect("old evidence")
             .is_none()
+    );
+    assert!(
+        harness
+            .store
+            .get_current_artifact(first.note_artifact_id)
+            .await
+            .expect("old Artifact")
+            .is_none()
+    );
+    assert_eq!(
+        harness
+            .store
+            .get_current_artifact(second.note_artifact_id)
+            .await
+            .expect("new Artifact")
+            .expect("current Artifact")
+            .0
+            .job_id,
+        second.job_id,
     );
     assert_eq!(
         harness

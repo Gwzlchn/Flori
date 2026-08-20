@@ -1,7 +1,8 @@
 use std::{net::SocketAddr, str};
 
 use flori_core::{
-    CreateUploadSource, CreatedSource, EvidenceLocator, EvidenceManifest, EvidenceView, SearchHit,
+    ArtifactId, ArtifactView, CreateUploadSource, CreatedSource, EvidenceLocator, EvidenceManifest,
+    EvidenceView, SearchHit, Sha256Digest, TaskId,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
@@ -12,6 +13,8 @@ use tokio::{
 use super::assertions::{VerifyContext, VerifyMode};
 
 const BOUNDARY: &str = "flori-pdf-product-boundary";
+
+type ArtifactHttpRow<'a> = (&'a str, &'a str, &'a str, &'a str, &'a str, i64, &'a str);
 
 pub(super) async fn upload_pdf(
     address: SocketAddr,
@@ -55,6 +58,41 @@ pub(super) async fn post_json<I: Serialize, O: DeserializeOwned>(
 pub(super) async fn get_json<O: DeserializeOwned>(address: SocketAddr, path: &str) -> O {
     let response = exchange(address, "GET", path, "", &[]).await;
     decode_json(&response, 200)
+}
+
+pub(super) async fn verify_public_artifact(
+    context: &VerifyContext<'_>,
+    row: ArtifactHttpRow<'_>,
+    bytes: &[u8],
+) {
+    let (artifact_id, task_id, name, kind, media_type, size_bytes, sha256) = row;
+    let artifact_id = artifact_id.parse::<ArtifactId>().expect("Artifact ID");
+    let view: ArtifactView =
+        get_json(context.address, &format!("/api/v1/artifacts/{artifact_id}")).await;
+    assert_eq!(view.artifact_id, artifact_id);
+    assert_eq!(
+        (view.source_id, view.job_id),
+        (context.source_id, context.job_id)
+    );
+    assert_eq!(view.task_id, task_id.parse::<TaskId>().expect("Task ID"));
+    assert_eq!(
+        (view.name.as_str(), view.media_type.as_str()),
+        (name, media_type)
+    );
+    assert_eq!(
+        serde_json::to_string(&view.kind).expect("Artifact kind"),
+        format!("\"{kind}\"")
+    );
+    assert_eq!(view.size_bytes, u64::try_from(size_bytes).expect("size"));
+    assert_eq!(view.sha256, Sha256Digest::parse(sha256).expect("SHA-256"));
+
+    let path = format!("/api/v1/artifacts/{artifact_id}/content");
+    let response = exchange(context.address, "GET", &path, "", &[]).await;
+    assert_eq!(response_status(&response), 200);
+    assert_eq!(response_body(&response), bytes);
+    let response = exchange(context.address, "GET", &path, "Range: bytes=0-0\r\n", &[]).await;
+    assert_eq!(response_status(&response), 206);
+    assert_eq!(response_body(&response), &bytes[..1]);
 }
 
 pub(super) async fn verify_search_and_evidence(
@@ -142,18 +180,8 @@ fn part(body: &mut Vec<u8>, name: &str, file_name: Option<&str>, media_type: &st
 }
 
 fn decode_json<O: DeserializeOwned>(response: &[u8], expected_status: u16) -> O {
-    let status = str::from_utf8(response)
-        .expect("UTF-8 HTTP response")
-        .split_whitespace()
-        .nth(1)
-        .expect("HTTP status")
-        .parse::<u16>()
-        .expect("numeric HTTP status");
-    let body = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|position| &response[position + 4..])
-        .expect("HTTP header terminator");
+    let status = response_status(response);
+    let body = response_body(response);
     assert_eq!(
         status,
         expected_status,
@@ -161,4 +189,26 @@ fn decode_json<O: DeserializeOwned>(response: &[u8], expected_status: u16) -> O 
         String::from_utf8_lossy(body)
     );
     serde_json::from_slice(body).expect("strict response JSON")
+}
+
+fn response_status(response: &[u8]) -> u16 {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("HTTP header terminator");
+    str::from_utf8(&response[..header_end])
+        .expect("UTF-8 HTTP response")
+        .split_whitespace()
+        .nth(1)
+        .expect("HTTP status")
+        .parse::<u16>()
+        .expect("numeric HTTP status")
+}
+
+fn response_body(response: &[u8]) -> &[u8] {
+    response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| &response[position + 4..])
+        .expect("HTTP header terminator")
 }

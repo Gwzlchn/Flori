@@ -1,13 +1,29 @@
 use std::str::FromStr;
 
 use flori_core::{
-    ErrorCode, EvidenceId, EvidenceLocator, EvidenceView, PdfRect, SearchHit, VideoKeyframe,
+    ArtifactId, ArtifactKind, ArtifactView, ErrorCode, EvidenceId, EvidenceLocator, EvidenceView,
+    PdfRect, SearchHit, Sha256Digest, VideoKeyframe,
 };
 use sqlx::{Row, sqlite::SqliteRow};
 
 use super::super::{Store, StoreError};
 
 impl Store {
+    pub async fn get_current_artifact(
+        &self,
+        artifact_id: ArtifactId,
+    ) -> Result<Option<(ArtifactView, String)>, StoreError> {
+        let row = sqlx::query(
+            "SELECT a.id,a.source_id,a.job_id,a.task_id,a.name,a.kind,a.media_type, \
+             a.size_bytes,a.sha256,a.relative_path FROM artifacts a JOIN sources s \
+             ON s.id=a.source_id AND s.current_job_id=a.job_id WHERE a.id=?",
+        )
+        .bind(artifact_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(parse_artifact_view).transpose()
+    }
+
     pub async fn search_current(
         &self,
         query: &str,
@@ -71,6 +87,34 @@ impl Store {
         .await?;
         row.as_ref().map(parse_evidence_view).transpose()
     }
+}
+
+fn parse_artifact_view(row: &SqliteRow) -> Result<(ArtifactView, String), StoreError> {
+    let kind: String = row.try_get("kind")?;
+    let size: i64 = row.try_get("size_bytes")?;
+    let sha256: String = row.try_get("sha256")?;
+    Ok((
+        ArtifactView {
+            artifact_id: parse_id(row, "id")?,
+            source_id: parse_id(row, "source_id")?,
+            job_id: parse_id(row, "job_id")?,
+            task_id: parse_id(row, "task_id")?,
+            name: row.try_get("name")?,
+            kind: parse_artifact_kind(&kind)?,
+            media_type: row.try_get("media_type")?,
+            size_bytes: u64::try_from(size)
+                .map_err(|_| StoreError::new(ErrorCode::CorruptState))?,
+            sha256: Sha256Digest::parse(sha256)
+                .map_err(|_| StoreError::new(ErrorCode::CorruptState))?,
+        },
+        row.try_get("relative_path")?,
+    ))
+}
+
+fn parse_artifact_kind(value: &str) -> Result<ArtifactKind, StoreError> {
+    let json =
+        serde_json::to_string(value).map_err(|_| StoreError::new(ErrorCode::CorruptState))?;
+    serde_json::from_str(&json).map_err(|_| StoreError::new(ErrorCode::CorruptState))
 }
 
 fn escape_like(query: &str) -> String {

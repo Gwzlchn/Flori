@@ -6,8 +6,8 @@ use crate::{
     AiAudit, AiAuditSchema, AiModelCapability, AiResultEnvelope, AiResultSchema, AiRunnerSelection,
     AiTool, AiUsageId, AiUsageState, ArtifactDeclaration, ArtifactId, ArtifactKind,
     ArtifactManifest, ArtifactManifestEntry, ArtifactManifestSchema, ArtifactOrigin,
-    ArtifactRetention, ArtifactWhen, AttemptAck, AttemptId, AttemptState, CollectionId,
-    CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId, CreateJobRequest,
+    ArtifactRetention, ArtifactView, ArtifactWhen, AttemptAck, AttemptId, AttemptState,
+    CollectionId, CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId, CreateJobRequest,
     CreateRemoteSource, CreateRunnerSlot, CreateRunnerSlotResponse, CreateUploadSource, CreatedJob,
     CreatedSource, CredentialId, CredentialKind, DocumentFigure, DocumentPage, DocumentSection,
     DocumentStructure, DocumentStructureSchema, DocumentTable, DocumentTextBlock, DomainId,
@@ -153,6 +153,7 @@ use crate::{
     CreatedJob,
     CreateUploadSource,
     PendingSourceCommit,
+    ArtifactView,
     SearchHit,
     EvidenceView,
 )))]

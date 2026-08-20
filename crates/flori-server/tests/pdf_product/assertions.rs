@@ -10,7 +10,17 @@ use sqlx::SqlitePool;
 
 use super::{fixture::ExpectedEvidence, http};
 
-type ArtifactRow = (String, String, String, String, String, i64, String, String);
+type ArtifactRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+);
 
 pub(super) struct VerifyContext<'a> {
     pub(super) pool: &'a SqlitePool,
@@ -123,7 +133,7 @@ pub(super) async fn verify_and_write_receipt(context: &VerifyContext<'_>) -> Str
             .expect("source input path");
     let source_input = canonical(&context.artifact_root.join(source_input));
     let rows: Vec<ArtifactRow> = sqlx::query_as(
-        "SELECT a.id,t.task_key,a.name,a.kind,a.media_type,a.size_bytes,a.sha256,a.relative_path FROM artifacts a JOIN tasks t ON t.id=a.task_id WHERE a.job_id=? ORDER BY t.task_key,a.name",
+        "SELECT a.id,a.task_id,t.task_key,a.name,a.kind,a.media_type,a.size_bytes,a.sha256,a.relative_path FROM artifacts a JOIN tasks t ON t.id=a.task_id WHERE a.job_id=? ORDER BY t.task_key,a.name",
     )
     .bind(context.job_id.to_string())
     .fetch_all(context.pool)
@@ -132,7 +142,7 @@ pub(super) async fn verify_and_write_receipt(context: &VerifyContext<'_>) -> Str
     let mut artifacts = Vec::with_capacity(rows.len());
     let mut evidence = None;
     let mut kinds = Vec::new();
-    for (id, task, name, kind, media, size, sha256, relative) in rows {
+    for (id, task_id, task, name, kind, media, size, sha256, relative) in rows {
         let path = context.artifact_root.join(&relative);
         let bytes = fs::read(&path).expect("read Artifact bytes");
         assert_eq!(i64::try_from(bytes.len()).expect("Artifact size"), size);
@@ -144,6 +154,12 @@ pub(super) async fn verify_and_write_receipt(context: &VerifyContext<'_>) -> Str
                 .is_symlink()
         );
         strict_content(&kind, &bytes, &mut evidence);
+        http::verify_public_artifact(
+            context,
+            (&id, &task_id, &name, &kind, &media, size, &sha256),
+            &bytes,
+        )
+        .await;
         kinds.push((kind.clone(), name.clone()));
         artifacts.push(ArtifactReceipt {
             artifact_id: id,

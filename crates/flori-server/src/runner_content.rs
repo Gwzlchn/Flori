@@ -1,5 +1,5 @@
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, State},
     http::{
@@ -9,7 +9,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use flori_core::{ArtifactId, ErrorCode, SourceInputId};
+use flori_core::{ArtifactId, ArtifactView, ErrorCode, SourceInputId};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
@@ -22,8 +22,12 @@ use crate::{
 pub(super) fn routes() -> Router<HttpState> {
     Router::new()
         .route(
+            "/api/v1/artifacts/{id}",
+            get(artifact_metadata).layer(DefaultBodyLimit::max(1)),
+        )
+        .route(
             "/api/v1/artifacts/{id}/content",
-            get(artifact).layer(DefaultBodyLimit::max(1)),
+            get(artifact_content).layer(DefaultBodyLimit::max(1)),
         )
         .route(
             "/api/v1/source-inputs/{id}/content",
@@ -31,9 +35,24 @@ pub(super) fn routes() -> Router<HttpState> {
         )
 }
 
-async fn artifact(
+async fn artifact_metadata(
     State(state): State<HttpState>,
-    token: BearerToken,
+    StrictPath(id): StrictPath<ArtifactId>,
+    StrictBytes(body): StrictBytes,
+) -> Result<Json<ArtifactView>, HttpError> {
+    if !body.is_empty() {
+        return Err(HttpError::new(ErrorCode::InvalidRequest));
+    }
+    state
+        .store
+        .get_current_artifact(id)
+        .await?
+        .map(|(view, _)| Json(view))
+        .ok_or_else(|| HttpError::new(ErrorCode::NotFound))
+}
+
+async fn artifact_content(
+    State(state): State<HttpState>,
     StrictPath(id): StrictPath<ArtifactId>,
     headers: HeaderMap,
     StrictBytes(body): StrictBytes,
@@ -41,12 +60,24 @@ async fn artifact(
     if !body.is_empty() {
         return Err(HttpError::new(ErrorCode::InvalidRequest));
     }
-    let now_ms = now_ms()?;
-    let runner_id = authenticate(&state, &token, now_ms).await?;
-    let metadata = state
-        .store
-        .authorize_artifact_content(runner_id, id, now_ms)
-        .await?;
+    let metadata = match BearerToken::optional(&headers)? {
+        Some(token) => {
+            let now_ms = now_ms()?;
+            let runner_id = authenticate(&state, &token, now_ms).await?;
+            state
+                .store
+                .authorize_artifact_content(runner_id, id, now_ms)
+                .await?
+        }
+        None => state
+            .store
+            .get_current_artifact(id)
+            .await?
+            .map(|(view, relative_path)| {
+                (relative_path, view.media_type, view.size_bytes, view.sha256)
+            })
+            .ok_or_else(|| HttpError::new(ErrorCode::NotFound))?,
+    };
     content(state, headers, metadata).await
 }
 
