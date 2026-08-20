@@ -2,6 +2,6 @@
   "query": "declared artifacts",
   "minimum_hits": 1,
   "required_fields": ["source_id", "job_id", "artifact_id", "snippet", "evidence_ids"],
-  "required_evidence_id": "ev-video-artifact",
+  "required_evidence_id": "018f0000-0000-7000-8000-000000000102",
   "score_is_golden": false
 }

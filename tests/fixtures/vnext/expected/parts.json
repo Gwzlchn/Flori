@@ -1,0 +1,13 @@
+{
+  "schema": "flori.parts_manifest.v1",
+  "parts": [
+    {
+      "index": 1,
+      "title": "local-video",
+      "duration_ms": 3000,
+      "video_artifact_name": "videos/part-1.mp4",
+      "subtitle_artifact_name": "subtitles/part-1.srt",
+      "danmaku_artifact_name": "danmaku/part-1.json"
+    }
+  ]
+}

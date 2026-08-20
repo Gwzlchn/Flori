@@ -1,0 +1,28 @@
+{
+  "schema": "flori.terms.v1",
+  "terms": [
+    {
+      "term": "Artifact",
+      "explanation": "Task声明并由服务端校验提交的不可变输出。",
+      "evidence_ids": ["018f0000-0000-7000-8000-000000000102"]
+    }
+  ],
+  "evidence_candidates": [
+    {
+      "evidence_id": "018f0000-0000-7000-8000-000000000102",
+      "source_artifact_id": "018f0000-0000-7000-8000-000000000002",
+      "locator": {
+        "kind": "video",
+        "value": {
+          "start_ms": 1000,
+          "end_ms": 2000,
+          "keyframe": {
+            "artifact_id": "018f0000-0000-7000-8000-000000000003",
+            "timestamp_ms": 1000
+          }
+        }
+      },
+      "quote": "Each task emits only declared artifacts."
+    }
+  ]
+}

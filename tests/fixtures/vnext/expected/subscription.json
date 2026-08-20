@@ -1,0 +1,11 @@
+{
+  "schema": "flori.subscription_manifest.v1",
+  "items": [
+    {
+      "kind": "bilibili_video",
+      "canonical_ref": "bilibili:BV1GJ411x7h7",
+      "title": "fixture item",
+      "published_at_ms": 1724112000000
+    }
+  ]
+}
