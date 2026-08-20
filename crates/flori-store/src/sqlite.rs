@@ -11,6 +11,7 @@ use sqlx::{
 const SCHEMA: &str = include_str!("../migrations/0001_v1.sql");
 
 mod lease;
+mod scheduler;
 mod usage;
 
 #[derive(Debug)]

@@ -1,0 +1,257 @@
+use std::{fs, path::PathBuf, sync::Arc};
+
+use flori_core::{
+    AttemptId, DomainId, ErrorCode, JobId, PipelineId, PipelineRevisionId, RunnerId, SourceId,
+    TaskId, TaskState,
+};
+use flori_store::Store;
+use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
+
+struct TestDatabase {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl TestDatabase {
+    fn new() -> Self {
+        let directory = std::env::temp_dir().join(format!("flori-wp08-{}", JobId::generate()));
+        fs::create_dir(&directory).expect("create test directory");
+        let path = directory.join("flori.db");
+        Self { directory, path }
+    }
+
+    async fn pool(&self) -> SqlitePool {
+        SqlitePool::connect_with(
+            SqliteConnectOptions::new()
+                .filename(&self.path)
+                .foreign_keys(true),
+        )
+        .await
+        .expect("connect test database")
+    }
+}
+
+impl Drop for TestDatabase {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.directory).expect("remove test directory");
+    }
+}
+
+struct Foundation {
+    source_id: SourceId,
+    revision_id: PipelineRevisionId,
+    runner_id: RunnerId,
+}
+
+struct JobTasks {
+    job_id: JobId,
+    work_id: TaskId,
+    publish_id: TaskId,
+}
+
+async fn seed_foundation(pool: &SqlitePool) -> Foundation {
+    let domain_id = DomainId::generate();
+    let pipeline_id = PipelineId::generate();
+    let revision_id = PipelineRevisionId::generate();
+    let source_id = SourceId::generate();
+    let runner_id = RunnerId::generate();
+    sqlx::query("INSERT INTO domains(id,slug,name,profile_text,created_at_ms,updated_at_ms) VALUES(?,?,?,'',0,0)")
+        .bind(domain_id.to_string()).bind(format!("domain-{domain_id}")).bind("Domain")
+        .execute(pool).await.expect("domain");
+    sqlx::query("INSERT INTO pipelines(id,key,created_at_ms) VALUES(?,?,0)")
+        .bind(pipeline_id.to_string())
+        .bind(format!("pipeline-{pipeline_id}"))
+        .execute(pool)
+        .await
+        .expect("pipeline");
+    sqlx::query("INSERT INTO pipeline_revisions(id,pipeline_id,compiler_version,git_commit,yaml_sha256,yaml_text,created_at_ms) VALUES(?,?,1,'test',?,'work: {}',0)")
+        .bind(revision_id.to_string()).bind(pipeline_id.to_string()).bind("0".repeat(64))
+        .execute(pool).await.expect("revision");
+    sqlx::query("INSERT INTO sources(id,kind,canonical_ref,domain_id,request_key,request_sha256,created_at_ms,updated_at_ms) VALUES(?,'pdf_url',?,?,?,?,0,0)")
+        .bind(source_id.to_string()).bind(format!("https://example.test/{source_id}.pdf"))
+        .bind(domain_id.to_string()).bind(format!("source-{source_id}")).bind("1".repeat(64))
+        .execute(pool).await.expect("source");
+    sqlx::query("INSERT INTO runners(id,name,state,config_revision,max_concurrency,tags_json,tools_json,ai_models_json,created_at_ms,updated_at_ms) VALUES(?,?,'enabled',1,2,'[]','[]','[]',0,0)")
+        .bind(runner_id.to_string()).bind(format!("runner-{runner_id}"))
+        .execute(pool).await.expect("runner");
+    Foundation {
+        source_id,
+        revision_id,
+        runner_id,
+    }
+}
+
+async fn insert_job(pool: &SqlitePool, foundation: &Foundation, ordinal: u8) -> JobTasks {
+    let job_id = JobId::generate();
+    let work_id = TaskId::generate();
+    let publish_id = TaskId::generate();
+    sqlx::query("INSERT INTO jobs(id,source_id,pipeline_revision_id,trigger,state,prompt_snapshot_id,prompt_snapshot_sha256,prompt_snapshot_json,request_key,request_sha256,created_at_ms) VALUES(?,?,?,'pipeline_rerun','queued',?,?,'{}',?,?,?)")
+        .bind(job_id.to_string()).bind(foundation.source_id.to_string()).bind(foundation.revision_id.to_string())
+        .bind(JobId::generate().to_string()).bind("2".repeat(64)).bind(format!("job-{job_id}"))
+        .bind("3".repeat(64)).bind(i64::from(ordinal))
+        .execute(pool).await.expect("job");
+    sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms,ready_at_ms) VALUES(?,?,'work','document.acquire',?,'{}','ready',2,1000,0)")
+        .bind(work_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":[]}"#)
+        .execute(pool).await.expect("work task");
+    sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms) VALUES(?,?,'publish','core.publish',?,'{}','pending',1,1000)")
+        .bind(publish_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":["work"]}"#)
+        .execute(pool).await.expect("publish task");
+    JobTasks {
+        job_id,
+        work_id,
+        publish_id,
+    }
+}
+
+async fn execute_and_publish(
+    store: &Store,
+    foundation: &Foundation,
+    tasks: &JobTasks,
+    now_ms: i64,
+) {
+    let attempt_id = AttemptId::generate();
+    store
+        .lease_task(
+            tasks.work_id,
+            attempt_id,
+            foundation.runner_id,
+            now_ms,
+            now_ms + 50,
+        )
+        .await
+        .expect("lease work");
+    assert_eq!(
+        store
+            .complete_attempt(attempt_id, now_ms + 1)
+            .await
+            .expect("complete work"),
+        TaskState::Succeeded
+    );
+    assert_eq!(
+        store
+            .complete_attempt(attempt_id, now_ms + 1)
+            .await
+            .expect("idempotent completion"),
+        TaskState::Succeeded
+    );
+    store
+        .publish_job(
+            tasks.job_id,
+            tasks.publish_id,
+            AttemptId::generate(),
+            now_ms + 2,
+        )
+        .await
+        .expect("publish job");
+}
+
+#[tokio::test]
+async fn dag_progress_and_publish_keep_only_current_and_previous_pointers() {
+    let database = TestDatabase::new();
+    let store = Store::open(&database.path).await.expect("store");
+    let pool = database.pool().await;
+    let foundation = seed_foundation(&pool).await;
+    let first = insert_job(&pool, &foundation, 1).await;
+    let second = insert_job(&pool, &foundation, 2).await;
+    let third = insert_job(&pool, &foundation, 3).await;
+
+    execute_and_publish(&store, &foundation, &first, 100).await;
+    execute_and_publish(&store, &foundation, &second, 200).await;
+    execute_and_publish(&store, &foundation, &third, 300).await;
+    store
+        .publish_job(third.job_id, third.publish_id, AttemptId::generate(), 302)
+        .await
+        .expect("idempotent publish");
+
+    let pointers: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT current_job_id,previous_job_id FROM sources WHERE id=?")
+            .bind(foundation.source_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("pointers");
+    assert_eq!(
+        pointers,
+        (
+            Some(third.job_id.to_string()),
+            Some(second.job_id.to_string())
+        )
+    );
+    let first_state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=?")
+        .bind(first.job_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("old job remains audit");
+    assert_eq!(first_state, "succeeded");
+}
+
+#[tokio::test]
+async fn transient_retry_and_terminal_failure_fence_late_attempts() {
+    let database = TestDatabase::new();
+    let store = Store::open(&database.path).await.expect("store");
+    let pool = database.pool().await;
+    let foundation = seed_foundation(&pool).await;
+    let tasks = insert_job(&pool, &foundation, 1).await;
+    let first = AttemptId::generate();
+    store
+        .lease_task(tasks.work_id, first, foundation.runner_id, 10, 100)
+        .await
+        .expect("first lease");
+    assert_eq!(
+        store
+            .fail_attempt(first, ErrorCode::NetworkTemporary, "network", 20)
+            .await
+            .expect("retry"),
+        TaskState::Ready
+    );
+    let second = AttemptId::generate();
+    store
+        .lease_task(tasks.work_id, second, foundation.runner_id, 21, 100)
+        .await
+        .expect("second lease");
+    assert_eq!(
+        store
+            .fail_attempt(second, ErrorCode::ExecutorFailed, "bad input", 22)
+            .await
+            .expect("terminal failure"),
+        TaskState::Failed
+    );
+
+    let late = store
+        .complete_attempt(first, 23)
+        .await
+        .expect_err("old fence rejected");
+    assert_eq!(late.code(), ErrorCode::StaleAttempt);
+    let states: (String, String, String) = sqlx::query_as(
+        "SELECT j.state,w.state,p.state FROM jobs j JOIN tasks w ON w.job_id=j.id AND w.task_key='work' JOIN tasks p ON p.job_id=j.id AND p.task_key='publish' WHERE j.id=?",
+    ).bind(tasks.job_id.to_string()).fetch_one(&pool).await.expect("terminal states");
+    assert_eq!(
+        states,
+        ("failed".into(), "failed".into(), "canceled".into())
+    );
+}
+
+#[tokio::test]
+async fn concurrent_claim_has_exactly_one_winner() {
+    let database = TestDatabase::new();
+    let store = Arc::new(Store::open(&database.path).await.expect("store"));
+    let pool = database.pool().await;
+    let foundation = seed_foundation(&pool).await;
+    let tasks = insert_job(&pool, &foundation, 1).await;
+    let (left, right) = tokio::join!(
+        store.lease_task(
+            tasks.work_id,
+            AttemptId::generate(),
+            foundation.runner_id,
+            10,
+            100
+        ),
+        store.lease_task(
+            tasks.work_id,
+            AttemptId::generate(),
+            foundation.runner_id,
+            10,
+            100
+        ),
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+}
