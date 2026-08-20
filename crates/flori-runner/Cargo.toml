@@ -1,5 +1,6 @@
 [package]
 name = "flori-runner"
+autobins = false
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -10,6 +11,21 @@ default = ["codex", "media", "qoder"]
 codex = []
 media = []
 qoder = []
+
+[[bin]]
+name = "flori-runner-media"
+path = "src/bin/media.rs"
+required-features = ["media"]
+
+[[bin]]
+name = "flori-runner-ai-qoder"
+path = "src/bin/qoder.rs"
+required-features = ["qoder"]
+
+[[bin]]
+name = "flori-runner-ai-codex"
+path = "src/bin/codex.rs"
+required-features = ["codex"]
 
 [dependencies]
 flori-core.workspace = true
