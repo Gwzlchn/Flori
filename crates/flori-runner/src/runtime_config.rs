@@ -18,8 +18,7 @@ const CODEX_CONFIG_DIR: &str = "CODEX_HOME";
 
 pub(crate) struct RuntimeConfig {
     pub(crate) tool: AiTool,
-    pub(crate) server_url: String,
-    pub(crate) token: String,
+    pub(crate) client: RunnerClient,
     pub(crate) model: String,
     pub(crate) effort: String,
     pub(crate) spool_dir: PathBuf,
@@ -67,12 +66,11 @@ pub(crate) fn parse(
     };
     let tool_config_dir = required_path(&mut environment, config_name)?;
 
-    RunnerClient::new(&server_url, token.clone())
+    let client = RunnerClient::new(&server_url, token)
         .map_err(|_| RuntimeConfigError::InvalidEnvironment(SERVER_URL))?;
     Ok(RuntimeConfig {
         tool,
-        server_url,
-        token,
+        client,
         model,
         effort,
         spool_dir,

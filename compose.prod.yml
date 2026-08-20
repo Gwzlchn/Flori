@@ -37,7 +37,7 @@ services:
       dockerfile: docker/runner.Dockerfile
       target: runner-ai-qoder
     environment:
-      FLORI_SERVER_URL: ${FLORI_SERVER_URL:?set FLORI_SERVER_URL to the public HTTPS endpoint}
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_QODER:-}
       FLORI_RUNNER_MODEL: ${FLORI_RUNNER_QODER_MODEL:-}
       FLORI_RUNNER_EFFORT: ${FLORI_RUNNER_QODER_EFFORT:-}
@@ -59,7 +59,7 @@ services:
       dockerfile: docker/runner.Dockerfile
       target: runner-ai-codex
     environment:
-      FLORI_SERVER_URL: ${FLORI_SERVER_URL:?set FLORI_SERVER_URL to the public HTTPS endpoint}
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_CODEX:-}
       FLORI_RUNNER_MODEL: ${FLORI_RUNNER_CODEX_MODEL:-}
       FLORI_RUNNER_EFFORT: ${FLORI_RUNNER_CODEX_EFFORT:-}

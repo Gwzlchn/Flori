@@ -1,7 +1,7 @@
 #[path = "../src/runtime_config.rs"]
 mod runtime_config;
 
-use std::{collections::HashMap, ffi::OsString, path::PathBuf};
+use std::{collections::HashMap, ffi::OsString, net::TcpListener, path::PathBuf, process::Command};
 
 use flori_core::AiTool;
 use runtime_config::{RuntimeConfigError, parse};
@@ -61,8 +61,7 @@ fn parses_qoder_and_codex_without_external_actions() {
     ] {
         let config = parse_with(name, &environment(tool)).expect("valid runtime config");
         assert_eq!(config.tool, tool);
-        assert_eq!(config.server_url, "https://flori.example.test");
-        assert_eq!(config.token, "runner-token");
+        let _client = &config.client;
         assert_eq!(config.model, "gpt-5.3-codex");
         assert_eq!(config.effort, "high");
         assert_eq!(
@@ -71,6 +70,44 @@ fn parses_qoder_and_codex_without_external_actions() {
         );
         assert_eq!(config.home_dir, PathBuf::from("/home/flori"));
         assert_eq!(config.tool_config_dir, PathBuf::from(config_dir));
+    }
+}
+
+#[test]
+fn binary_rejects_missing_configuration_without_an_http_request() {
+    let listener = TcpListener::bind("localhost:0").expect("listener");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let server_url = format!("http://{}", listener.local_addr().expect("address"));
+    let base = [
+        ("FLORI_SERVER_URL", server_url.as_str()),
+        ("FLORI_RUNNER_TOKEN", "runner-token"),
+        ("FLORI_RUNNER_MODEL", "gpt-5.3-codex"),
+        ("FLORI_RUNNER_EFFORT", "high"),
+        ("FLORI_RUNNER_SPOOL_DIR", "/tmp/flori-runner-test"),
+        ("HOME", "/tmp/flori-home-test"),
+        ("CODEX_HOME", "/tmp/flori-codex-test"),
+    ];
+    for missing in base.map(|(name, _)| name) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_flori-runner"));
+        command.args(["run", "codex"]).env_clear();
+        for (name, value) in base {
+            if name != missing {
+                command.env(name, value);
+            }
+        }
+        let output = command.output().expect("runner exit");
+        assert!(!output.status.success(), "missing {missing}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(missing),
+            "missing variable must be named"
+        );
+        assert_eq!(
+            listener
+                .accept()
+                .expect_err("no HTTP before validation")
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 }
 

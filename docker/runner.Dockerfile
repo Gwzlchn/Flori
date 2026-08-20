@@ -48,7 +48,9 @@ LABEL org.flori.runner.kind="ai-qoder"
 LABEL org.flori.runner.tool.qoder_cli="1.1.26"
 ENV QODER_CONFIG_DIR=/home/flori/.qoder
 USER 65532:65532
-RUN test "$(qodercli --version)" = "1.1.26"
+RUN test "$(qodercli --version)" = "1.1.26" && \
+    help="$(qodercli --help)" && printf '%s\n' "$help" | grep -F -- '--tools'
+CMD ["run", "qoder"]
 
 FROM node:22.23.2-bookworm-slim AS codex-install
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
@@ -70,4 +72,8 @@ LABEL org.flori.runner.kind="ai-codex"
 LABEL org.flori.runner.tool.codex_cli="0.148.0"
 ENV CODEX_HOME=/home/flori/.codex
 USER 65532:65532
-RUN test "$(codex --version)" = "codex-cli 0.148.0"
+RUN test "$(codex --version)" = "codex-cli 0.148.0" && \
+    help="$(codex --help)" && printf '%s\n' "$help" | grep -F -- '--search' && \
+    help="$(codex exec --help)" && printf '%s\n' "$help" | grep -F -- '--json' && \
+    printf '%s\n' "$help" | grep -F -- '--output-schema'
+CMD ["run", "codex"]
