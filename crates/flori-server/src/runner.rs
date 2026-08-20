@@ -254,7 +254,7 @@ fn valid_download_base(value: &str) -> bool {
     let Some(authority) = uri.authority() else {
         return false;
     };
-    if value.ends_with('/') || uri.query().is_some() {
+    if value.ends_with('/') || uri.query().is_some() || authority.as_str().contains('@') {
         return false;
     }
     let host = authority.host();
