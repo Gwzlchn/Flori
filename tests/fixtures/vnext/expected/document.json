@@ -1,27 +1,51 @@
 {
-  "kind": "document",
-  "document_kind": "paper",
+  "schema": "flori.document_structure.v1",
+  "source_artifact_id": "018f0000-0000-7000-8000-000000000001",
   "language": "en",
   "pages": [
     {"page": 1, "width_pt": 595.276, "height_pt": 841.89}
   ],
   "sections": [
-    {"heading": "1. Pipeline", "page": 1},
-    {"heading": "2. Publication", "page": 1}
+    {
+      "id": "section-1",
+      "heading": "1. Pipeline",
+      "blocks": [
+        {
+          "page": 1,
+          "bbox": {"x1": 72.0, "y1": 72.0, "x2": 522.0, "y2": 180.0},
+          "text": "A Source creates one Pipeline Job. Each Task emits only declared Artifacts."
+        }
+      ]
+    },
+    {
+      "id": "section-2",
+      "heading": "2. Publication",
+      "blocks": [
+        {
+          "page": 1,
+          "bbox": {"x1": 72.0, "y1": 500.0, "x2": 522.0, "y2": 620.0},
+          "text": "Successful publication rotates current and previous."
+        }
+      ]
+    }
   ],
   "figures": [
     {
+      "id": "figure-1",
       "page": 1,
-      "bbox_pt_top_left": [72.0, 220.0, 522.0, 320.0],
-      "caption": "Figure 1: Declared outputs form the only publishable artifact set."
+      "bbox": {"x1": 72.0, "y1": 220.0, "x2": 522.0, "y2": 320.0},
+      "caption": "Figure 1: Declared outputs form the only publishable artifact set.",
+      "artifact_name": "figures/figure-1.png"
     }
   ],
   "tables": [
     {
+      "id": "table-1",
       "page": 1,
-      "bbox_pt_top_left": [54.0, 372.0, 540.0, 468.0],
+      "bbox": {"x1": 54.0, "y1": 372.0, "x2": 540.0, "y2": 468.0},
       "caption": "Table 1: Evidence locator examples",
-      "representation": "page_region_and_text"
+      "text": "PDF evidence uses a page and rectangle. Video evidence uses a time range.",
+      "artifact_name": "tables/table-1.png"
     }
   ]
 }

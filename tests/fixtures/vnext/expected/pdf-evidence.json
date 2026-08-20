@@ -1,0 +1,17 @@
+{
+  "schema": "flori.evidence.v1",
+  "items": [
+    {
+      "evidence_id": "018f0000-0000-7000-8000-000000000101",
+      "source_artifact_id": "018f0000-0000-7000-8000-000000000001",
+      "locator": {
+        "kind": "pdf",
+        "value": {
+          "page": 1,
+          "bbox": {"x1": 72.0, "y1": 220.0, "x2": 522.0, "y2": 320.0}
+        }
+      },
+      "quote": "Declared outputs form the only publishable artifact set."
+    }
+  ]
+}
