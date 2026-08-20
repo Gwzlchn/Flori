@@ -96,17 +96,14 @@ async fn fake_extractor_emits_strict_structure_and_regions() {
     .await
     .expect("extract digital PDF");
 
-    assert_eq!(
-        extraction.structure.source_artifact_id,
-        artifact.artifact_id
-    );
-    assert_eq!(extraction.structure.figures.len(), 1);
-    assert_eq!(extraction.structure.tables.len(), 1);
+    assert_eq!(extraction.source_artifact_id, artifact.artifact_id);
+    assert_eq!(extraction.figures.len(), 1);
+    assert_eq!(extraction.tables.len(), 1);
     let stored: flori_core::DocumentStructure = serde_json::from_slice(
         &std::fs::read(output.join("document.json")).expect("read normalized structure"),
     )
     .expect("strict normalized structure");
-    assert_eq!(stored, extraction.structure);
+    assert_eq!(stored, extraction);
 }
 
 #[tokio::test]

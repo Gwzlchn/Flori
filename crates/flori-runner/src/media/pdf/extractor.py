@@ -57,13 +57,13 @@ def section_json(pages):
     return sections
 
 
-def caption_before(blocks, rect, pattern, fallback):
+def caption_before(blocks, rect, pattern):
     matching = [
         (candidate_rect, text)
         for candidate_rect, text in blocks
         if pattern.match(text) and candidate_rect.y1 <= rect.y0 and rect.y0 - candidate_rect.y1 <= 100
     ]
-    return matching[-1][1] if matching else fallback
+    return matching[-1][1] if matching else None
 
 
 def save_clip(page, rect, path):
@@ -107,6 +107,9 @@ def figures_json(document, pages, output):
             for region in page.get_image_rects(image[0]):
                 if region.is_empty or any(p == page_number and region.intersects(old) for p, old in seen):
                     continue
+                caption = caption_before(blocks, region, FIGURE)
+                if caption is None:
+                    continue
                 number = len(result) + 1
                 name = f"figures/figure-{number:03d}.png"
                 save_clip(page, region, output / name)
@@ -115,7 +118,7 @@ def figures_json(document, pages, output):
                         "id": f"figure-{number}",
                         "page": page_number,
                         "bbox": rect_json(region),
-                        "caption": caption_before(blocks, region, FIGURE, f"Figure {number}"),
+                        "caption": caption,
                         "artifact_name": name,
                     }
                 )
@@ -134,6 +137,9 @@ def tables_json(pages, output):
             text = "\n".join(" | ".join(cell or "" for cell in row).strip() for row in rows).strip()
             if not text:
                 continue
+            caption = caption_before(blocks, region, TABLE)
+            if caption is None:
+                continue
             number = len(result) + 1
             name = f"tables/table-{number:03d}.png"
             save_clip(page, region, output / name)
@@ -142,7 +148,7 @@ def tables_json(pages, output):
                     "id": f"table-{number}",
                     "page": page_number,
                     "bbox": rect_json(region),
-                    "caption": caption_before(blocks, region, TABLE, f"Table {number}"),
+                    "caption": caption,
                     "text": text,
                     "artifact_name": name,
                 }

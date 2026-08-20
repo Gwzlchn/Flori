@@ -26,18 +26,12 @@ pub struct PdfExtractConfig {
     pub max_assets: usize,
 }
 
-#[derive(Clone, Debug)]
-pub struct PdfExtraction {
-    pub structure: DocumentStructure,
-    pub output_dir: PathBuf,
-}
-
 pub async fn extract_pdf(
     pdf: &ResolvedArtifact,
     input: &Path,
     output_dir: &Path,
     config: &PdfExtractConfig,
-) -> Result<PdfExtraction, ErrorCode> {
+) -> Result<DocumentStructure, ErrorCode> {
     if pdf.kind != flori_core::ArtifactKind::SourceOriginal
         || pdf.media_type != "application/pdf"
         || config.max_probe_output_bytes == 0
@@ -70,7 +64,7 @@ async fn extract_inner(
     input: &Path,
     output_dir: &Path,
     config: &PdfExtractConfig,
-) -> Result<PdfExtraction, ErrorCode> {
+) -> Result<DocumentStructure, ErrorCode> {
     fs::create_dir(output_dir)
         .await
         .map_err(|_| ErrorCode::StorageUnavailable)?;
@@ -127,10 +121,7 @@ async fn extract_inner(
     fs::write(&document_path, normalized)
         .await
         .map_err(|_| ErrorCode::StorageUnavailable)?;
-    Ok(PdfExtraction {
-        structure,
-        output_dir: output_dir.to_owned(),
-    })
+    Ok(structure)
 }
 
 async fn verify_input(path: &Path, pdf: &ResolvedArtifact) -> Result<(), ErrorCode> {
