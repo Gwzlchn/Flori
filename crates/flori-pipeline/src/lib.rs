@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod freeze;
 mod semantic;
 mod source;
 
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use source::{RawInput, RawTask, input_reference};
 
-pub use flori_core::ArtifactDeclaration;
+pub use flori_core::{ArtifactDeclaration, TaskInputReference as Reference};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompileError {
@@ -85,17 +86,6 @@ pub enum InputValue {
     String(String),
     Reference(Reference),
     List(Vec<Self>),
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Reference {
-    Source,
-    JobTranslate,
-    DomainProfile,
-    Prompt(String),
-    Need(String),
-    NeedArtifact { task: String, artifact: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

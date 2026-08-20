@@ -25,6 +25,12 @@ fn compiles_pdf_deterministically() {
             "publish"
         ]
     );
+    for task in first.pipeline.tasks.values() {
+        let (spec, bindings) = task.freeze_for_job().expect("freeze compiled task");
+        assert_eq!(spec.executor, task.executor);
+        assert_eq!(bindings.executor(), task.executor);
+        assert!(bindings.is_valid());
+    }
 }
 
 #[test]
