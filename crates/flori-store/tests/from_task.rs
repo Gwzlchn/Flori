@@ -418,6 +418,15 @@ fn request(key: &str, from: &str, ai_selection: Option<AiRunnerSelection>) -> Re
     }
 }
 
+fn pipeline_request(key: &str) -> RerunJobRequest {
+    RerunJobRequest {
+        request_key: key.into(),
+        mode: RerunMode::Pipeline,
+        from_task_key: None,
+        ai_selection: None,
+    }
+}
+
 async fn register_pdf_runner(foundation: &Foundation, name: &str) -> RunnerId {
     let registration = digest(format!("{name}-registration").as_bytes());
     let runner_id = foundation
@@ -1271,6 +1280,142 @@ async fn from_task_with_no_materialized_files_commits_without_a_fake_upload() {
             .iter()
             .filter(|(key, _)| key.as_str() != "acquire")
             .all(|(_, state)| state == "pending")
+    );
+}
+
+#[tokio::test]
+async fn requested_pipeline_rerun_uses_current_revision_and_is_idempotent() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database).await;
+    let command = pipeline_request("public-pipeline-rerun");
+    let job_id = foundation
+        .store
+        .rerun_requested_job(&foundation.artifacts, foundation.job_id, &command, 60)
+        .await
+        .expect("requested pipeline rerun");
+    assert_ne!(job_id, foundation.job_id);
+    assert_eq!(
+        foundation
+            .store
+            .rerun_requested_job(&foundation.artifacts, foundation.job_id, &command, 61)
+            .await
+            .expect("idempotent requested rerun"),
+        job_id
+    );
+    let row: (String, String, String, String) = sqlx::query_as(
+        "SELECT trigger,rerun_of_job_id,pipeline_revision_id,inputs_json FROM jobs WHERE id=?",
+    )
+    .bind(job_id.to_string())
+    .fetch_one(&foundation.pool)
+    .await
+    .expect("pipeline rerun row");
+    assert_eq!(
+        row,
+        (
+            "pipeline_rerun".into(),
+            foundation.job_id.to_string(),
+            foundation.revision_id.to_string(),
+            r#"{"translate":true}"#.into(),
+        )
+    );
+    let new_task_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM tasks WHERE job_id=? ORDER BY task_key")
+            .bind(job_id.to_string())
+            .fetch_all(&foundation.pool)
+            .await
+            .expect("new task IDs");
+    assert_eq!(new_task_ids.len(), foundation.task_ids.len());
+    assert!(new_task_ids.iter().all(|id| {
+        !foundation
+            .task_ids
+            .values()
+            .any(|old| old.to_string() == *id)
+    }));
+    assert_eq!(
+        error(
+            foundation
+                .store
+                .rerun_requested_job(
+                    &foundation.artifacts,
+                    foundation.job_id,
+                    &RerunJobRequest {
+                        from_task_key: Some("note".into()),
+                        ..command
+                    },
+                    62,
+                )
+                .await,
+        ),
+        ErrorCode::InvalidRequest
+    );
+}
+
+#[tokio::test]
+async fn requested_rerun_rejects_unknown_base_and_revision_drift() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database).await;
+    assert_eq!(
+        error(
+            foundation
+                .store
+                .rerun_requested_job(
+                    &foundation.artifacts,
+                    JobId::generate(),
+                    &pipeline_request("missing-base"),
+                    60,
+                )
+                .await,
+        ),
+        ErrorCode::NotFound
+    );
+
+    let changed_yaml = PIPELINE.replace("timeout: 1m", "timeout: 2m");
+    let changed = compile("branch", changed_yaml.as_bytes()).expect("changed pipeline");
+    foundation
+        .store
+        .register_pipeline_revision(
+            foundation.pipeline_id,
+            PipelineRevisionId::generate(),
+            &changed,
+            "changed",
+            &changed_yaml,
+            61,
+        )
+        .await
+        .expect("switch current revision");
+    assert_eq!(
+        error(
+            foundation
+                .store
+                .rerun_requested_job(
+                    &foundation.artifacts,
+                    foundation.job_id,
+                    &request("current-drift", "note", None),
+                    62,
+                )
+                .await,
+        ),
+        ErrorCode::PipelineInvalid
+    );
+    sqlx::query("UPDATE pipeline_revisions SET yaml_sha256=? WHERE id=(SELECT current_revision_id FROM pipelines WHERE id=?)")
+        .bind("0".repeat(64))
+        .bind(foundation.pipeline_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("tamper revision digest");
+    assert_eq!(
+        error(
+            foundation
+                .store
+                .rerun_requested_job(
+                    &foundation.artifacts,
+                    foundation.job_id,
+                    &pipeline_request("digest-drift"),
+                    63,
+                )
+                .await,
+        ),
+        ErrorCode::PipelineInvalid
     );
 }
 

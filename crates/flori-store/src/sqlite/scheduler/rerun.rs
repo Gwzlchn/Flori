@@ -277,7 +277,7 @@ async fn reject_active_job(
     Ok(())
 }
 
-fn intent_digest(
+pub(super) fn intent_digest(
     base_job_id: JobId,
     request: &RerunJobRequest,
     compilation: &Compilation,

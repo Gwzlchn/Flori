@@ -6,6 +6,7 @@ mod job;
 mod pipeline;
 mod publish;
 mod request_job;
+mod requested_rerun;
 mod rerun;
 mod rerun_ai;
 mod rerun_artifact;
