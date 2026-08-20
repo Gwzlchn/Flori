@@ -106,3 +106,24 @@ async fn local_http_is_rejected_before_a_connection() {
     );
     std::fs::remove_dir_all(root).expect("remove test root");
 }
+
+#[test]
+fn redirects_are_relative_safe_and_capped_at_five() {
+    let current = parse_http_url("https://example.com/a/paper.pdf").expect("base URL");
+    assert_eq!(
+        redirect_url(&current, "../final.pdf", 4)
+            .expect("fifth redirect")
+            .as_str(),
+        "https://example.com/final.pdf"
+    );
+    for (location, count) in [
+        ("https://example.com/sixth.pdf", 5),
+        ("file:///tmp/paper.pdf", 0),
+        ("https://user@example.com/paper.pdf", 0),
+    ] {
+        assert_eq!(
+            redirect_url(&current, location, count),
+            Err(ErrorCode::UnsupportedSource)
+        );
+    }
+}

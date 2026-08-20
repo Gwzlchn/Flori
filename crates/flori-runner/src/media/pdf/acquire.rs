@@ -87,19 +87,12 @@ async fn download(
             .await
             .map_err(|error| network_error(&error))?;
         if response.status().is_redirection() {
-            if redirect_count == MAX_REDIRECTS {
-                return Err(ErrorCode::UnsupportedSource);
-            }
             let location = response
                 .headers()
                 .get(header::LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .ok_or(ErrorCode::UnsupportedSource)?;
-            url = parse_http_url(
-                url.join(location)
-                    .map_err(|_| ErrorCode::UnsupportedSource)?
-                    .as_str(),
-            )?;
+            url = redirect_url(&url, location, redirect_count)?;
             continue;
         }
         status(response.status())?;
@@ -123,6 +116,18 @@ async fn download(
         return receive(response, destination, config.max_bytes, expected).await;
     }
     Err(ErrorCode::UnsupportedSource)
+}
+
+fn redirect_url(current: &Url, location: &str, count: usize) -> Result<Url, ErrorCode> {
+    if count == MAX_REDIRECTS {
+        return Err(ErrorCode::UnsupportedSource);
+    }
+    parse_http_url(
+        current
+            .join(location)
+            .map_err(|_| ErrorCode::UnsupportedSource)?
+            .as_str(),
+    )
 }
 
 async fn receive(
