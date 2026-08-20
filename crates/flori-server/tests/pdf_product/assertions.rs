@@ -1,8 +1,8 @@
 use std::{fs, net::SocketAddr, path::Path};
 
 use flori_core::{
-    AiAudit, AiTool, DocumentStructure, EvidenceLocator, EvidenceManifest, EvidenceView, JobId,
-    SearchHit, SourceId, TaskLogLine, TermsManifest,
+    AiAudit, AiTool, DocumentStructure, EvidenceManifest, JobId, SourceId, TaskLogLine,
+    TermsManifest,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,10 +19,18 @@ pub(super) struct VerifyContext<'a> {
     pub(super) address: SocketAddr,
     pub(super) source_id: SourceId,
     pub(super) job_id: JobId,
-    pub(super) expected: &'a ExpectedEvidence,
+    pub(super) mode: VerifyMode<'a>,
     pub(super) media_log: &'a Path,
-    pub(super) captured_prompt: &'a Path,
     pub(super) secrets: [&'a str; 2],
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum VerifyMode<'a> {
+    Fake {
+        expected: &'a ExpectedEvidence,
+        captured_prompt: &'a Path,
+    },
+    Real,
 }
 
 #[derive(Serialize)]
@@ -165,25 +173,34 @@ pub(super) async fn verify_and_write_receipt(context: &VerifyContext<'_>) -> Str
         );
     }
     let evidence = evidence.expect("canonical evidence Artifact");
-    let entry = evidence
-        .items
-        .iter()
-        .find(|entry| entry.evidence_id == context.expected.evidence_id)
-        .expect("expected canonical evidence");
-    assert_eq!(
-        entry.source_artifact_id,
-        context.expected.source_artifact_id
+    assert!(
+        !evidence.items.is_empty(),
+        "published evidence must not be empty"
     );
-    assert_eq!(entry.locator, context.expected.locator);
-    assert_eq!(entry.quote, context.expected.quote);
+    if let VerifyMode::Fake { expected, .. } = context.mode {
+        let entry = evidence
+            .items
+            .iter()
+            .find(|entry| entry.evidence_id == expected.evidence_id)
+            .expect("expected canonical evidence");
+        assert_eq!(entry.source_artifact_id, expected.source_artifact_id);
+        assert_eq!(entry.locator, expected.locator);
+        assert_eq!(entry.quote, expected.quote);
+    }
 
-    verify_search_and_evidence(context).await;
+    http::verify_search_and_evidence(context, &evidence).await;
     let usage = usage(context.pool, context.job_id).await;
     assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].tool, "qoder_cli");
+    assert_eq!(usage[0].state, "final");
     assert_eq!(
-        (usage[0].tool.as_str(), usage[0].credits_micros),
-        ("qoder_cli", Some(1_250_000))
+        (usage[0].input_tokens, usage[0].output_tokens),
+        (None, None)
     );
+    match context.mode {
+        VerifyMode::Fake { .. } => assert_eq!(usage[0].credits_micros, Some(1_250_000)),
+        VerifyMode::Real => assert!(usage[0].credits_micros.is_some_and(|credits| credits > 0)),
+    }
     assert_no_secrets(context, &artifacts);
     let receipt_path = context
         .sqlite_path
@@ -241,31 +258,6 @@ fn strict_content(kind: &str, bytes: &[u8], evidence: &mut Option<EvidenceManife
     }
 }
 
-async fn verify_search_and_evidence(context: &VerifyContext<'_>) {
-    let hits: Vec<SearchHit> =
-        http::get_json(context.address, "/api/v1/search?q=evidence&limit=20").await;
-    assert!(!hits.is_empty(), "published note must be searchable");
-    assert!(
-        hits.iter()
-            .all(|hit| hit.source_id == context.source_id && hit.job_id == context.job_id)
-    );
-    assert!(
-        hits.iter()
-            .any(|hit| hit.evidence_ids.contains(&context.expected.evidence_id))
-    );
-    let view: EvidenceView = http::get_json(
-        context.address,
-        &format!("/api/v1/evidence/{}", context.expected.evidence_id),
-    )
-    .await;
-    assert_eq!(
-        (view.source_id, view.job_id),
-        (context.source_id, context.job_id)
-    );
-    assert_eq!(view.locator, context.expected.locator);
-    assert!(matches!(view.locator, EvidenceLocator::Pdf { .. }));
-}
-
 async fn usage(pool: &SqlitePool, job_id: JobId) -> Vec<UsageReceipt> {
     sqlx::query_as::<_, (String, String, String, String, Option<i64>, Option<i64>, Option<i64>)>(
         "SELECT tool,model,effort,state,input_tokens,output_tokens,credits_micros FROM ai_usage WHERE job_id=? ORDER BY id",
@@ -280,10 +272,13 @@ async fn usage(pool: &SqlitePool, job_id: JobId) -> Vec<UsageReceipt> {
 }
 
 fn assert_no_secrets(context: &VerifyContext<'_>, artifacts: &[ArtifactReceipt]) {
-    let mut surfaces = vec![
-        fs::read(context.media_log).unwrap_or_default(),
-        fs::read(context.captured_prompt).expect("captured Qoder prompt"),
-    ];
+    let mut surfaces = vec![fs::read(context.media_log).unwrap_or_default()];
+    if let VerifyMode::Fake {
+        captured_prompt, ..
+    } = context.mode
+    {
+        surfaces.push(fs::read(captured_prompt).expect("captured Qoder prompt"));
+    }
     surfaces.extend(
         artifacts
             .iter()

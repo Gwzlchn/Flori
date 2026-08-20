@@ -1,11 +1,15 @@
 use std::{net::SocketAddr, str};
 
-use flori_core::{CreateUploadSource, CreatedSource};
+use flori_core::{
+    CreateUploadSource, CreatedSource, EvidenceLocator, EvidenceManifest, EvidenceView, SearchHit,
+};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+
+use super::assertions::{VerifyContext, VerifyMode};
 
 const BOUNDARY: &str = "flori-pdf-product-boundary";
 
@@ -51,6 +55,48 @@ pub(super) async fn post_json<I: Serialize, O: DeserializeOwned>(
 pub(super) async fn get_json<O: DeserializeOwned>(address: SocketAddr, path: &str) -> O {
     let response = exchange(address, "GET", path, "", &[]).await;
     decode_json(&response, 200)
+}
+
+pub(super) async fn verify_search_and_evidence(
+    context: &VerifyContext<'_>,
+    manifest: &EvidenceManifest,
+) {
+    let query = match context.mode {
+        VerifyMode::Fake { .. } => "evidence",
+        VerifyMode::Real => "Transformer",
+    };
+    let hits: Vec<SearchHit> = get_json(
+        context.address,
+        &format!("/api/v1/search?q={query}&limit=20"),
+    )
+    .await;
+    assert!(!hits.is_empty(), "published note must be searchable");
+    assert!(
+        hits.iter()
+            .all(|hit| hit.source_id == context.source_id && hit.job_id == context.job_id)
+    );
+    for entry in &manifest.items {
+        let view: EvidenceView = get_json(
+            context.address,
+            &format!("/api/v1/evidence/{}", entry.evidence_id),
+        )
+        .await;
+        assert_eq!(
+            (view.source_id, view.job_id),
+            (context.source_id, context.job_id)
+        );
+        assert_eq!(view.evidence_id, entry.evidence_id);
+        assert_eq!(view.source_artifact_id, entry.source_artifact_id);
+        assert_eq!(view.locator, entry.locator);
+        assert_eq!(view.quote, entry.quote);
+        assert!(matches!(view.locator, EvidenceLocator::Pdf { .. }));
+    }
+    if let VerifyMode::Fake { expected, .. } = context.mode {
+        assert!(
+            hits.iter()
+                .any(|hit| hit.evidence_ids.contains(&expected.evidence_id))
+        );
+    }
 }
 
 async fn exchange(

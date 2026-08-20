@@ -11,10 +11,7 @@ use std::{
     time::Duration,
 };
 
-use flori_core::{
-    AiTool, CreateJobRequest, CreateUploadSource, CreatedJob, DomainId, JobId, JobInputs,
-    PipelineId, RunnerId, SourceKind,
-};
+use flori_core::{AiTool, DomainId, JobId, PipelineId, RunnerId};
 use flori_runner::{DaemonConfig, RunnerClient};
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -39,12 +36,18 @@ struct Harness {
     preserve: bool,
 }
 
+pub(super) struct RealConfig {
+    pub(super) image: String,
+    pub(super) root: PathBuf,
+    pub(super) pdf: PathBuf,
+    pub(super) executable: PathBuf,
+    pub(super) config_home: PathBuf,
+    pub(super) model: String,
+    pub(super) effort: String,
+}
+
 impl Harness {
-    async fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "flori-pdf-product-{}",
-            flori_core::RequestId::generate()
-        ));
+    async fn new(root: PathBuf, preserve: bool, prompt: &str, model: &str, effort: &str) -> Self {
         fs::create_dir(&root).expect("create PDF product root");
         let sqlite_path = root.join("flori.sqlite");
         let artifact_root = root.join("artifacts");
@@ -60,7 +63,7 @@ impl Harness {
             NasArtifactStore::new(&artifact_root, 128 * 1024 * 1024).expect("empty NAS root"),
         );
         let (domain_id, pipeline_id, media_runner_id, qoder_runner_id) =
-            fixture::seed(&store, &pool).await;
+            fixture::seed(&store, &pool, prompt, model, effort).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
         let address = listener.local_addr().expect("server address");
         let download_base = format!("http://{address}");
@@ -84,7 +87,7 @@ impl Harness {
             media_runner_id,
             qoder_runner_id,
             server,
-            preserve: false,
+            preserve,
         }
     }
 
@@ -107,63 +110,27 @@ impl Drop for Harness {
 }
 
 pub(super) async fn run(image: &str) {
-    let mut harness = Harness::new().await;
+    let root = std::env::temp_dir().join(format!(
+        "flori-pdf-product-{}",
+        flori_core::RequestId::generate()
+    ));
+    let mut harness = Harness::new(
+        root,
+        false,
+        fixture::FAKE_PROMPT,
+        fixture::MODEL,
+        fixture::EFFORT,
+    )
+    .await;
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/vnext/digital-paper.pdf");
-    let pdf = fs::read(&fixture).expect("read canonical digital PDF fixture");
-    let created = http::upload_pdf(
-        harness.address,
-        &CreateUploadSource {
-            request_key: "pdf-product-upload".into(),
-            kind: SourceKind::PdfUpload,
-            title: Some("Flori vNext Golden Paper".into()),
-            domain_id: harness.domain_id,
-            collection_ids: Vec::new(),
-            file_sha256: fixture::digest(&pdf),
-        },
-        "digital-paper.pdf",
-        &pdf,
-    )
-    .await;
-    let job: CreatedJob = http::post_json(
-        harness.address,
-        &format!("/api/v1/sources/{}/jobs", created.source_id),
-        &CreateJobRequest {
-            request_key: "pdf-product-job".into(),
-            pipeline_id: harness.pipeline_id,
-            inputs: JobInputs { translate: false },
-        },
-    )
-    .await;
-    let media = RunnerClient::register(
-        &harness.base_url(),
-        fixture::MEDIA_REGISTRATION,
-        &fixture::media_capabilities(),
-    )
-    .await
-    .expect("register media Runner");
-    assert_eq!(media.runner_id, harness.media_runner_id);
-    let qoder = RunnerClient::register(
-        &harness.base_url(),
-        fixture::QODER_REGISTRATION,
-        &fixture::qoder_capabilities(),
-    )
-    .await
-    .expect("register Qoder Runner");
-    assert_eq!(qoder.runner_id, harness.qoder_runner_id);
-
-    let mut media_process =
-        DockerRunner::start(&harness.root, image, &harness.base_url(), &media.token);
-    wait_for_task(&harness.pool, job.job_id, "extract", &mut media_process).await;
-    let document =
-        assertions::load_document(&harness.pool, &harness.artifact_root, job.job_id).await;
-    let media_log = media_process.log_path.clone();
-    drop(media_process);
-
-    let (envelope, expected) = fixture::note(&document);
+    let ingested = harness
+        .ingest(image, &fixture, fixture::MODEL, fixture::EFFORT)
+        .await;
+    let (envelope, expected) = fixture::note(&ingested.document);
     let fake = fixture::write_qoder(&harness.root, &envelope);
-    let qoder_client =
-        RunnerClient::new(&harness.base_url(), qoder.token.clone()).expect("Qoder Runner client");
+    let qoder_client = RunnerClient::new(&harness.base_url(), ingested.qoder_token.clone())
+        .expect("Qoder Runner client");
     let daemon = AiDaemon::start(
         qoder_client,
         DaemonConfig {
@@ -178,7 +145,13 @@ pub(super) async fn run(image: &str) {
             max_output_bytes: 1024 * 1024,
         },
     );
-    wait_for_job(&harness.pool, job.job_id, &daemon).await;
+    wait_for_job(
+        &harness.pool,
+        ingested.job_id,
+        &daemon,
+        Duration::from_secs(30),
+    )
+    .await;
     daemon.stop().await;
 
     let receipt = assertions::verify_and_write_receipt(&VerifyContext {
@@ -186,15 +159,102 @@ pub(super) async fn run(image: &str) {
         sqlite_path: &harness.sqlite_path,
         artifact_root: &harness.artifact_root,
         address: harness.address,
-        source_id: created.source_id,
-        job_id: job.job_id,
-        expected: &expected,
-        media_log: &media_log,
-        captured_prompt: &fake.captured_prompt,
-        secrets: [&media.token, &qoder.token],
+        source_id: ingested.source_id,
+        job_id: ingested.job_id,
+        mode: assertions::VerifyMode::Fake {
+            expected: &expected,
+            captured_prompt: &fake.captured_prompt,
+        },
+        media_log: &ingested.media_log,
+        secrets: [&ingested.media_token, &ingested.qoder_token],
     })
     .await;
     println!("FLORI_PDF_PRODUCT_RECEIPT={receipt}");
+    harness.preserve();
+}
+
+pub(super) async fn run_real(config: RealConfig) {
+    assert!(
+        config.root.is_absolute(),
+        "real receipt root must be absolute"
+    );
+    assert!(
+        config.root.is_dir(),
+        "real receipt root must already exist as a directory"
+    );
+    let receipt_dir = config.root.join("receipts");
+    assert!(
+        receipt_dir.is_dir(),
+        "real receipt root must contain a receipts directory"
+    );
+    let run_root = config.root.join("run");
+    assert!(
+        !run_root.exists(),
+        "real receipt run directory must not already exist"
+    );
+    let mut harness = Harness::new(
+        run_root,
+        true,
+        fixture::REAL_PROMPT,
+        &config.model,
+        &config.effort,
+    )
+    .await;
+    let ingested = harness
+        .ingest(&config.image, &config.pdf, &config.model, &config.effort)
+        .await;
+    let home = harness.root.join("qoder-home");
+    let work = harness.root.join("qoder-work");
+    fs::create_dir(&home).expect("create Qoder HOME");
+    fs::create_dir(&work).expect("create Qoder work root");
+    let client = RunnerClient::new(&harness.base_url(), ingested.qoder_token.clone())
+        .expect("Qoder Runner client");
+    let daemon = AiDaemon::start(
+        client,
+        DaemonConfig {
+            tool: AiTool::QoderCli,
+            executable: config.executable,
+            home,
+            tool_config_home: config.config_home,
+            work_root: work,
+            model: config.model,
+            effort: config.effort,
+            renew_interval: Duration::from_secs(5),
+            max_output_bytes: 1024 * 1024,
+        },
+    );
+    wait_for_job(
+        &harness.pool,
+        ingested.job_id,
+        &daemon,
+        Duration::from_secs(1_200),
+    )
+    .await;
+    daemon.stop().await;
+    let receipt = assertions::verify_and_write_receipt(&VerifyContext {
+        pool: &harness.pool,
+        sqlite_path: &harness.sqlite_path,
+        artifact_root: &harness.artifact_root,
+        address: harness.address,
+        source_id: ingested.source_id,
+        job_id: ingested.job_id,
+        mode: assertions::VerifyMode::Real,
+        media_log: &ingested.media_log,
+        secrets: [&ingested.media_token, &ingested.qoder_token],
+    })
+    .await;
+    let receipt_copy = receipt_dir.join(format!("{}.json", ingested.job_id));
+    assert!(
+        !receipt_copy.exists(),
+        "archived real receipt must not already exist"
+    );
+    fs::copy(harness.root.join("receipt.json"), &receipt_copy)
+        .expect("archive real product receipt");
+    println!("FLORI_PDF_PRODUCT_REAL_RECEIPT={receipt}");
+    println!(
+        "FLORI_PDF_PRODUCT_REAL_RECEIPT_COPY={}",
+        receipt_copy.display()
+    );
     harness.preserve();
 }
 
@@ -230,8 +290,8 @@ async fn wait_for_task(pool: &SqlitePool, job_id: JobId, task_key: &str, media: 
     .expect("runner-media did not finish the PDF fixture in 120 seconds");
 }
 
-async fn wait_for_job(pool: &SqlitePool, job_id: JobId, daemon: &AiDaemon) {
-    tokio::time::timeout(Duration::from_secs(30), async {
+async fn wait_for_job(pool: &SqlitePool, job_id: JobId, daemon: &AiDaemon, timeout: Duration) {
+    tokio::time::timeout(timeout, async {
         loop {
             let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=?")
                 .bind(job_id.to_string())

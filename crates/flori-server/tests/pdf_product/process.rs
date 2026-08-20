@@ -5,9 +5,92 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
-use flori_core::ErrorCode;
+use flori_core::{
+    CreateJobRequest, CreateUploadSource, CreatedJob, DocumentStructure, ErrorCode, JobId,
+    JobInputs, SourceId, SourceKind,
+};
 use flori_runner::{DaemonConfig, RunnerClient, run_ai_daemon};
 use tokio::{sync::watch, task::JoinHandle};
+
+use super::{Harness, assertions, fixture, http, wait_for_task};
+
+pub(super) struct Ingested {
+    pub(super) source_id: SourceId,
+    pub(super) job_id: JobId,
+    pub(super) media_token: String,
+    pub(super) qoder_token: String,
+    pub(super) media_log: PathBuf,
+    pub(super) document: DocumentStructure,
+}
+
+impl Harness {
+    pub(super) async fn ingest(
+        &self,
+        image: &str,
+        pdf_path: &Path,
+        model: &str,
+        effort: &str,
+    ) -> Ingested {
+        let pdf = fs::read(pdf_path).expect("read digital PDF");
+        let created = http::upload_pdf(
+            self.address,
+            &CreateUploadSource {
+                request_key: "pdf-product-upload".into(),
+                kind: SourceKind::PdfUpload,
+                title: Some("Flori vNext PDF Product Acceptance".into()),
+                domain_id: self.domain_id,
+                collection_ids: Vec::new(),
+                file_sha256: fixture::digest(&pdf),
+            },
+            pdf_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("PDF filename must be UTF-8"),
+            &pdf,
+        )
+        .await;
+        let job: CreatedJob = http::post_json(
+            self.address,
+            &format!("/api/v1/sources/{}/jobs", created.source_id),
+            &CreateJobRequest {
+                request_key: "pdf-product-job".into(),
+                pipeline_id: self.pipeline_id,
+                inputs: JobInputs { translate: false },
+            },
+        )
+        .await;
+        let media = RunnerClient::register(
+            &self.base_url(),
+            fixture::MEDIA_REGISTRATION,
+            &fixture::media_capabilities(),
+        )
+        .await
+        .expect("register media Runner");
+        assert_eq!(media.runner_id, self.media_runner_id);
+        let qoder = RunnerClient::register(
+            &self.base_url(),
+            fixture::QODER_REGISTRATION,
+            &fixture::qoder_capabilities(model, effort),
+        )
+        .await
+        .expect("register Qoder Runner");
+        assert_eq!(qoder.runner_id, self.qoder_runner_id);
+        let mut media_process =
+            DockerRunner::start(&self.root, image, &self.base_url(), &media.token);
+        wait_for_task(&self.pool, job.job_id, "extract", &mut media_process).await;
+        let document = assertions::load_document(&self.pool, &self.artifact_root, job.job_id).await;
+        let media_log = media_process.log_path.clone();
+        drop(media_process);
+        Ingested {
+            source_id: created.source_id,
+            job_id: job.job_id,
+            media_token: media.token,
+            qoder_token: qoder.token,
+            media_log,
+            document,
+        }
+    }
+}
 
 pub(super) struct DockerRunner {
     name: String,

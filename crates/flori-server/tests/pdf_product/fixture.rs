@@ -21,6 +21,13 @@ pub(super) const MEDIA_REGISTRATION: &str = "pdf-product-media-registration";
 pub(super) const QODER_REGISTRATION: &str = "pdf-product-qoder-registration";
 pub(super) const MODEL: &str = "fake-qoder-model";
 pub(super) const EFFORT: &str = "high";
+pub(super) const FAKE_PROMPT: &str =
+    "Generate a readable note, summary, terms, and exact PDF evidence.";
+pub(super) const REAL_PROMPT: &str = r#"Return only the flori.ai_result.v1 JSON requested by the runtime schema.
+Read the DocumentStructure JSON and select one text block, preferring one containing Transformer.
+Create one canonical lowercase UUID version 7 evidence_id. Copy the selected block's text into quote verbatim. Copy its page and every decimal bbox coordinate without rounding. Copy DocumentStructure.source_artifact_id exactly.
+Use that same evidence_id in the factual text, summary, and one term. Every reference marker must be [[evidence:<evidence_id>]].
+smart_note_markdown must contain the headings ## 来源事实 and ## AI 分析. State source facts only in the first section. Put interpretation in the second section and include the exact word Transformer so the published note is searchable."#;
 
 #[derive(Clone)]
 pub(super) struct ExpectedEvidence {
@@ -96,11 +103,13 @@ pub(super) fn write_qoder(root: &Path, envelope: &AiResultEnvelope) -> FakeQoder
 pub(super) async fn seed(
     store: &Store,
     pool: &SqlitePool,
+    prompt: &str,
+    model: &str,
+    effort: &str,
 ) -> (DomainId, PipelineId, RunnerId, RunnerId) {
     let domain_id = DomainId::generate();
     sqlx::query("INSERT INTO domains(id,slug,name,profile_text,created_at_ms,updated_at_ms) VALUES(?,?,'PDF','Evidence-first research.',0,0)")
         .bind(domain_id.to_string()).bind(format!("pdf-{domain_id}")).execute(pool).await.expect("domain");
-    let prompt = "Generate a readable note, summary, terms, and exact PDF evidence.";
     sqlx::query(
         "INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES('document_note',?,?,0)",
     )
@@ -144,8 +153,8 @@ pub(super) async fn seed(
                 name: "pdf-product-qoder".into(),
                 tags: vec!["ai".into()],
                 max_concurrency: 1,
-                default_model: Some(MODEL.into()),
-                default_effort: Some(EFFORT.into()),
+                default_model: Some(model.into()),
+                default_effort: Some(effort.into()),
             },
             &digest(QODER_REGISTRATION.as_bytes()),
             i64::MAX,
@@ -166,15 +175,15 @@ pub(super) fn media_capabilities() -> RegisterRunnerRequest {
     }
 }
 
-pub(super) fn qoder_capabilities() -> RegisterRunnerRequest {
+pub(super) fn qoder_capabilities(model: &str, effort: &str) -> RegisterRunnerRequest {
     RegisterRunnerRequest {
         tools: vec![RunnerToolCapability {
             tool: RunnerTool::QoderCli,
             version: flori_runner::QODERCLI_VERSION.into(),
         }],
         ai_models: vec![AiModelCapability {
-            model: MODEL.into(),
-            efforts: vec![EFFORT.into()],
+            model: model.into(),
+            efforts: vec![effort.into()],
         }],
     }
 }
