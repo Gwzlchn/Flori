@@ -1,20 +1,21 @@
 use utoipa::OpenApi;
 
 use crate::{
-    AiModelCapability, AiTool, AiUsageId, AiUsageState, ArtifactDeclaration, ArtifactId,
-    ArtifactKind, ArtifactManifest, ArtifactManifestEntry, ArtifactManifestSchema, ArtifactOrigin,
-    ArtifactRetention, ArtifactWhen, AttemptAck, AttemptId, AttemptState, CollectionId,
-    CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId, CredentialId, CredentialKind,
-    DomainId, ErrorBody, ErrorCode, ErrorResponse, EvidenceId, EvidenceLocatorKind, Executor,
+    AiModelCapability, AiRunnerSelection, AiTool, AiUsageId, AiUsageState, ArtifactDeclaration,
+    ArtifactId, ArtifactKind, ArtifactManifest, ArtifactManifestEntry, ArtifactManifestSchema,
+    ArtifactOrigin, ArtifactRetention, ArtifactWhen, AttemptAck, AttemptId, AttemptState,
+    CollectionId, CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId, CreateJobRequest,
+    CreateRemoteSource, CreatedJob, CreatedSource, CredentialId, CredentialKind, DomainId,
+    ErrorBody, ErrorCode, ErrorResponse, EvidenceId, EvidenceLocatorKind, Executor,
     FailAttemptRequest, GlossaryTermId, GlossaryTermState, JobEventKind, JobEventScope, JobId,
-    JobState, JobTrigger, LogCursor, LogFrame, PipelineId, PipelineRevisionId, PromptSnapshotId,
-    QrSessionId, RegisterRunnerRequest, RegisterRunnerResponse, RenewLeaseResponse, RequestId,
-    RerunMode, ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource,
-    ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool, RunnerToolCapability, SearchChunkId,
-    SecretCredential, SecretInputs, Sha256Digest, SourceId, SourceInputId, SourceKind,
-    StartUploadRequest, StartUploadResponse, SystemHealthStatus, TaskClaim, TaskId, TaskLogLevel,
-    TaskState, UploadCursor, UploadId, UploadOwnerKind, UploadState, UsageAck, UsageOrigin,
-    UsageUpdate, VerifyUploadRequest, VerifyUploadResponse,
+    JobInputs, JobState, JobTrigger, LogCursor, LogFrame, PipelineId, PipelineRevisionId,
+    PromptSnapshotId, QrSessionId, RegisterRunnerRequest, RegisterRunnerResponse,
+    RenewLeaseResponse, RequestId, RerunJobRequest, RerunMode, ResolvedArtifact, ResolvedProfile,
+    ResolvedPrompt, ResolvedSource, ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool,
+    RunnerToolCapability, SearchChunkId, SecretCredential, SecretInputs, Sha256Digest, SourceId,
+    SourceInputId, SourceKind, StartUploadRequest, StartUploadResponse, SystemHealthStatus,
+    TaskClaim, TaskId, TaskLogLevel, TaskState, UploadCursor, UploadId, UploadOwnerKind,
+    UploadState, UsageAck, UsageOrigin, UsageUpdate, VerifyUploadRequest, VerifyUploadResponse,
 };
 
 #[derive(OpenApi)]
@@ -99,6 +100,13 @@ use crate::{
     AttemptAck,
     ErrorResponse,
     ErrorBody,
+    JobInputs,
+    CreateRemoteSource,
+    CreateJobRequest,
+    AiRunnerSelection,
+    RerunJobRequest,
+    CreatedSource,
+    CreatedJob,
 )))]
 struct ApiDoc;
 

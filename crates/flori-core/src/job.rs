@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{ArtifactDeclaration, DomainId, Executor, Sha256Digest, SourceKind};
+use crate::{
+    ArtifactDeclaration, CollectionId, CredentialId, DomainId, Executor, JobId, PipelineId,
+    RerunMode, RunnerId, Sha256Digest, SourceId, SourceKind,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -177,7 +180,57 @@ impl TaskInputBindings {
 #[serde(deny_unknown_fields)]
 pub struct JobInputs {
     pub translate: bool,
-    pub source_kind: SourceKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRemoteSource {
+    pub request_key: String,
+    pub kind: SourceKind,
+    pub canonical_ref: String,
+    pub title: Option<String>,
+    pub domain_id: DomainId,
+    pub collection_ids: Vec<CollectionId>,
+    pub credential_id: Option<CredentialId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateJobRequest {
+    pub request_key: String,
+    pub pipeline_id: PipelineId,
+    pub inputs: JobInputs,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiRunnerSelection {
+    pub task_key: String,
+    pub runner_id: RunnerId,
+    pub model: String,
+    pub effort: String,
+    pub runner_config_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RerunJobRequest {
+    pub request_key: String,
+    pub mode: RerunMode,
+    pub from_task_key: Option<String>,
+    pub ai_selection: Option<AiRunnerSelection>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatedSource {
+    pub source_id: SourceId,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatedJob {
+    pub job_id: JobId,
 }
 
 #[cfg(test)]
@@ -210,5 +263,14 @@ mod tests {
             pdf: TaskInputReference::Source,
         };
         assert!(!bindings.is_valid());
+    }
+
+    #[test]
+    fn public_job_request_rejects_contract_drift() {
+        let pipeline_id = PipelineId::generate();
+        let json = format!(
+            r#"{{"request_key":"request-1","pipeline_id":"{pipeline_id}","inputs":{{"translate":true}},"provider":"legacy"}}"#
+        );
+        serde_json::from_str::<CreateJobRequest>(&json).expect_err("unknown field");
     }
 }
