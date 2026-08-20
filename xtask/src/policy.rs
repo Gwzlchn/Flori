@@ -1,0 +1,70 @@
+use std::{fs, path::Path};
+
+use super::{EXPORT, command, repository_files};
+
+const POLICY_FILES: &str = ".sqlx/query-129b64010ee7cddac8b3c36e19e4a31971abab8fb27ce4f580c592c93ded4f66.json\n.sqlx/query-4f1c1f5e91d92b41bfd1c11a7807c9537aa69b42cea2c5d59487df7d55a96da8.json\n.sqlx/query-52200a51171bab442d1b755c7f1ee306d8f1bf1915b8bed0a02b6b7db7d72638.json\n.sqlx/query-7ba858139d4c260f2daf33a15450464f66e1fe77cf4418acd350ad46a502534d.json\n.sqlx/query-beaee9edbaadcefc2febc643ffffad4aa8d7e7cfd5445018f675c00331f58e49.json\n.sqlx/query-d071e3b0fd0367e9cd965a48ef4460302c4d5edf8d2fc98aa5db62b6d2dc7278.json\n.sqlx/query-e019b4d2e713d2806484a4f5f45a44f1267f4ebe6c73131eb8892f8343354d3a.json\n.sqlx/query-f4648a6d7a1cc285b1d4c5ff83bcef075dee50918656c76b22623029f3600d2d.json\n.sqlx/query-feec2dcc6fd9d9f3aa8f79a59c4ab6c6f0d74fcb1dce380462d54fcc4711e88d.json\nCargo.toml\ncompose.dev.yml\ncompose.prod.yml\ncompose.test.yml\ncrates/flori-core/Cargo.toml\ncrates/flori-core/src/artifact.rs\ncrates/flori-core/src/enums.rs\ncrates/flori-core/src/ids.rs\ncrates/flori-core/src/job.rs\ncrates/flori-core/src/lib.rs\ncrates/flori-core/src/materialize.rs\ncrates/flori-core/src/openapi.rs\ncrates/flori-core/src/runner_claim.rs\ncrates/flori-core/src/runner_protocol.rs\ncrates/flori-pipeline/Cargo.toml\ncrates/flori-runner/Cargo.toml\ncrates/flori-server/Cargo.toml\ncrates/flori-store/Cargo.toml\ncrates/flori-store/migrations/0001_v1.sql\ndocker/runner.Dockerfile\ndocker/server.Dockerfile\nfrontend/Dockerfile\nxtask/Cargo.toml";
+const RUST_FORBIDDEN: &str =
+    "serde_json::Value\0serde_yaml_ng::Value\0serde(alias\0serde(untagged\0serde(flatten\0Unknown(";
+const CORE_TYPES: &str = "PipelineId\0PipelineRevisionId\0SourceId\0SourceInputId\0JobId\0TaskId\0AttemptId\0ArtifactId\0RunnerId\0PromptSnapshotId\0UploadId\0CredentialId\0AiUsageId\0DomainId\0CollectionId\0GlossaryTermId\0ConceptOccurrenceId\0EvidenceId\0SearchChunkId\0QrSessionId\0RequestId\0SourceKind\0JobTrigger\0JobState\0TaskState\0AttemptState\0RunnerState\0CredentialKind\0AiTool\0UsageOrigin\0ArtifactKind\0UploadOwnerKind\0UploadState\0ArtifactOrigin\0ArtifactRetention\0AiUsageState\0JobEventScope\0CollectionKind\0GlossaryTermState\0EvidenceLocatorKind\0Executor\0RunnerTool\0RerunMode\0ArtifactWhen\0TaskLogLevel\0SystemHealthStatus\0JobEventKind\0ErrorCode\0ArtifactDeclaration\0ArtifactManifestSchema\0ArtifactManifest\0ArtifactManifestEntry\0Sha256Digest\0PromptSnapshotPrompt\0PromptSnapshotProfile\0PromptSnapshot\0CompiledTaskSpec\0TaskInputReference\0TaskInputBindings\0JobInputs\0CreateRemoteSource\0CreateJobRequest\0AiRunnerSelection\0RerunJobRequest\0CreatedSource\0CreatedJob\0PendingTaskCommit\0PendingAttemptUpload\0PendingMaterializedArtifact\0PendingMaterializeCommit\0RunnerToolCapability\0AiModelCapability\0RunnerTags\0RunnerTools\0AiModels\0ResolvedArtifact\0ResolvedSourceInput\0ResolvedSource\0ResolvedPrompt\0ResolvedProfile\0ResolvedTaskInputs\0SecretCredential\0SecretInputs\0TaskClaim\0RegisterRunnerRequest\0RegisterRunnerResponse\0CreateRunnerSlot\0CreateRunnerSlotResponse\0RenewLeaseResponse\0LogFrame\0LogCursor\0TaskLogEvent\0UsageUpdate\0UsageAck\0StartUploadRequest\0StartUploadResponse\0UploadCursor\0VerifyUploadRequest\0VerifyUploadResponse\0CompleteAttemptRequest\0FailAttemptRequest\0AttemptAck\0ErrorResponse\0ErrorBody";
+const TS_FORBIDDEN: &str =
+    "as unknown as\0@ts-ignore\0@ts-nocheck\0as any\0: any\0any[]\0fetch(\0XMLHttpRequest\0axios";
+const MAX_MODULE_LINES: usize = 300;
+
+pub(super) fn check(root: &Path) -> Result<(), String> {
+    command(root, "cargo", EXPORT)?;
+    command(root, "sha256sum", "--check --quiet xtask/policy.sha256")?;
+    let mut inventory = repository_files(
+        root,
+        &[
+            ".sqlx",
+            "*Cargo.toml",
+            "compose*.yml",
+            "*Dockerfile",
+            "crates/flori-core",
+            "crates/flori-store/migrations",
+            "frontend/.generated",
+        ],
+    )?;
+    inventory.sort();
+    if inventory.join("\n") != POLICY_FILES {
+        return Err(format!("architecture inventory changed: {inventory:?}"));
+    }
+    scan(root, "crates", RUST_FORBIDDEN)?;
+    scan(root, "frontend/src", TS_FORBIDDEN)
+}
+
+fn scan(root: &Path, directory: &str, patterns: &str) -> Result<(), String> {
+    for relative in repository_files(root, &[directory])? {
+        let text = fs::read_to_string(root.join(&relative)).map_err(|error| error.to_string())?;
+        if is_product_module(&relative) && nonempty_lines(&text) > MAX_MODULE_LINES {
+            return Err(format!("product module exceeds 300 lines: {relative}"));
+        }
+        if let Some(pattern) = patterns.split('\0').find(|pattern| text.contains(pattern)) {
+            return Err(format!("forbidden pattern {pattern:?} in {relative}"));
+        }
+        if relative.starts_with("crates/")
+            && !relative.starts_with("crates/flori-core/")
+            && CORE_TYPES.split('\0').any(|name| {
+                ["enum", "struct", "type"]
+                    .iter()
+                    .any(|kind| text.contains(&format!("{kind} {name}")))
+            })
+        {
+            return Err(format!("core type redeclared in {relative}"));
+        }
+        if relative != "frontend/src/api/client.ts" && text.contains(".generated") {
+            return Err(format!("generated API import outside client: {relative}"));
+        }
+    }
+    Ok(())
+}
+
+fn is_product_module(relative: &str) -> bool {
+    relative.starts_with("crates/flori-") && relative.contains("/src/") && relative.ends_with(".rs")
+        || relative.starts_with("frontend/src/")
+            && (relative.ends_with(".ts") || relative.ends_with(".vue"))
+}
+
+pub(super) fn nonempty_lines(text: &str) -> usize {
+    text.lines().filter(|line| !line.trim().is_empty()).count()
+}

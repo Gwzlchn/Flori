@@ -107,6 +107,13 @@ fn numstat_counts_untracked_handwritten_files() {
 }
 
 #[test]
+fn product_module_budget_counts_only_nonempty_lines() {
+    let within = format!("{}\n\n", "code\n".repeat(300));
+    assert_eq!(policy::nonempty_lines(&within), 300);
+    assert_eq!(policy::nonempty_lines(&(within + "more\n")), 301);
+}
+
+#[test]
 fn janitor_rejects_symlink_outside_repository() {
     let base = env::temp_dir().join(format!("flori-xtask-{}", std::process::id()));
     let root = base.join("repo");
