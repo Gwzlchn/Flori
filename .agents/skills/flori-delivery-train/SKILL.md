@@ -48,6 +48,8 @@ Architecture primitives are tables, persistent states, endpoints, Pipeline field
 5. Keep Rust domain types authoritative. Generate OpenAPI and TypeScript; do not repair type errors with dynamic Value, aliases, casts or duplicate models.
 6. Run a deletion pass before commit.
 
+For every product WP, apply the single work-package accounting rule in [vNext development](../../../docs/vnext/development.md#工作包复杂度账本); file splitting alone is not a complexity reduction.
+
 Stop and re-slice a normal small task when it exceeds 300 net handwritten production lines, 10 handwritten files, two business crates, two frontend pages, or any undeclared architecture primitive. Also stop after two failed implementation paths, 20 minutes without a compiling skeleton, or 45 minutes without a local green result.
 
 ## 5. Stop only for a real boundary change
