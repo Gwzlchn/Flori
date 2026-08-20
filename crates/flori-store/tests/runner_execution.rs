@@ -8,8 +8,8 @@ use flori_core::{
     PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
     PromptSnapshotPrompt, RegisterRunnerRequest, ResolvedTaskInputs, RunnerId, RunnerTool,
     RunnerToolCapability, Sha256Digest, StartUploadRequest, StartUploadResponse, TaskId,
-    TaskInputBindings, TaskInputReference, TaskLogLevel, TaskLogLine, UploadState, UsageOrigin,
-    UsageUpdate, VerifyUploadRequest,
+    TaskInputBindings, TaskInputReference, TaskLogEvent, TaskLogLevel, TaskLogLine, UploadState,
+    UsageOrigin, UsageUpdate, VerifyUploadRequest,
 };
 use flori_pipeline::compile;
 use flori_store::{
@@ -475,6 +475,24 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
             .last_sequence,
         1
     );
+    let payload: String = sqlx::query_scalar(
+        "SELECT payload_json FROM job_events WHERE kind='log_cursor' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&foundation.pool)
+    .await
+    .expect("cursor event");
+    let event: TaskLogEvent = serde_json::from_str(&payload).expect("strict cursor payload");
+    assert_eq!(
+        event,
+        TaskLogEvent {
+            job_id: claim.job_id,
+            task_id: claim.task_id,
+            attempt_id: claim.exec_id,
+            last_sequence: 1,
+        }
+    );
+    assert!(!payload.contains("message"));
+    assert!(!payload.contains("sha256"));
     let legacy = r#"{"message":"legacy"}"#.to_owned();
     assert_eq!(
         foundation
@@ -590,6 +608,59 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
             .code(),
         ErrorCode::LogSequenceGap
     );
+    let canonical_credential_line = serde_json::to_string(&TaskLogLine {
+        timestamp_ms: 1,
+        level: TaskLogLevel::Info,
+        message: credential_value.into(),
+    })
+    .expect("canonical secret line");
+    let escaped_credential_line =
+        canonical_credential_line.replacen(r#""message":"T"#, r#""message":"\u0054"#, 1);
+    assert_eq!(
+        serde_json::from_str::<TaskLogLine>(&escaped_credential_line)
+            .expect("valid escaped line")
+            .message,
+        credential_value
+    );
+    let staging = database
+        .directory
+        .join("artifacts/.staging/uploads")
+        .join(&upload_id);
+    let before_bytes = fs::read(&staging).expect("staging before rejected secret");
+    let before_events: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM job_events WHERE kind='log_cursor'")
+            .fetch_one(&foundation.pool)
+            .await
+            .expect("events before rejected secret");
+    assert_eq!(
+        foundation
+            .store
+            .append_log_frames(
+                &artifacts,
+                foundation.runner_id,
+                claim.exec_id,
+                &[LogFrame {
+                    sequence: 3,
+                    sha256: digest(&escaped_credential_line),
+                    line: escaped_credential_line,
+                }],
+                15,
+            )
+            .await
+            .expect_err("noncanonical Unicode escape is rejected before persistence")
+            .code(),
+        ErrorCode::InvalidRequest
+    );
+    assert_eq!(
+        fs::read(&staging).expect("staging after rejected secret"),
+        before_bytes
+    );
+    let after_events: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM job_events WHERE kind='log_cursor'")
+            .fetch_one(&foundation.pool)
+            .await
+            .expect("events after rejected secret");
+    assert_eq!(after_events, before_events);
     assert_eq!(
         foundation
             .store

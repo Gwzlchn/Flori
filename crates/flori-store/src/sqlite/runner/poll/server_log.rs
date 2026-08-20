@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use flori_core::{
     ArtifactId, ArtifactKind, AttemptId, CompiledTaskSpec, ErrorCode, Sha256Digest, SourceId,
-    TaskLogEvent, TaskLogLine, UploadId, UploadState,
+    TaskLogLine, UploadId, UploadState,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
@@ -225,18 +225,9 @@ fn task_log_declaration(
     Ok(first)
 }
 
-pub(in crate::sqlite::runner) fn log_bytes(events: &[TaskLogEvent]) -> Result<Vec<u8>, StoreError> {
-    let mut bytes = Vec::new();
-    for (index, event) in events.iter().enumerate() {
-        if event.frame.sequence != index as u64 + 1
-            || serde_json::from_str::<TaskLogLine>(&event.frame.line).is_err()
-        {
-            return Err(corrupt());
-        }
-        bytes.extend_from_slice(event.frame.line.as_bytes());
-        bytes.push(b'\n');
-    }
-    Ok(bytes)
+pub(in crate::sqlite::runner) fn canonical_line(value: &str) -> Option<TaskLogLine> {
+    let line = serde_json::from_str::<TaskLogLine>(value).ok()?;
+    (serde_json::to_string(&line).ok()?.as_str() == value).then_some(line)
 }
 
 pub(in crate::sqlite::runner) fn sha256(bytes: &[u8]) -> Result<Sha256Digest, StoreError> {

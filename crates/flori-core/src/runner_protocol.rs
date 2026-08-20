@@ -3,8 +3,8 @@ use utoipa::ToSchema;
 
 use crate::{
     AiModels, AiTool, AiUsageId, AiUsageState, ArtifactManifestEntry, AttemptId, AttemptState,
-    ErrorCode, RequestId, RunnerId, RunnerTags, RunnerTools, Sha256Digest, TaskLogLevel, UploadId,
-    UsageOrigin,
+    ErrorCode, JobId, RequestId, RunnerId, RunnerTags, RunnerTools, Sha256Digest, TaskId,
+    TaskLogLevel, UploadId, UsageOrigin,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -66,11 +66,13 @@ pub struct LogCursor {
     pub last_sequence: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskLogEvent {
-    pub exec_id: AttemptId,
-    pub frame: LogFrame,
+    pub job_id: JobId,
+    pub task_id: TaskId,
+    pub attempt_id: AttemptId,
+    pub last_sequence: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -192,6 +194,22 @@ mod tests {
         let line: TaskLogLine = serde_json::from_str(json).expect("strict task log line");
         assert_eq!(serde_json::to_string(&line).expect("wire JSON"), json);
         serde_json::from_str::<TaskLogLine>(&json.replace('}', ",\"extra\":1}"))
+            .expect_err("unknown field");
+    }
+
+    #[test]
+    fn task_log_event_contains_only_the_frozen_cursor() {
+        let event = TaskLogEvent {
+            job_id: JobId::generate(),
+            task_id: TaskId::generate(),
+            attempt_id: AttemptId::generate(),
+            last_sequence: 7,
+        };
+        let json = serde_json::to_string(&event).expect("cursor event");
+        assert!(json.contains("\"last_sequence\":7"));
+        assert!(!json.contains("message"));
+        assert!(!json.contains("sha256"));
+        serde_json::from_str::<TaskLogEvent>(&json.replace('}', ",\"extra\":1}"))
             .expect_err("unknown field");
     }
 }

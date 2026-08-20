@@ -2,7 +2,6 @@ use std::fmt::Write;
 
 use flori_core::{
     AttemptId, CompiledTaskSpec, ErrorCode, LogCursor, LogFrame, RunnerId, TaskLogEvent,
-    TaskLogLine,
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -57,10 +56,8 @@ impl Store {
             .try_get::<String, _>("source_id")?
             .parse()
             .map_err(|_| corrupt())?;
-        let events = load_events(&mut transaction, &job_id, attempt_id).await?;
         let cursor =
             u64::try_from(row.try_get::<i64, _>("last_log_sequence")?).map_err(|_| corrupt())?;
-        validate_event_history(&events, cursor)?;
         let credential_value = source_credential(&mut transaction, &job_id).await?;
         validate_frame(frame, credential_value.as_deref())?;
         let pending = server_log::load_pending(
@@ -73,17 +70,11 @@ impl Store {
         )
         .await?
         .ok_or_else(|| StoreError::new(ErrorCode::ArtifactUndeclared))?;
+        let mut committed = committed_bytes(artifacts, &pending, cursor)?;
         if frame.sequence <= cursor {
-            let Some(existing) = events
-                .iter()
-                .find(|event| event.frame.sequence == frame.sequence)
-            else {
-                return Err(corrupt());
-            };
-            if existing.frame != *frame {
+            if log_line(&committed, frame.sequence)? != frame.line {
                 return Err(StoreError::new(ErrorCode::LogSequenceConflict));
             }
-            verify_current_log(artifacts, &pending, &events)?;
             transaction.rollback().await?;
             return Ok(cursor);
         }
@@ -101,13 +92,14 @@ impl Store {
                 &chunk,
             )
             .map_err(|error| StoreError::new(error.code()))?;
-        let mut updated_events = events;
+        committed.extend_from_slice(&chunk);
+        let rolling_sha256 = server_log::sha256(&committed)?;
         let event = TaskLogEvent {
-            exec_id: attempt_id,
-            frame: frame.clone(),
+            job_id: job_id.parse().map_err(|_| corrupt())?,
+            task_id: task_id.parse().map_err(|_| corrupt())?,
+            attempt_id,
+            last_sequence: frame.sequence,
         };
-        updated_events.push(event.clone());
-        let rolling_sha256 = server_log::sha256(&server_log::log_bytes(&updated_events)?)?;
         insert_event(&mut transaction, &job_id, &event, now_ms).await?;
         let updated = sqlx::query(
             "UPDATE attempts SET last_log_sequence=? WHERE id=? AND last_log_sequence=?",
@@ -167,66 +159,72 @@ async fn active_log_attempt(
     Ok(row)
 }
 
-fn verify_current_log(
+fn committed_bytes(
     artifacts: &NasArtifactStore,
     pending: &ServerLogUpload,
-    events: &[TaskLogEvent],
+    expected_lines: u64,
+) -> Result<Vec<u8>, StoreError> {
+    let size = pending.record.received_bytes();
+    let bytes = if size == 0 {
+        Vec::new()
+    } else {
+        let relative_path = pending.record.staging_relative_path();
+        let path = relative_path.to_str().ok_or_else(corrupt)?;
+        artifacts
+            .read_chunk(path, 0, usize::try_from(size).map_err(|_| corrupt())?)
+            .map_err(|error| StoreError::new(error.code()))?
+    };
+    validate_log_bytes(&bytes, expected_lines, size, &pending.rolling_sha256)?;
+    Ok(bytes)
+}
+
+fn validate_log_bytes(
+    bytes: &[u8],
+    expected_lines: u64,
+    expected_size: u64,
+    expected_sha256: &flori_core::Sha256Digest,
 ) -> Result<(), StoreError> {
-    let bytes = server_log::log_bytes(events)?;
-    let digest = server_log::sha256(&bytes)?;
-    if pending.record.received_bytes() != bytes.len() as u64 || pending.rolling_sha256 != digest {
+    if bytes.len() as u64 != expected_size
+        || &server_log::sha256(bytes)? != expected_sha256
+        || (expected_lines == 0) != bytes.is_empty()
+    {
         return Err(corrupt());
     }
-    let received = artifacts
-        .append_chunk(&pending.record, 0, &digest, &bytes)
-        .map_err(|error| StoreError::new(error.code()))?;
-    if received == pending.record.received_bytes() {
-        Ok(())
-    } else {
-        Err(corrupt())
+    if bytes.is_empty() {
+        return Ok(());
     }
-}
-
-async fn load_events(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    job_id: &str,
-    attempt_id: AttemptId,
-) -> Result<Vec<TaskLogEvent>, StoreError> {
-    let payloads: Vec<String> = sqlx::query_scalar(
-        "SELECT payload_json FROM job_events WHERE scope='job' AND scope_id=? \
-         AND kind='log_cursor' ORDER BY id",
-    )
-    .bind(job_id)
-    .fetch_all(&mut **transaction)
-    .await?;
-    payloads
-        .into_iter()
-        .map(|payload| serde_json::from_str::<TaskLogEvent>(&payload).map_err(|_| corrupt()))
-        .filter(|event| match event {
-            Ok(event) => event.exec_id == attempt_id,
-            Err(_) => true,
-        })
-        .collect()
-}
-
-fn validate_event_history(events: &[TaskLogEvent], cursor: u64) -> Result<(), StoreError> {
-    if events.len() != usize::try_from(cursor).map_err(|_| corrupt())?
-        || events
-            .iter()
-            .enumerate()
-            .any(|(index, event)| event.frame.sequence != index as u64 + 1)
-    {
+    let text = std::str::from_utf8(bytes).map_err(|_| corrupt())?;
+    let mut count = 0_u64;
+    for line in text.strip_suffix('\n').ok_or_else(corrupt)?.split('\n') {
+        if server_log::canonical_line(line).is_none() {
+            return Err(corrupt());
+        }
+        count = count.checked_add(1).ok_or_else(corrupt)?;
+    }
+    if count != expected_lines {
         return Err(corrupt());
     }
     Ok(())
 }
 
+fn log_line(bytes: &[u8], sequence: u64) -> Result<&str, StoreError> {
+    let index =
+        usize::try_from(sequence.checked_sub(1).ok_or_else(corrupt)?).map_err(|_| corrupt())?;
+    std::str::from_utf8(bytes)
+        .map_err(|_| corrupt())?
+        .strip_suffix('\n')
+        .ok_or_else(corrupt)?
+        .split('\n')
+        .nth(index)
+        .ok_or_else(corrupt)
+}
+
 fn validate_frame(frame: &LogFrame, credential_value: Option<&str>) -> Result<(), StoreError> {
-    if frame.line.len() > MAX_LOG_LINE_BYTES
-        || serde_json::from_str::<TaskLogLine>(&frame.line).is_err()
-    {
+    if frame.line.len() > MAX_LOG_LINE_BYTES {
         return Err(StoreError::new(ErrorCode::InvalidRequest));
     }
+    let line = server_log::canonical_line(&frame.line)
+        .ok_or_else(|| StoreError::new(ErrorCode::InvalidRequest))?;
     let mut actual = String::with_capacity(64);
     for byte in Sha256::digest(frame.line.as_bytes()) {
         write!(&mut actual, "{byte:02x}").expect("writing to String cannot fail");
@@ -236,15 +234,9 @@ fn validate_frame(frame: &LogFrame, credential_value: Option<&str>) -> Result<()
     }
     if let Some(value) = credential_value
         && !value.is_empty()
+        && line.message.contains(value)
     {
-        let encoded = serde_json::to_string(value).map_err(|_| corrupt())?;
-        let escaped = encoded
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .ok_or_else(corrupt)?;
-        if frame.line.contains(value) || frame.line.contains(escaped) {
-            return Err(StoreError::new(ErrorCode::CredentialUnavailable));
-        }
+        return Err(StoreError::new(ErrorCode::CredentialUnavailable));
     }
     Ok(())
 }

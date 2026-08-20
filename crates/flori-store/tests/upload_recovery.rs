@@ -1,12 +1,13 @@
 use std::{fmt::Write, fs, path::PathBuf};
 
 use flori_core::{
-    ArtifactDeclaration, ArtifactId, ArtifactKind, ArtifactManifestEntry, ArtifactRetention,
-    ArtifactWhen, AttemptId, CompiledTaskSpec, DomainId, ErrorCode, Executor, JobId, JobInputs,
-    LogFrame, PendingAttemptUpload, PendingMaterializeCommit, PendingMaterializedArtifact,
-    PendingTaskCommit, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
-    PromptSnapshotProfile, RunnerId, Sha256Digest, SourceId, TaskId, TaskInputBindings,
-    TaskInputReference, TaskLogEvent, TaskLogLevel, TaskLogLine, TaskState, UploadId, UploadState,
+    ArtifactDeclaration, ArtifactId, ArtifactKind, ArtifactManifest, ArtifactManifestEntry,
+    ArtifactRetention, ArtifactWhen, AttemptId, AttemptState, CompiledTaskSpec,
+    CompleteAttemptRequest, DomainId, ErrorCode, Executor, JobId, JobInputs, PendingAttemptUpload,
+    PendingMaterializeCommit, PendingMaterializedArtifact, PendingTaskCommit, PipelineId,
+    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile, RunnerId,
+    Sha256Digest, SourceId, TaskId, TaskInputBindings, TaskInputReference, TaskLogEvent,
+    TaskLogLevel, TaskLogLine, TaskState, UploadId, UploadState,
 };
 use flori_store::{
     Store,
@@ -25,6 +26,7 @@ struct Fixture {
     job_id: JobId,
     task_id: TaskId,
     attempt_id: AttemptId,
+    runner_id: RunnerId,
 }
 
 impl Fixture {
@@ -168,6 +170,7 @@ impl Fixture {
             job_id,
             task_id,
             attempt_id,
+            runner_id,
         }
     }
 
@@ -322,12 +325,10 @@ async fn server_log_final_file_rebuilds_the_strict_pending_commit() {
     .await
     .expect("log ledger");
     let event = TaskLogEvent {
-        exec_id: fixture.attempt_id,
-        frame: LogFrame {
-            sequence: 1,
-            sha256: digest(line.as_bytes()),
-            line,
-        },
+        job_id: fixture.job_id,
+        task_id: fixture.task_id,
+        attempt_id: fixture.attempt_id,
+        last_sequence: 1,
     };
     sqlx::query(
         "INSERT INTO job_events(scope,scope_id,kind,payload_json,created_at_ms) \
@@ -361,6 +362,31 @@ async fn server_log_final_file_rebuilds_the_strict_pending_commit() {
     assert_eq!(pending.artifact.kind, ArtifactKind::TaskLog);
     assert_eq!(pending.artifact.size_bytes, bytes.len() as u64);
     assert_eq!(row.try_get::<String, _>("state").expect("state"), "moved");
+    let manifest = ArtifactManifest::new(
+        fixture.job_id,
+        fixture.task_id,
+        fixture.attempt_id,
+        Vec::new(),
+    );
+    let request = CompleteAttemptRequest {
+        manifest_sha256: digest(&serde_json::to_vec(&manifest).expect("runner manifest")),
+    };
+    assert_eq!(
+        fixture
+            .store
+            .complete_authenticated_attempt(
+                &artifacts,
+                fixture.runner_id,
+                fixture.attempt_id,
+                &request,
+                11,
+            )
+            .await
+            .expect("completion after final-only recovery")
+            .state,
+        AttemptState::Succeeded
+    );
+    assert_eq!(upload_count(&fixture.pool).await, 0);
 }
 
 #[tokio::test]
