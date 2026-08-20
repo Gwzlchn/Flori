@@ -22,7 +22,7 @@ flori-pipeline = { path = "crates/flori-pipeline", version = "=0.0.0" }
 reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls"] }
 rustix = { version = "=1.1.4", default-features = false, features = ["process"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
+serde_json = { version = "1.0.151", features = ["raw_value"] }
 serde_yaml_ng = "=0.10.0"
 sha2 = "=0.11.0"
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "macros"] }

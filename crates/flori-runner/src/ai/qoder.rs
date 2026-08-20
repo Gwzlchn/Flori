@@ -2,7 +2,7 @@ use std::{collections::HashSet, str};
 
 use flori_core::{AiModelCapability, AiResultEnvelope, Executor, UsageOrigin, UsageUpdate};
 use serde::Deserialize;
-use serde_json::Number;
+use serde_json::value::RawValue;
 
 pub const QODERCLI_VERSION: &str = "1.1.26";
 pub const QODERCLI_PROGRAM: &str = "qodercli";
@@ -182,7 +182,7 @@ pub fn parse_result(
     if result.kind != "result" || result.subtype != "success" || result.is_error {
         return Err(QoderError::InvalidOutput);
     }
-    let credits_micros = credits_to_micros(&result.total_credits)?;
+    let credits_micros = credits_to_micros(result.total_credits.get())?;
     let envelope: AiResultEnvelope =
         serde_json::from_str(&result.result).map_err(|_| QoderError::InvalidOutput)?;
     if envelope_executor(&envelope) != executor {
@@ -215,7 +215,7 @@ struct JsonResult {
     result: String,
     stop_reason: serde::de::IgnoredAny,
     total_cost_usd: serde::de::IgnoredAny,
-    total_credits: Number,
+    total_credits: Box<RawValue>,
     usage: serde::de::IgnoredAny,
     #[serde(rename = "modelUsage")]
     model_usage: serde::de::IgnoredAny,
@@ -225,14 +225,13 @@ struct JsonResult {
     session_id: serde::de::IgnoredAny,
 }
 
-fn credits_to_micros(number: &Number) -> Result<u64, QoderError> {
-    let text = number.to_string();
+fn credits_to_micros(text: &str) -> Result<u64, QoderError> {
     if text.starts_with('-') {
         return Err(QoderError::InvalidCredits);
     }
     let (mantissa, exponent) =
         text.split_once(['e', 'E'])
-            .map_or((text.as_str(), 0), |(value, exponent)| {
+            .map_or((text, 0), |(value, exponent)| {
                 exponent
                     .parse::<i32>()
                     .map(|exponent| (value, exponent))

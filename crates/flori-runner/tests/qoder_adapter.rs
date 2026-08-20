@@ -148,6 +148,13 @@ fn result_decodes_the_strict_envelope_and_only_reports_credits() {
             credits_micros: Some(2_500_001),
         }
     );
+
+    let decimal_locator = format!(
+        r#"{{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"note","summary_markdown":"summary","terms":{}}}"#,
+        include_str!("../../../tests/fixtures/vnext/expected/terms.json")
+    );
+    parse_note(&result_output(&decimal_locator, "0.000001"))
+        .expect("PDF decimal locator and exact credits coexist");
 }
 
 #[test]
