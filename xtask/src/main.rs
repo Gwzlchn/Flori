@@ -107,16 +107,17 @@ fn run(task: Task) -> Result<(), String> {
             if name == "edge" {
                 command(&root, "cargo", EXPORT)?;
             }
-            let proxy = match env::var("FLORI_BUILD_PROXY") {
-                Ok(proxy)
-                    if !proxy.is_empty()
-                        && matches!(name.as_str(), "runner-ai-qoder" | "runner-ai-codex") =>
-                {
-                    Some(proxy)
+            let github = env::var_os("GITHUB_ACTIONS").is_some();
+            let configured = if github {
+                None
+            } else {
+                match env::var("FLORI_BUILD_PROXY") {
+                    Ok(proxy) => Some(proxy),
+                    Err(env::VarError::NotPresent) => None,
+                    Err(error) => return Err(format!("invalid FLORI_BUILD_PROXY: {error}")),
                 }
-                Ok(_) | Err(env::VarError::NotPresent) => None,
-                Err(error) => return Err(format!("invalid FLORI_BUILD_PROXY: {error}")),
             };
+            let proxy = image_proxy(&name, github, configured);
             execute(
                 &root,
                 &mut image_command(
@@ -129,6 +130,13 @@ fn run(task: Task) -> Result<(), String> {
         Task::DiffBudget(base) => diff_budget(&root, &base),
         Task::Janitor(apply) => janitor(&root, apply),
     }
+}
+
+fn image_proxy(name: &str, github: bool, proxy: Option<String>) -> Option<String> {
+    (!github)
+        .then_some(proxy)
+        .flatten()
+        .filter(|proxy| !proxy.is_empty() && matches!(name, "runner-ai-qoder" | "runner-ai-codex"))
 }
 
 fn command(root: &Path, program: &str, args: &str) -> Result<(), String> {

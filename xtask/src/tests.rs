@@ -76,6 +76,17 @@ fn exposes_only_fixed_image_mappings() {
 }
 
 #[test]
+fn limits_local_proxy_to_ai_images() {
+    let proxy = Some("http://localhost:8080".to_owned());
+    assert_eq!(
+        image_proxy("runner-ai-qoder", false, proxy.clone()),
+        proxy.clone()
+    );
+    assert_eq!(image_proxy("server", false, proxy.clone()), None);
+    assert_eq!(image_proxy("runner-ai-qoder", true, proxy), None);
+}
+
+#[test]
 fn numstat_excludes_generated_lock_and_binary_files() {
     let input = concat!(
         "20\t3\tcrates/flori-core/src/lib.rs\n",
