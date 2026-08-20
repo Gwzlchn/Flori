@@ -3,10 +3,17 @@ use utoipa::ToSchema;
 
 use crate::{
     ArtifactId, ArtifactKind, AttemptId, AttemptState, CompiledTaskSpec, DomainId, ErrorCode,
-    EvidenceId, EvidenceLocator, Executor, JobId, JobInputs, JobState, JobTrigger,
+    EvidenceId, EvidenceLocator, Executor, JobId, JobInputs, JobState, JobTrigger, PipelineId,
     PipelineRevisionId, RunnerId, SearchChunkId, Sha256Digest, SourceId, SourceKind, TaskId,
     TaskState,
 };
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PdfSetupView {
+    pub domain_id: DomainId,
+    pub pipeline_id: PipelineId,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]

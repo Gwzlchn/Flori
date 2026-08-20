@@ -16,6 +16,14 @@ pub struct CreateUploadSource {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct CreateUploadSourceForm {
+    pub metadata: CreateUploadSource,
+    #[schema(value_type = String, format = Binary)]
+    pub file: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PendingSourceCommit {
     pub source_id: SourceId,
     pub source_input_id: SourceInputId,

@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod api_paths;
 mod artifact;
 mod document;
 mod enums;
