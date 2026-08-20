@@ -10,6 +10,7 @@ use std::{
 };
 
 use flori_core::{AiTool, ErrorCode};
+use reqwest::Url;
 use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -17,7 +18,8 @@ use tokio::{
     sync::watch,
 };
 
-const SAFE_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+#[path = "process/qoder_process.rs"]
+pub(crate) mod qoder_process;
 
 pub struct AiProcessConfig {
     pub tool: AiTool,
@@ -28,6 +30,7 @@ pub struct AiProcessConfig {
     pub working_directory: PathBuf,
     pub timeout: Duration,
     pub max_output_bytes: usize,
+    pub proxy_url: Option<Url>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,7 +54,7 @@ pub struct AiProcessError {
 }
 
 impl AiProcessError {
-    const fn new(code: ErrorCode) -> Self {
+    pub(crate) const fn new(code: ErrorCode) -> Self {
         Self { code }
     }
 
@@ -75,12 +78,17 @@ pub async fn run_ai_process(
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<AiProcessOutput, AiProcessError> {
     validate(config)?;
+    let proxy = match (&config.tool, &config.proxy_url) {
+        (AiTool::QoderCli, Some(url)) => Some(url),
+        (AiTool::CodexCli, None) => None,
+        _ => return Err(AiProcessError::new(ErrorCode::InvalidRequest)),
+    };
     let mut command = Command::new(&config.executable);
     command
         .args(&config.arguments)
         .current_dir(&config.working_directory)
         .env_clear()
-        .env("PATH", SAFE_PATH)
+        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
         .env("HOME", &config.home)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -91,6 +99,15 @@ pub async fn run_ai_process(
         AiTool::QoderCli => command.env("QODER_CONFIG_DIR", &config.tool_config_home),
         AiTool::CodexCli => command.env("CODEX_HOME", &config.tool_config_home),
     };
+    if let Some(proxy) = proxy {
+        let value = proxy.as_str().trim_end_matches('/');
+        command.envs([
+            ("HTTP_PROXY", value),
+            ("http_proxy", value),
+            ("HTTPS_PROXY", value),
+            ("https_proxy", value),
+        ]);
+    }
     let mut child = command
         .spawn()
         .map_err(|_| AiProcessError::new(ErrorCode::ExecutorFailed))?;
@@ -540,6 +557,7 @@ mod tests {
             working_directory: root.to_owned(),
             timeout,
             max_output_bytes,
+            proxy_url: None,
         }
     }
 }

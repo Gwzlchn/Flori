@@ -12,7 +12,7 @@ use std::{
 };
 
 use flori_core::{AiTool, DomainId, JobId, PipelineId, RunnerId, SourceKind};
-use flori_runner::{DaemonConfig, RunnerClient};
+use flori_runner::{DaemonConfig, ProxyUrl, RunnerClient};
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -44,6 +44,7 @@ pub(super) struct RealConfig {
     pub(super) config_home: PathBuf,
     pub(super) model: String,
     pub(super) effort: String,
+    pub(super) proxy_url: ProxyUrl,
 }
 
 impl Harness {
@@ -317,6 +318,7 @@ pub(super) async fn run(image: &str) {
             effort: fixture::EFFORT.into(),
             renew_interval: Duration::from_millis(100),
             max_output_bytes: 1024 * 1024,
+            proxy_url: Some(ProxyUrl::parse("http://proxy.invalid:10809").expect("test proxy")),
         },
     );
     wait_for_job(
@@ -395,6 +397,7 @@ pub(super) async fn run_real(config: RealConfig) {
             effort: config.effort,
             renew_interval: Duration::from_secs(5),
             max_output_bytes: 1024 * 1024,
+            proxy_url: Some(config.proxy_url),
         },
     );
     wait_for_job(

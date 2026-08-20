@@ -48,6 +48,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         effort: runtime.effort,
         renew_interval: RENEW_INTERVAL,
         max_output_bytes: MAX_OUTPUT_BYTES,
+        proxy_url: runtime.proxy_url,
     };
     let (stop, mut cancel) = watch::channel(false);
     let mut daemon = Box::pin(run_ai_daemon(&runtime.client, &config, &mut cancel));

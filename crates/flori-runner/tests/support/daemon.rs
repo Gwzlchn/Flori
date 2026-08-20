@@ -110,6 +110,7 @@ pub(crate) fn config(
         effort: "high".into(),
         renew_interval,
         max_output_bytes: 1024 * 1024,
+        proxy_url: Some(reqwest::Url::parse("http://proxy.invalid:10809").expect("proxy")),
     }
 }
 

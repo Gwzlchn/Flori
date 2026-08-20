@@ -30,5 +30,6 @@ pub use daemon::{DaemonConfig, run as run_ai_daemon};
 pub use media::pdf::{
     PdfAcquireConfig, PdfDaemonConfig, PdfExtractConfig, acquire_pdf, extract_pdf, run_pdf_daemon,
 };
+pub use reqwest::Url as ProxyUrl;
 pub use spool::{Spool, SpoolError, SpoolUpload};
 pub use upload::manifest_sha256;

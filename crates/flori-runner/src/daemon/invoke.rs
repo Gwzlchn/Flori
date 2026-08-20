@@ -6,6 +6,7 @@ use flori_core::{
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncReadExt, sync::watch};
 
+use crate::ai::process::qoder_process;
 use crate::{
     AiProcessConfig, AiProcessTermination, CodexWebSearchObservation, QoderError,
     build_codex_command, qoder_invocation_command, qoder_parse_result, run_ai_process,
@@ -90,22 +91,22 @@ pub(super) async fn run(
             (command.args, command.stdin.into_bytes(), redacted)
         }
     };
-    let process = match run_ai_process(
-        &AiProcessConfig {
-            tool: config.tool,
-            executable: config.executable.clone(),
-            arguments,
-            home: config.home.clone(),
-            tool_config_home: config.tool_config_home.clone(),
-            working_directory: workspace.to_owned(),
-            timeout: Duration::from_millis(claim.timeout_ms),
-            max_output_bytes: config.max_output_bytes,
-        },
-        &stdin,
-        cancel,
-    )
-    .await
-    {
+    let process_config = AiProcessConfig {
+        tool: config.tool,
+        executable: config.executable.clone(),
+        arguments,
+        home: config.home.clone(),
+        tool_config_home: config.tool_config_home.clone(),
+        working_directory: workspace.to_owned(),
+        timeout: Duration::from_millis(claim.timeout_ms),
+        max_output_bytes: config.max_output_bytes,
+        proxy_url: config.proxy_url.clone(),
+    };
+    let result = match config.tool {
+        AiTool::QoderCli => qoder_process::run(process_config, &stdin, cancel).await,
+        AiTool::CodexCli => run_ai_process(&process_config, &stdin, cancel).await,
+    };
+    let process = match result {
         Ok(process) => process,
         Err(error) if error.code() == ErrorCode::ArtifactTooLarge => {
             return Ok(InvocationOutcome {
@@ -464,6 +465,8 @@ mod tests {
             effort: "high".into(),
             renew_interval: Duration::from_secs(1),
             max_output_bytes: 1024 * 1024,
+            proxy_url: (tool == AiTool::QoderCli)
+                .then(|| reqwest::Url::parse("http://proxy.invalid:10809").expect("proxy")),
         };
         let (_keep, mut cancel) = watch::channel(false);
         let claim = claim(executor, timeout_ms);

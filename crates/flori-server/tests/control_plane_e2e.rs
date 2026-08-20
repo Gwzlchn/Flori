@@ -803,6 +803,7 @@ async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
         effort: "high".into(),
         renew_interval: Duration::from_millis(100),
         max_output_bytes: 1024 * 1024,
+        proxy_url: None,
     };
     let daemon_client = RunnerClient::new(
         &format!("http://{}", harness.address),

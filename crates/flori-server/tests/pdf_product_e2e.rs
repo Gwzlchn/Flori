@@ -63,6 +63,8 @@ async fn uploaded_pdf_reaches_current_with_real_qoder_when_explicitly_authorized
         config_home: directory("FLORI_REAL_QODER_CONFIG_HOME"),
         model: required("FLORI_REAL_QODER_MODEL"),
         effort: required("FLORI_REAL_QODER_EFFORT"),
+        proxy_url: flori_runner::ProxyUrl::parse(&required("FLORI_AI_PROXY_URL"))
+            .expect("FLORI_AI_PROXY_URL must be a URL"),
     })
     .await;
 }

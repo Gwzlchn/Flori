@@ -10,6 +10,7 @@ use std::{
 };
 
 use flori_core::{AiTool, ErrorCode, Executor, TaskClaim};
+use reqwest::Url;
 use tokio::{fs, sync::watch};
 
 use crate::RunnerClient;
@@ -24,6 +25,7 @@ pub struct DaemonConfig {
     pub effort: String,
     pub renew_interval: Duration,
     pub max_output_bytes: usize,
+    pub proxy_url: Option<Url>,
 }
 
 pub async fn run(
@@ -166,10 +168,27 @@ fn validate(config: &DaemonConfig) -> Result<(), ErrorCode> {
         || !identifier(&config.effort)
         || config.renew_interval.is_zero()
         || config.max_output_bytes == 0
+        || !valid_proxy(config)
     {
         return Err(ErrorCode::InvalidRequest);
     }
     Ok(())
+}
+
+fn valid_proxy(config: &DaemonConfig) -> bool {
+    match (&config.tool, &config.proxy_url) {
+        (AiTool::QoderCli, Some(url)) => {
+            url.scheme() == "http"
+                && url.host().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+        }
+        (AiTool::CodexCli, None) => true,
+        _ => false,
+    }
 }
 
 fn identifier(value: &str) -> bool {
