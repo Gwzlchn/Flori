@@ -41,6 +41,9 @@ impl Store {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let active = active_attempt(&mut transaction, runner_id, attempt_id, now_ms).await?;
         let (declaration, basename) = declaration(&active.spec, &request.name)?;
+        if !declaration.kind.accepts_media_type(&request.media_type) {
+            return Err(StoreError::new(ErrorCode::InvalidRequest));
+        }
         if let Some(row) = sqlx::query(
             "SELECT id FROM uploads WHERE owner_kind='attempt' AND owner_id=? AND name=?",
         )
@@ -171,6 +174,9 @@ pub(super) async fn load_upload(
     let (declaration, _) = declaration(&active.spec, &pending.artifact.name)?;
     if pending.declaration_name != declaration.name
         || pending.artifact.kind != declaration.kind
+        || !declaration
+            .kind
+            .accepts_media_type(&pending.artifact.media_type)
         || pending.artifact_id.to_string() != row.try_get::<String, _>("target_id")?
         || pending.artifact.name != row.try_get::<String, _>("name")?
         || pending.artifact.relative_path != row.try_get::<String, _>("final_relative_path")?

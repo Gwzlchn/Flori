@@ -156,13 +156,17 @@ async fn replay_complete(
         let name: String = row.try_get("name")?;
         let kind = parse_kind(row.try_get("kind")?)?;
         let (declared, _) = declaration(&spec, &name)?;
-        if declared.kind != kind || row.try_get::<String, _>("retention")? != retention(kind) {
+        let media_type: String = row.try_get("media_type")?;
+        if declared.kind != kind
+            || !kind.accepts_media_type(&media_type)
+            || row.try_get::<String, _>("retention")? != retention(kind)
+        {
             return Err(corrupt());
         }
         let entry = ArtifactManifestEntry {
             name,
             kind,
-            media_type: row.try_get("media_type")?,
+            media_type,
             size_bytes: row
                 .try_get::<i64, _>("size_bytes")?
                 .try_into()

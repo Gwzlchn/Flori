@@ -111,6 +111,9 @@ pub(super) async fn commit_uploads(
 ) -> Result<(), StoreError> {
     for upload in uploads {
         let artifact = &upload.pending.artifact;
+        if !artifact.kind.accepts_media_type(&artifact.media_type) {
+            return Err(StoreError::new(ErrorCode::CorruptState));
+        }
         let file_name = Path::new(&artifact.relative_path)
             .file_name()
             .and_then(|value| value.to_str())

@@ -4,11 +4,12 @@ use flori_core::{
     AiModelCapability, AiTool, AiUsageId, AiUsageState, ArtifactDeclaration, ArtifactKind,
     ArtifactManifest, ArtifactWhen, AttemptId, AttemptState, CompiledTaskSpec,
     CompleteAttemptRequest, CreateRunnerSlot, CredentialId, DomainId, ErrorCode, Executor,
-    FailAttemptRequest, JobId, JobInputs, JobTrigger, LogFrame, PipelineId, PipelineRevisionId,
-    PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt,
-    RegisterRunnerRequest, ResolvedTaskInputs, RunnerId, RunnerTool, RunnerToolCapability,
-    Sha256Digest, StartUploadRequest, StartUploadResponse, TaskId, TaskInputBindings,
-    TaskInputReference, UploadState, UsageOrigin, UsageUpdate, VerifyUploadRequest,
+    FailAttemptRequest, JobId, JobInputs, JobTrigger, LogFrame, PendingAttemptUpload, PipelineId,
+    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
+    PromptSnapshotPrompt, RegisterRunnerRequest, ResolvedTaskInputs, RunnerId, RunnerTool,
+    RunnerToolCapability, Sha256Digest, StartUploadRequest, StartUploadResponse, TaskId,
+    TaskInputBindings, TaskInputReference, UploadState, UsageOrigin, UsageUpdate,
+    VerifyUploadRequest,
 };
 use flori_pipeline::compile;
 use flori_store::{
@@ -654,6 +655,27 @@ async fn attempt_upload_recovers_cursor_and_rename_crash_windows() {
         ),
         ErrorCode::ArtifactUndeclared
     );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .start_attempt_upload(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &StartUploadRequest {
+                        name: "original".into(),
+                        media_type: "text/html".into(),
+                        size_bytes: 3,
+                        sha256: digest("abc"),
+                    },
+                    11,
+                )
+                .await,
+        ),
+        ErrorCode::InvalidRequest
+    );
+    assert!(!database.directory.join("artifacts/.staging").exists());
     let request = StartUploadRequest {
         name: "original".into(),
         media_type: "application/pdf".into(),
@@ -671,6 +693,43 @@ async fn attempt_upload_recovers_cursor_and_rename_crash_windows() {
         )
         .await
         .expect("start upload");
+    let original_commit: String = sqlx::query_scalar("SELECT commit_json FROM uploads WHERE id=?")
+        .bind(upload.upload_id.to_string())
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("commit JSON");
+    let mut forged =
+        serde_json::from_str::<PendingAttemptUpload>(&original_commit).expect("pending upload");
+    forged.artifact.media_type = "text/html".into();
+    sqlx::query("UPDATE uploads SET commit_json=? WHERE id=?")
+        .bind(serde_json::to_string(&forged).expect("forged pending upload"))
+        .bind(upload.upload_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("forge persisted media type");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .complete_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &CompleteAttemptRequest {
+                        manifest_sha256: digest("unused"),
+                    },
+                    12,
+                )
+                .await,
+        ),
+        ErrorCode::CorruptState
+    );
+    sqlx::query("UPDATE uploads SET commit_json=? WHERE id=?")
+        .bind(original_commit)
+        .bind(upload.upload_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("restore persisted upload");
     assert_eq!(
         store_error_code(
             foundation
@@ -1151,6 +1210,35 @@ async fn authenticated_completion_checks_required_usage_manifest_and_nas() {
             .state,
         AttemptState::Succeeded
     );
+    sqlx::query(
+        "UPDATE artifacts SET media_type='text/html' WHERE attempt_id=? AND name='original'",
+    )
+    .bind(claim.exec_id.to_string())
+    .execute(&foundation.pool)
+    .await
+    .expect("forge committed media type");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .complete_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &request,
+                    23,
+                )
+                .await,
+        ),
+        ErrorCode::CorruptState
+    );
+    sqlx::query(
+        "UPDATE artifacts SET media_type='application/pdf' WHERE attempt_id=? AND name='original'",
+    )
+    .bind(claim.exec_id.to_string())
+    .execute(&foundation.pool)
+    .await
+    .expect("restore committed media type");
     assert_eq!(
         foundation
             .store
@@ -1159,7 +1247,7 @@ async fn authenticated_completion_checks_required_usage_manifest_and_nas() {
                 foundation.runner_id,
                 claim.exec_id,
                 &request,
-                23,
+                24,
             )
             .await
             .expect("idempotent complete")
@@ -1177,7 +1265,7 @@ async fn authenticated_completion_checks_required_usage_manifest_and_nas() {
                     &CompleteAttemptRequest {
                         manifest_sha256: digest("different"),
                     },
-                    24,
+                    25,
                 )
                 .await,
         ),
