@@ -1,22 +1,19 @@
 use std::{
-    collections::BTreeMap,
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc,
+    time::Duration,
 };
 
 use flori_core::{
-    AiAudit, AiModelCapability, AiTool, ArtifactId, ArtifactKind, ArtifactManifestEntry,
-    CreateRunnerSlot, DocumentStructure, DomainId, ErrorCode, EvidenceId, Executor, JobId,
-    JobInputs, JobTrigger, LogFrame, PipelineId, PipelineRevisionId, PromptSnapshot,
-    PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt, RegisterRunnerRequest,
-    RerunJobRequest, RerunMode, ResolvedTaskInputs, RunnerTool, RunnerToolCapability, Sha256Digest,
-    SourceInputId, SourceKind, StartUploadRequest, TaskClaim, TaskLogLevel, TaskLogLine,
-    UsageOrigin, UsageUpdate, VerifyUploadRequest,
+    AiAudit, AiModelCapability, AiRunnerSelection, AiTool, ArtifactId, ArtifactKind,
+    ArtifactManifestEntry, CreateRunnerSlot, CreatedJob, DocumentStructure, DomainId, ErrorCode,
+    EvidenceId, Executor, FailAttemptRequest, JobId, JobInputs, JobTrigger, LogFrame, PipelineId,
+    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
+    PromptSnapshotPrompt, RegisterRunnerRequest, RerunJobRequest, RerunMode, ResolvedTaskInputs,
+    RunnerId, RunnerTool, RunnerToolCapability, Sha256Digest, SourceInputId, SourceKind,
+    StartUploadRequest, TaskClaim, TaskLogLevel, TaskLogLine, UsageOrigin, UsageUpdate,
+    VerifyUploadRequest,
 };
-use flori_pipeline::{Compilation, compile};
+use flori_pipeline::compile;
 use flori_runner::{DaemonConfig, RunnerClient, manifest_sha256, run_ai_daemon};
 use flori_store::{
     CreateJob, CreateSource, Store,
@@ -33,16 +30,13 @@ use tokio::{
 
 struct Harness {
     root: PathBuf,
-    store: Arc<Store>,
     pool: SqlitePool,
-    artifacts: Arc<NasArtifactStore>,
     client: RunnerClient,
-    compilation: Compilation,
-    revision_id: PipelineRevisionId,
     source_id: flori_core::SourceId,
     address: std::net::SocketAddr,
     runner_token: String,
     other_runner_token: String,
+    other_runner_id: RunnerId,
     source_input_id: SourceInputId,
     source_input_path: String,
     wrong_source_input_id: SourceInputId,
@@ -73,6 +67,8 @@ impl Harness {
             .bind(domain_id.to_string()).bind(format!("domain-{domain_id}")).bind("Domain").execute(&pool).await.expect("domain");
         sqlx::query("INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES('document_note','note',?,0)")
             .bind(digest(b"note").as_str()).execute(&pool).await.expect("prompt");
+        sqlx::query("INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES('document_translate','translate',?,0)")
+            .bind(digest(b"translate").as_str()).execute(&pool).await.expect("translate prompt");
         let yaml = include_bytes!("../../../pipelines/pdf.yml");
         let compilation = compile("pdf", yaml).expect("compile pipeline");
         let pipeline_id = PipelineId::generate();
@@ -214,24 +210,20 @@ impl Harness {
             .expect("register");
         let runner_token = registered.token;
         let client = RunnerClient::new(&base, runner_token.clone()).expect("client");
-        let other_runner_token =
-            RunnerClient::register(&base, "other-registration", &capabilities())
-                .await
-                .expect("register other runner")
-                .token;
+        let other_runner = RunnerClient::register(&base, "other-registration", &capabilities())
+            .await
+            .expect("register other runner");
+        let other_runner_token = other_runner.token;
         (
             Self {
                 root,
-                store,
                 pool,
-                artifacts,
                 client,
-                compilation,
-                revision_id,
                 source_id,
                 address,
                 runner_token,
                 other_runner_token,
+                other_runner_id: other_runner.runner_id,
                 source_input_id,
                 source_input_path: source_relative_path,
                 wrong_source_input_id,
@@ -300,15 +292,6 @@ fn write_artifact(root: &std::path::Path, relative: &str, bytes: &[u8]) {
     let path = root.join("artifacts").join(relative);
     fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact directory");
     fs::write(path, bytes).expect("artifact bytes");
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time")
-        .as_millis()
-        .try_into()
-        .expect("timestamp")
 }
 
 async fn upload(
@@ -462,6 +445,45 @@ async fn run_runner_task(client: &RunnerClient, claim: &TaskClaim) {
         .complete(claim.exec_id, manifest)
         .await
         .expect("complete");
+}
+
+async fn fail_runner_task(client: &RunnerClient, claim: &TaskClaim, error_code: ErrorCode) {
+    let line = serde_json::to_string(&TaskLogLine {
+        timestamp_ms: 1,
+        level: TaskLogLevel::Error,
+        message: format!("{} failed", claim.task_key),
+    })
+    .expect("failure log line");
+    client
+        .append_logs(
+            claim.exec_id,
+            &[LogFrame {
+                sequence: 1,
+                sha256: digest(line.as_bytes()),
+                line,
+            }],
+        )
+        .await
+        .expect("append failure log");
+    let declaration = claim
+        .output_declarations
+        .iter()
+        .find(|output| output.kind == ArtifactKind::AiAudit)
+        .expect("AI audit declaration");
+    let (media, bytes) = artifact_body(claim, ArtifactKind::AiAudit, None);
+    let entry = upload(client, claim, &declaration.name, media, &bytes).await;
+    let manifest = manifest_sha256(claim.job_id, claim.task_id, claim.exec_id, vec![entry])
+        .expect("failure manifest");
+    client
+        .fail(
+            claim.exec_id,
+            &FailAttemptRequest {
+                error_code,
+                manifest_sha256: Some(manifest),
+            },
+        )
+        .await
+        .expect("fail Task");
 }
 
 async fn note_evidence(
@@ -905,26 +927,15 @@ async fn pdf_control_plane_executes_and_reruns_over_real_http_sqlite_and_nas() {
     let first_ids = task_ids(&harness.pool, first).await;
     execute_and_publish(&harness, first).await;
     assert_published(&harness, first, 1).await;
-    let domain_id = snapshot_domain(&harness.pool).await;
-    let second = harness
-        .store
-        .create_job(
-            CreateJob {
-                source_id: harness.source_id,
-                pipeline_revision_id: harness.revision_id,
-                trigger: JobTrigger::PipelineRerun,
-                rerun_of_job_id: Some(first),
-                prompt_snapshot_id: PromptSnapshotId::generate(),
-                prompt_snapshot: &snapshot(domain_id),
-                request_key: "pipeline-rerun",
-                request_sha256: &"c".repeat(64),
-                inputs: JobInputs { translate: false },
-                created_at_ms: now_ms(),
-            },
-            &harness.compilation,
-        )
-        .await
-        .expect("pipeline rerun");
+
+    let pipeline = RerunJobRequest {
+        request_key: "pipeline-rerun".into(),
+        mode: RerunMode::Pipeline,
+        from_task_key: None,
+        ai_selection: None,
+    };
+    let second = rerun_http(&harness, first, &pipeline).await;
+    assert_eq!(rerun_http(&harness, first, &pipeline).await, second);
     let second_ids = task_ids(&harness.pool, second).await;
     assert!(
         first_ids
@@ -940,22 +951,100 @@ async fn pdf_control_plane_executes_and_reruns_over_real_http_sqlite_and_nas() {
             .await
             .expect("publication pointers");
     assert_eq!(pointers, (second.to_string(), first.to_string()));
-    let from_note = harness
-        .store
-        .rerun_from_task(
-            &harness.artifacts,
-            second,
-            &RerunJobRequest {
-                request_key: "note-rerun".into(),
-                mode: RerunMode::FromTask,
-                from_task_key: Some("note".into()),
-                ai_selection: None,
-            },
-            &harness.compilation,
-            now_ms(),
-        )
+
+    let translate = rerun_http(
+        &harness,
+        second,
+        &RerunJobRequest {
+            request_key: "translate-rerun".into(),
+            mode: RerunMode::FromTask,
+            from_task_key: Some("translate".into()),
+            ai_selection: None,
+        },
+    )
+    .await;
+    let translated_inputs: String = sqlx::query_scalar("SELECT inputs_json FROM jobs WHERE id=?")
+        .bind(translate.to_string())
+        .fetch_one(&harness.pool)
         .await
-        .expect("from task rerun");
+        .expect("translation inputs");
+    assert_eq!(translated_inputs, r#"{"translate":true}"#);
+    let claim = harness
+        .client
+        .poll()
+        .await
+        .expect("poll translate")
+        .expect("translate claim");
+    assert_eq!(
+        (claim.job_id, claim.task_key.as_str()),
+        (translate, "translate")
+    );
+    fail_runner_task(&harness.client, &claim, ErrorCode::ExecutorFailed).await;
+    let failed: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=?")
+        .bind(translate.to_string())
+        .fetch_one(&harness.pool)
+        .await
+        .expect("failed translation Job");
+    assert_eq!(failed, "failed");
+    let unchanged: (String, String) =
+        sqlx::query_as("SELECT current_job_id,previous_job_id FROM sources WHERE id=?")
+            .bind(harness.source_id.to_string())
+            .fetch_one(&harness.pool)
+            .await
+            .expect("unchanged publication pointers");
+    assert_eq!(unchanged, (second.to_string(), first.to_string()));
+
+    sqlx::query("UPDATE sources SET current_job_id=?,previous_job_id=NULL WHERE id=?")
+        .bind(first.to_string())
+        .bind(harness.source_id.to_string())
+        .execute(&harness.pool)
+        .await
+        .expect("drift current");
+    let drift = post_json(
+        &harness,
+        &format!("/api/v1/jobs/{second}/rerun"),
+        &serde_json::to_string(&RerunJobRequest {
+            request_key: "current-drift".into(),
+            mode: RerunMode::FromTask,
+            from_task_key: Some("note".into()),
+            ai_selection: None,
+        })
+        .expect("rerun JSON"),
+    )
+    .await;
+    assert_error(&drift, 409, ErrorCode::RerunBoundaryInvalid);
+    sqlx::query("UPDATE sources SET current_job_id=?,previous_job_id=? WHERE id=?")
+        .bind(second.to_string())
+        .bind(first.to_string())
+        .bind(harness.source_id.to_string())
+        .execute(&harness.pool)
+        .await
+        .expect("restore current");
+
+    let runner_revision: i64 = sqlx::query_scalar("SELECT config_revision FROM runners WHERE id=?")
+        .bind(harness.other_runner_id.to_string())
+        .fetch_one(&harness.pool)
+        .await
+        .expect("other Runner revision");
+    let from_note = rerun_http(
+        &harness,
+        second,
+        &RerunJobRequest {
+            request_key: "note-rerun".into(),
+            mode: RerunMode::FromTask,
+            from_task_key: Some("note".into()),
+            ai_selection: Some(AiRunnerSelection {
+                task_key: "note".into(),
+                runner_id: harness.other_runner_id,
+                model: "model-a".into(),
+                effort: "high".into(),
+                runner_config_revision: runner_revision
+                    .try_into()
+                    .expect("nonnegative Runner revision"),
+            }),
+        },
+    )
+    .await;
     let states: BTreeMap<String, String> =
         sqlx::query_as("SELECT task_key,state FROM tasks WHERE job_id=?")
             .bind(from_note.to_string())
@@ -976,16 +1065,76 @@ async fn pdf_control_plane_executes_and_reruns_over_real_http_sqlite_and_nas() {
     .await
     .expect("materialized artifact");
     assert_eq!(materialized, 2);
+    let selected: (String, String, String, i64) = sqlx::query_as(
+        "SELECT pinned_runner_id,selected_model,selected_effort,runner_config_revision \
+         FROM tasks WHERE job_id=? AND task_key='note'",
+    )
+    .bind(from_note.to_string())
+    .fetch_one(&harness.pool)
+    .await
+    .expect("selected AI Runner");
+    assert_eq!(
+        selected,
+        (
+            harness.other_runner_id.to_string(),
+            "model-a".into(),
+            "high".into(),
+            runner_revision,
+        )
+    );
+
+    let conflict = post_json(
+        &harness,
+        &format!("/api/v1/jobs/{first}/rerun"),
+        r#"{"request_key":"pipeline-rerun","mode":"from_task","from_task_key":"note","ai_selection":null}"#,
+    )
+    .await;
+    assert_error(&conflict, 409, ErrorCode::IdempotencyConflict);
+    let unknown = post_json(
+        &harness,
+        &format!("/api/v1/jobs/{first}/rerun"),
+        &format!(
+            r#"{{"request_key":"unknown-field","mode":"pipeline","from_task_key":null,"ai_selection":null,"source_id":"{}"}}"#,
+            harness.source_id
+        ),
+    )
+    .await;
+    assert_error(&unknown, 400, ErrorCode::InvalidRequest);
+    let missing = post_json(
+        &harness,
+        &format!("/api/v1/jobs/{}/rerun", JobId::generate()),
+        r#"{"request_key":"missing-job","mode":"pipeline","from_task_key":null,"ai_selection":null}"#,
+    )
+    .await;
+    assert_error(&missing, 404, ErrorCode::NotFound);
     harness.close().await;
 }
 
-async fn snapshot_domain(pool: &SqlitePool) -> DomainId {
-    sqlx::query_scalar::<_, String>("SELECT id FROM domains LIMIT 1")
-        .fetch_one(pool)
-        .await
-        .expect("domain ID")
-        .parse()
-        .expect("typed domain ID")
+async fn rerun_http(harness: &Harness, base_job_id: JobId, request: &RerunJobRequest) -> JobId {
+    let response = post_json(
+        harness,
+        &format!("/api/v1/jobs/{base_job_id}/rerun"),
+        &serde_json::to_string(request).expect("rerun request JSON"),
+    )
+    .await;
+    assert_eq!(status(&response), 200);
+    serde_json::from_slice::<CreatedJob>(body(&response))
+        .expect("created Job response")
+        .job_id
+}
+
+async fn post_json(harness: &Harness, path: &str, json: &str) -> Vec<u8> {
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         X-Flori-Protocol: 1\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{json}",
+        json.len()
+    );
+    let mut stream = TcpStream::connect(harness.address).await.expect("connect");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.expect("read");
+    response
 }
 
 async fn content_get(harness: &Harness, path: &str, token: &str, range: Option<&str>) -> Vec<u8> {

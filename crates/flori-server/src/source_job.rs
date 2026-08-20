@@ -2,8 +2,8 @@ use std::fmt::Write as _;
 
 use axum::{Json, Router, extract::State, http::Uri, routing::post};
 use flori_core::{
-    CreateJobRequest, CreateRemoteSource, CreatedJob, CreatedSource, ErrorCode, Sha256Digest,
-    SourceId, SourceKind,
+    CreateJobRequest, CreateRemoteSource, CreatedJob, CreatedSource, ErrorCode, JobId,
+    RerunJobRequest, Sha256Digest, SourceId, SourceKind,
 };
 use flori_store::CreateSource;
 use sha2::{Digest, Sha256};
@@ -18,6 +18,19 @@ pub(super) fn routes() -> Router<HttpState> {
     Router::new()
         .route("/api/v1/sources", post(create_source))
         .route("/api/v1/sources/{source_id}/jobs", post(create_job))
+        .route("/api/v1/jobs/{job_id}/rerun", post(rerun_job))
+}
+
+async fn rerun_job(
+    State(state): State<HttpState>,
+    StrictPath(job_id): StrictPath<JobId>,
+    StrictJson(request): StrictJson<RerunJobRequest>,
+) -> Result<Json<CreatedJob>, HttpError> {
+    let job_id = state
+        .store
+        .rerun_requested_job(&state.artifacts, job_id, &request, super::runner::now_ms()?)
+        .await?;
+    Ok(Json(CreatedJob { job_id }))
 }
 
 async fn create_source(
