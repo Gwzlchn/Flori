@@ -1,8 +1,7 @@
 use std::{ffi::OsString, path::Path, time::Duration};
 
 use flori_core::{
-    AiResultEnvelope, AiTool, ErrorCode, Executor, TaskClaim, UsageOrigin, UsageUpdate,
-    ai_result_schema_json,
+    AiResultEnvelope, AiTool, ErrorCode, TaskClaim, UsageOrigin, UsageUpdate, ai_result_schema_json,
 };
 use sha2::{Digest, Sha256};
 use tokio::{fs, sync::watch};
@@ -236,8 +235,8 @@ mod tests {
     };
 
     use flori_core::{
-        AiResultSchema, ArtifactId, ArtifactKind, AttemptId, JobId, RequestId, ResolvedArtifact,
-        ResolvedPrompt, ResolvedTaskInputs, SecretInputs, TaskId, TermsManifest,
+        AiResultSchema, ArtifactId, ArtifactKind, AttemptId, Executor, JobId, RequestId,
+        ResolvedArtifact, ResolvedPrompt, ResolvedTaskInputs, SecretInputs, TaskId, TermsManifest,
         TermsManifestSchema,
     };
 
@@ -406,6 +405,8 @@ mod tests {
             home: root.0.join("home"),
             tool_config_home: root.0.join("config"),
             work_root: root.0.clone(),
+            model: "model-1".into(),
+            effort: "high".into(),
             renew_interval: Duration::from_secs(1),
             max_output_bytes: 1024 * 1024,
         };

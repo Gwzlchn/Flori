@@ -6,6 +6,7 @@ mod ai;
 mod attempt;
 mod client;
 mod content;
+mod daemon;
 mod digest;
 mod spool;
 mod upload;
@@ -24,5 +25,6 @@ pub use ai::{
     build_codex_command, parse_codex_output,
 };
 pub use client::{ClientError, RunnerClient};
+pub use daemon::{DaemonConfig, run as run_ai_daemon};
 pub use spool::{Spool, SpoolError, SpoolUpload};
 pub use upload::manifest_sha256;

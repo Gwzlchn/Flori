@@ -18,6 +18,8 @@ pub struct DaemonConfig {
     pub home: PathBuf,
     pub tool_config_home: PathBuf,
     pub work_root: PathBuf,
+    pub model: String,
+    pub effort: String,
     pub renew_interval: Duration,
     pub max_output_bytes: usize,
 }
@@ -44,19 +46,6 @@ pub async fn run(
             },
         }
     }
-}
-
-pub async fn run_claim(
-    client: &RunnerClient,
-    config: &DaemonConfig,
-    claim: TaskClaim,
-    cancel: &mut watch::Receiver<bool>,
-) -> Result<(), ErrorCode> {
-    validate(config)?;
-    fs::create_dir_all(&config.work_root)
-        .await
-        .map_err(|_| ErrorCode::StorageUnavailable)?;
-    supervise(client, config, claim, cancel).await
 }
 
 async fn supervise(
@@ -113,7 +102,7 @@ async fn execute_inner(
     workspace: PathBuf,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), ErrorCode> {
-    validate_claim(claim)?;
+    validate_claim(config, claim)?;
     log::started(client, claim).await?;
     let prepared = match input::prepare(
         client,
@@ -235,6 +224,8 @@ fn validate(config: &DaemonConfig) -> Result<(), ErrorCode> {
         || !config.home.is_absolute()
         || !config.tool_config_home.is_absolute()
         || !config.work_root.is_absolute()
+        || !identifier(&config.model)
+        || !identifier(&config.effort)
         || config.renew_interval.is_zero()
         || config.max_output_bytes == 0
     {
@@ -243,12 +234,20 @@ fn validate(config: &DaemonConfig) -> Result<(), ErrorCode> {
     Ok(())
 }
 
-fn validate_claim(claim: &TaskClaim) -> Result<(), ErrorCode> {
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn validate_claim(config: &DaemonConfig, claim: &TaskClaim) -> Result<(), ErrorCode> {
     if !matches!(
         claim.executor,
         Executor::AiDocumentTranslate | Executor::AiDocumentNote | Executor::AiVideoNote
-    ) || claim.model.is_none()
-        || claim.effort.is_none()
+    ) || claim.model.as_deref() != Some(config.model.as_str())
+        || claim.effort.as_deref() != Some(config.effort.as_str())
         || claim.secret_inputs.credential.is_some()
         || claim.timeout_ms == 0
     {
