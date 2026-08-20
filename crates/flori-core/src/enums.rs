@@ -7,7 +7,7 @@ macro_rules! string_enums {
             #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, ToSchema)]
             #[serde(rename_all = "snake_case")]
             pub enum $name {
-                $($(#[serde(rename = $wire)])? $variant),+
+                $($(#[serde(rename = $wire)])? $(#[schema(rename = $wire)])? $variant),+
             }
         )+
     };

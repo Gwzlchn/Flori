@@ -9,18 +9,23 @@ use crate::{
     ArtifactRetention, ArtifactWhen, AttemptAck, AttemptId, AttemptState, CollectionId,
     CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId, CreateJobRequest,
     CreateRemoteSource, CreateRunnerSlot, CreateRunnerSlotResponse, CreatedJob, CreatedSource,
-    CredentialId, CredentialKind, DomainId, ErrorBody, ErrorCode, ErrorResponse, EvidenceId,
-    EvidenceLocatorKind, Executor, FailAttemptRequest, GlossaryTermId, GlossaryTermState,
-    JobEventKind, JobEventScope, JobId, JobInputs, JobState, JobTrigger, LogCursor, LogFrame,
-    PipelineId, PipelineRevisionId, PromptSnapshotId, QrSessionId, RegisterRunnerRequest,
+    CredentialId, CredentialKind, DocumentFigure, DocumentPage, DocumentSection, DocumentStructure,
+    DocumentStructureSchema, DocumentTable, DocumentTextBlock, DomainId, ErrorBody, ErrorCode,
+    ErrorResponse, EvidenceEntry, EvidenceId, EvidenceLocator, EvidenceLocatorKind,
+    EvidenceManifest, EvidenceManifestSchema, Executor, FailAttemptRequest, GlossaryTermId,
+    GlossaryTermState, JobEventKind, JobEventScope, JobId, JobInputs, JobState, JobTrigger,
+    LogCursor, LogFrame, PartsManifest, PartsManifestSchema, PdfRect, PipelineId,
+    PipelineRevisionId, PromptSnapshotId, QrSessionId, RegisterRunnerRequest,
     RegisterRunnerResponse, RenewLeaseResponse, RequestId, RerunJobRequest, RerunMode,
     ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource, ResolvedSourceInput,
     ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool, RunnerToolCapability, SearchChunkId,
     SecretCredential, SecretInputs, Sha256Digest, SourceId, SourceInputId, SourceKind,
-    StartUploadRequest, StartUploadResponse, SystemHealthStatus, TaskClaim, TaskId, TaskLogEvent,
-    TaskLogLevel, TaskLogLine, TaskState, TermEntry, TermsManifest, TermsManifestSchema,
-    UploadCursor, UploadId, UploadOwnerKind, UploadState, UsageAck, UsageOrigin, UsageUpdate,
-    VerifyUploadRequest, VerifyUploadResponse,
+    StartUploadRequest, StartUploadResponse, SubscriptionItem, SubscriptionManifest,
+    SubscriptionManifestSchema, SystemHealthStatus, TaskClaim, TaskId, TaskLogEvent, TaskLogLevel,
+    TaskLogLine, TaskState, TermEntry, TermsManifest, TermsManifestSchema, TranscriptCue,
+    TranscriptManifest, TranscriptSchema, UploadCursor, UploadId, UploadOwnerKind, UploadState,
+    UsageAck, UsageOrigin, UsageUpdate, VerifyUploadRequest, VerifyUploadResponse, VideoKeyframe,
+    VideoPart,
 };
 
 #[derive(OpenApi)]
@@ -78,6 +83,28 @@ use crate::{
     ArtifactManifest,
     ArtifactManifestEntry,
     Sha256Digest,
+    PdfRect,
+    VideoKeyframe,
+    EvidenceLocator,
+    EvidenceEntry,
+    EvidenceManifestSchema,
+    EvidenceManifest,
+    DocumentStructureSchema,
+    DocumentPage,
+    DocumentSection,
+    DocumentTextBlock,
+    DocumentFigure,
+    DocumentTable,
+    DocumentStructure,
+    TranscriptSchema,
+    TranscriptCue,
+    TranscriptManifest,
+    PartsManifestSchema,
+    VideoPart,
+    PartsManifest,
+    SubscriptionManifestSchema,
+    SubscriptionItem,
+    SubscriptionManifest,
     RunnerToolCapability,
     AiModelCapability,
     ResolvedArtifact,
@@ -176,6 +203,7 @@ mod tests {
         assert!(schemas.contains_key("ArtifactManifestSchema"));
         assert!(schemas.contains_key("ArtifactManifest"));
         assert!(schemas.contains_key("ArtifactManifestEntry"));
+        assert!(schemas.contains_key("EvidenceLocator"));
         assert!(schemas.contains_key("Sha256Digest"));
         assert!(schemas.contains_key("TaskClaim"));
         assert!(schemas.contains_key("CompleteAttemptRequest"));
@@ -184,6 +212,14 @@ mod tests {
         );
         assert!(json.contains("\n  \"openapi\""));
         assert!(json.contains("^[0-9a-f]{64}$"));
+        assert!(json.contains(r#""core.validate""#));
+        assert!(!json.contains(r#""core_validate""#));
+        let locator =
+            serde_json::to_string(&schemas["EvidenceLocator"]).expect("serialize locator schema");
+        assert_eq!(
+            locator.matches(r#""additionalProperties":false"#).count(),
+            6
+        );
     }
 
     #[test]
