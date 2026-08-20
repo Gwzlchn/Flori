@@ -7,6 +7,7 @@ use crate::artifact::NasArtifactStore;
 
 use super::StoreError;
 
+mod detail;
 mod query;
 
 struct ArtifactText {
