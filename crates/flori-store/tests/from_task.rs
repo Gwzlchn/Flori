@@ -683,12 +683,27 @@ async fn from_task_materializes_parallel_branches_and_resolver_enforces_origin_s
             ("translate", "translation"),
         ]
     );
+    let new_original: flori_core::ArtifactId = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM artifacts WHERE job_id=? AND kind='source_original'",
+    )
+    .bind(job_id.to_string())
+    .fetch_one(&foundation.pool)
+    .await
+    .expect("materialized source original")
+    .parse()
+    .expect("typed source original");
     for (task, name, relative_path) in &materialized {
         let (_, expected) = &foundation.source_files[&format!("{task}/{name}")];
-        assert_eq!(
-            fs::read(foundation.artifact_root.join(relative_path)).expect("materialized bytes"),
-            *expected
-        );
+        let actual =
+            fs::read(foundation.artifact_root.join(relative_path)).expect("materialized bytes");
+        if name == "structure" {
+            let document: flori_core::DocumentStructure =
+                serde_json::from_slice(&actual).expect("rewritten document structure");
+            assert_eq!(document.source_artifact_id, new_original);
+            assert_ne!(actual, *expected);
+        } else {
+            assert_eq!(actual, *expected);
+        }
     }
     let runner_id = register_pdf_runner(&foundation, "resolver-runner").await;
     let acquire_task: String =

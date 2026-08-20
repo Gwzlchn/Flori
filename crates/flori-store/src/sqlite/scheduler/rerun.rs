@@ -51,6 +51,7 @@ impl Store {
         {
             let validated = build_plan(
                 &mut transaction,
+                artifacts,
                 base_job_id,
                 request,
                 compilation,
@@ -63,6 +64,7 @@ impl Store {
         } else {
             let planned = build_plan(
                 &mut transaction,
+                artifacts,
                 base_job_id,
                 request,
                 compilation,
@@ -107,6 +109,7 @@ impl Store {
             .ok_or_else(corrupt)?;
         let validated = build_plan(
             &mut transaction,
+            artifacts,
             base_job_id,
             request,
             compilation,

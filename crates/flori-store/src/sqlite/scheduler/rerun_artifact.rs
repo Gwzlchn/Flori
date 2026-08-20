@@ -8,13 +8,14 @@ use flori_core::{
 use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 
-use crate::artifact::{UploadRecord, task_artifact_path};
+use crate::artifact::{NasArtifactStore, task_artifact_path};
 
-use super::super::StoreError;
+use super::{super::StoreError, rerun_rewrite::freeze_rewritten_metadata};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn plan_artifacts(
     transaction: &mut Transaction<'_, Sqlite>,
+    artifacts: &NasArtifactStore,
     source_id: SourceId,
     base_job_id: JobId,
     job_id: JobId,
@@ -126,6 +127,7 @@ pub(super) async fn plan_artifacts(
         }
     }
     planned.sort_by(|left, right| (left.task_id, &left.name).cmp(&(right.task_id, &right.name)));
+    freeze_rewritten_metadata(transaction, artifacts, tasks, &mut planned).await?;
     if reuse.is_some_and(|artifacts| artifacts.len() != planned.len()) {
         return Err(corrupt());
     }
@@ -168,26 +170,6 @@ fn parse_retention(value: &str) -> Result<ArtifactRetention, StoreError> {
 
 pub(super) fn to_u64(value: i64) -> Result<u64, StoreError> {
     value.try_into().map_err(|_| corrupt())
-}
-
-pub(in crate::sqlite) fn source_record(
-    target: &UploadRecord,
-    source_path: &str,
-) -> Result<UploadRecord, StoreError> {
-    let mut source = UploadRecord::new(
-        UploadId::generate(),
-        "source",
-        source_path,
-        target.expected_size_bytes(),
-        target.expected_sha256().clone(),
-        "source",
-        target.expected_size_bytes(),
-    )
-    .map_err(|_| corrupt())?;
-    source
-        .restore_progress(target.expected_size_bytes(), UploadState::Moved)
-        .map_err(|_| corrupt())?;
-    Ok(source)
 }
 
 pub(super) fn source_visible(

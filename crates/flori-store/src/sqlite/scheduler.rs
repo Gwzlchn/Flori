@@ -13,6 +13,8 @@ mod rerun_artifact;
 mod rerun_commit;
 mod rerun_copy;
 mod rerun_plan;
+mod rerun_record;
+mod rerun_rewrite;
 mod snapshot;
 mod source;
 mod validate;
@@ -21,7 +23,6 @@ mod wire;
 
 pub(crate) use attempt::{finish_failure, finish_success};
 pub use job::CreateJob;
-pub(in crate::sqlite) use rerun_artifact::source_record;
-pub(in crate::sqlite) use rerun_copy::{load_records, validate_owner};
+pub(in crate::sqlite) use rerun_record::{load_records, validate_owner};
 pub use source::CreateSource;
 pub(crate) use wire::source_kind;

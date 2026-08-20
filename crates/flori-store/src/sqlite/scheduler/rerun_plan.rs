@@ -8,6 +8,8 @@ use flori_core::{
 use flori_pipeline::{Compilation, compile};
 use sqlx::{Row, Sqlite, Transaction};
 
+use crate::artifact::NasArtifactStore;
+
 use super::{
     super::StoreError,
     job::freeze_tasks,
@@ -20,6 +22,7 @@ use super::{
 
 pub(super) async fn build_plan(
     transaction: &mut Transaction<'_, Sqlite>,
+    artifacts: &NasArtifactStore,
     base_job_id: JobId,
     request: &RerunJobRequest,
     compilation: &Compilation,
@@ -145,6 +148,7 @@ pub(super) async fn build_plan(
         .collect::<Vec<_>>();
     let artifacts = plan_artifacts(
         transaction,
+        artifacts,
         source_id,
         base_job_id,
         job_id,

@@ -60,7 +60,7 @@ pub(super) async fn reconcile(
         if target_exists != 0 {
             return Err(corrupt());
         }
-        let (target, source_path) = scheduler::load_records(
+        let (target, source) = scheduler::load_records(
             &mut transaction,
             &pending,
             artifact,
@@ -69,7 +69,6 @@ pub(super) async fn reconcile(
         )
         .await?;
         if owner_valid {
-            let source = scheduler::source_record(&target, &source_path)?;
             if artifacts
                 .recovery_action(&source, true)
                 .map_err(|error| stored_artifact_error(error.code()))?
