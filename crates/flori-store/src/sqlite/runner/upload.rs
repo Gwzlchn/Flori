@@ -16,11 +16,13 @@ pub(super) struct ActiveUpload {
     pub pending: PendingAttemptUpload,
 }
 
-struct ActiveAttempt {
-    source_id: flori_core::SourceId,
-    job_id: flori_core::JobId,
-    task_id: flori_core::TaskId,
-    spec: CompiledTaskSpec,
+pub(super) struct ActiveAttempt {
+    pub source_id: flori_core::SourceId,
+    pub job_id: flori_core::JobId,
+    pub task_id: flori_core::TaskId,
+    pub spec: CompiledTaskSpec,
+    pub attempt_no: i64,
+    pub attempt_limit: i64,
 }
 
 impl Store {
@@ -201,15 +203,16 @@ pub(super) async fn load_upload(
     Ok(ActiveUpload { record, pending })
 }
 
-async fn active_attempt(
+pub(super) async fn active_attempt(
     transaction: &mut Transaction<'_, Sqlite>,
     runner_id: RunnerId,
     attempt_id: AttemptId,
     now_ms: i64,
 ) -> Result<ActiveAttempt, StoreError> {
     let row = sqlx::query(
-        "SELECT a.runner_id,a.state,a.lease_expires_at_ms,t.id AS task_id,t.state AS task_state, \
-         t.current_attempt_id,t.spec_json,j.id AS job_id,j.state AS job_state,j.source_id \
+        "SELECT a.runner_id,a.state,a.attempt_no,a.lease_expires_at_ms,t.id AS task_id, \
+         t.state AS task_state,t.current_attempt_id,t.spec_json,t.attempt_limit, \
+         j.id AS job_id,j.state AS job_state,j.source_id \
          FROM attempts a JOIN tasks t ON t.id=a.task_id JOIN jobs j ON j.id=t.job_id WHERE a.id=?",
     )
     .bind(attempt_id.to_string())
@@ -245,6 +248,8 @@ async fn active_attempt(
             .parse()
             .map_err(|_| corrupt())?,
         spec: serde_json::from_str(row.try_get("spec_json")?).map_err(|_| corrupt())?,
+        attempt_no: row.try_get("attempt_no")?,
+        attempt_limit: row.try_get("attempt_limit")?,
     })
 }
 

@@ -15,6 +15,27 @@ pub enum RecoveryAction {
 }
 
 impl NasArtifactStore {
+    pub fn discard(&self, upload: &UploadRecord) -> Result<(), ArtifactStoreError> {
+        match self.recovery_action(upload, false)? {
+            RecoveryAction::DeleteLedger => Ok(()),
+            RecoveryAction::DeleteFilesThenLedger => {
+                for relative in [
+                    upload.staging_relative_path(),
+                    Path::new(&upload.final_relative_path).to_path_buf(),
+                ] {
+                    let path = self.safe_path(&relative, false)?;
+                    match fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(ArtifactStoreError::with_code(ErrorCode::CorruptState)),
+        }
+    }
+
     pub fn move_verified(&self, upload: &UploadRecord) -> Result<(), ArtifactStoreError> {
         match self.recovery_action(upload, true)? {
             RecoveryAction::MoveVerified => {
@@ -48,6 +69,9 @@ impl NasArtifactStore {
             return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState));
         }
         let action = match (upload.state, has_staging, has_final) {
+            (UploadState::Receiving, false, false) if upload.received_bytes == 0 => {
+                RecoveryAction::ResumeReceiving
+            }
             (UploadState::Receiving, true, false) => {
                 let length = self.file_len(&staging)?;
                 if length != Some(upload.received_bytes)

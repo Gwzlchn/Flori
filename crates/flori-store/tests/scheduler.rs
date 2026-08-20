@@ -1,13 +1,13 @@
 use std::{fmt::Write, fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    AttemptId, CompiledTaskSpec, DomainId, ErrorCode, JobId, JobTrigger, PipelineId,
-    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
-    PromptSnapshotPrompt, RunnerId, Sha256Digest, SourceId, SourceKind, TaskId, TaskInputBindings,
-    TaskState,
+    ArtifactManifest, AttemptId, AttemptState, CompiledTaskSpec, CompleteAttemptRequest, DomainId,
+    ErrorCode, Executor, FailAttemptRequest, JobId, JobTrigger, PipelineId, PipelineRevisionId,
+    PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt, RunnerId,
+    Sha256Digest, SourceId, SourceKind, TaskId, TaskInputBindings, TaskInputReference, TaskState,
 };
 use flori_pipeline::compile;
-use flori_store::{CreateJob, CreateSource, Store};
+use flori_store::{CreateJob, CreateSource, Store, artifact::NasArtifactStore};
 use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 
@@ -104,8 +104,21 @@ async fn insert_job(pool: &SqlitePool, foundation: &Foundation, ordinal: u8) -> 
         .bind(JobId::generate().to_string()).bind("2".repeat(64)).bind(format!("job-{job_id}"))
         .bind("3".repeat(64)).bind(i64::from(ordinal))
         .execute(pool).await.expect("job");
-    sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms,ready_at_ms) VALUES(?,?,'work','document.acquire',?,'{}','ready',2,1000,0)")
-        .bind(work_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":[]}"#)
+    let spec = CompiledTaskSpec {
+        executor: Executor::DocumentAcquire,
+        needs: Vec::new(),
+        tags: Vec::new(),
+        retry: 1,
+        timeout_ms: 1_000,
+        artifacts: Vec::new(),
+    };
+    let bindings = TaskInputBindings::DocumentAcquire {
+        source: TaskInputReference::Source,
+    };
+    sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms,ready_at_ms) VALUES(?,?,'work','document.acquire',?,?,'ready',2,1000,0)")
+        .bind(work_id.to_string()).bind(job_id.to_string())
+        .bind(serde_json::to_string(&spec).expect("work spec"))
+        .bind(serde_json::to_string(&bindings).expect("work bindings"))
         .execute(pool).await.expect("work task");
     sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms) VALUES(?,?,'validate','core.validate',?,'{}','pending',1,1000)")
         .bind(validate_id.to_string()).bind(job_id.to_string()).bind(r#"{"executor":"core.validate","needs":["work"],"tags":[],"retry":0,"timeout_ms":1000,"artifacts":[]}"#)
@@ -123,6 +136,7 @@ async fn insert_job(pool: &SqlitePool, foundation: &Foundation, ordinal: u8) -> 
 
 async fn execute_and_publish(
     store: &Store,
+    artifacts: &NasArtifactStore,
     foundation: &Foundation,
     tasks: &JobTasks,
     now_ms: i64,
@@ -138,19 +152,34 @@ async fn execute_and_publish(
         )
         .await
         .expect("lease work");
+    let completion = completion(tasks, attempt_id);
     assert_eq!(
         store
-            .complete_attempt(attempt_id, now_ms + 1)
+            .complete_authenticated_attempt(
+                artifacts,
+                foundation.runner_id,
+                attempt_id,
+                &completion,
+                now_ms + 1,
+            )
             .await
-            .expect("complete work"),
-        TaskState::Succeeded
+            .expect("complete work")
+            .state,
+        AttemptState::Succeeded
     );
     assert_eq!(
         store
-            .complete_attempt(attempt_id, now_ms + 1)
+            .complete_authenticated_attempt(
+                artifacts,
+                foundation.runner_id,
+                attempt_id,
+                &completion,
+                now_ms + 1,
+            )
             .await
-            .expect("idempotent completion"),
-        TaskState::Succeeded
+            .expect("idempotent completion")
+            .state,
+        AttemptState::Succeeded
     );
     assert_eq!(
         store
@@ -175,19 +204,28 @@ async fn execute_and_publish(
         .expect("publish job");
 }
 
+fn completion(tasks: &JobTasks, attempt_id: AttemptId) -> CompleteAttemptRequest {
+    let manifest = ArtifactManifest::new(tasks.job_id, tasks.work_id, attempt_id, Vec::new());
+    CompleteAttemptRequest {
+        manifest_sha256: digest(&serde_json::to_string(&manifest).expect("manifest")),
+    }
+}
+
 #[tokio::test]
 async fn dag_progress_and_publish_keep_only_current_and_previous_pointers() {
     let database = TestDatabase::new();
     let store = Store::open(&database.path).await.expect("store");
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifacts");
     let pool = database.pool().await;
     let foundation = seed_foundation(&pool).await;
     let first = insert_job(&pool, &foundation, 1).await;
     let second = insert_job(&pool, &foundation, 2).await;
     let third = insert_job(&pool, &foundation, 3).await;
 
-    execute_and_publish(&store, &foundation, &first, 100).await;
-    execute_and_publish(&store, &foundation, &second, 200).await;
-    execute_and_publish(&store, &foundation, &third, 300).await;
+    execute_and_publish(&store, &artifacts, &foundation, &first, 100).await;
+    execute_and_publish(&store, &artifacts, &foundation, &second, 200).await;
+    execute_and_publish(&store, &artifacts, &foundation, &third, 300).await;
     store
         .publish_job(third.job_id, third.publish_id, AttemptId::generate(), 302)
         .await
@@ -218,6 +256,8 @@ async fn dag_progress_and_publish_keep_only_current_and_previous_pointers() {
 async fn transient_retry_and_terminal_failure_fence_late_attempts() {
     let database = TestDatabase::new();
     let store = Store::open(&database.path).await.expect("store");
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifacts");
     let pool = database.pool().await;
     let foundation = seed_foundation(&pool).await;
     let tasks = insert_job(&pool, &foundation, 1).await;
@@ -228,10 +268,20 @@ async fn transient_retry_and_terminal_failure_fence_late_attempts() {
         .expect("first lease");
     assert_eq!(
         store
-            .fail_attempt(first, ErrorCode::NetworkTemporary, "network", 20)
+            .fail_authenticated_attempt(
+                &artifacts,
+                foundation.runner_id,
+                first,
+                &FailAttemptRequest {
+                    error_code: ErrorCode::NetworkTemporary,
+                    manifest_sha256: None,
+                },
+                20,
+            )
             .await
-            .expect("retry"),
-        TaskState::Ready
+            .expect("retry")
+            .state,
+        AttemptState::Failed
     );
     let second = AttemptId::generate();
     store
@@ -240,14 +290,30 @@ async fn transient_retry_and_terminal_failure_fence_late_attempts() {
         .expect("second lease");
     assert_eq!(
         store
-            .fail_attempt(second, ErrorCode::ExecutorFailed, "bad input", 22)
+            .fail_authenticated_attempt(
+                &artifacts,
+                foundation.runner_id,
+                second,
+                &FailAttemptRequest {
+                    error_code: ErrorCode::ExecutorFailed,
+                    manifest_sha256: None,
+                },
+                22,
+            )
             .await
-            .expect("terminal failure"),
-        TaskState::Failed
+            .expect("terminal failure")
+            .state,
+        AttemptState::Failed
     );
 
     let late = store
-        .complete_attempt(first, 23)
+        .complete_authenticated_attempt(
+            &artifacts,
+            foundation.runner_id,
+            first,
+            &completion(&tasks, first),
+            23,
+        )
         .await
         .expect_err("old fence rejected");
     assert_eq!(late.code(), ErrorCode::StaleAttempt);

@@ -1,18 +1,19 @@
 use std::{fmt::Write, fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    AiModelCapability, AiTool, AiUsageState, ArtifactDeclaration, ArtifactKind, ArtifactWhen,
-    AttemptId, CompiledTaskSpec, CreateRunnerSlot, CredentialId, DomainId, ErrorCode, Executor,
-    JobId, JobTrigger, LogFrame, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
-    PromptSnapshotProfile, PromptSnapshotPrompt, RegisterRunnerRequest, ResolvedTaskInputs,
-    RunnerId, RunnerTool, RunnerToolCapability, Sha256Digest, StartUploadRequest, TaskId,
-    TaskInputBindings, TaskInputReference, UploadState, UsageOrigin, UsageUpdate,
-    VerifyUploadRequest,
+    AiModelCapability, AiTool, AiUsageId, AiUsageState, ArtifactDeclaration, ArtifactKind,
+    ArtifactManifest, ArtifactWhen, AttemptId, AttemptState, CompiledTaskSpec,
+    CompleteAttemptRequest, CreateRunnerSlot, CredentialId, DomainId, ErrorCode, Executor,
+    FailAttemptRequest, JobId, JobTrigger, LogFrame, PipelineId, PipelineRevisionId,
+    PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt,
+    RegisterRunnerRequest, ResolvedTaskInputs, RunnerId, RunnerTool, RunnerToolCapability,
+    Sha256Digest, StartUploadRequest, StartUploadResponse, TaskId, TaskInputBindings,
+    TaskInputReference, UploadState, UsageOrigin, UsageUpdate, VerifyUploadRequest,
 };
 use flori_pipeline::compile;
 use flori_store::{
     CreateJob, CreateSource, Store,
-    artifact::{NasArtifactStore, UploadRecord},
+    artifact::{NasArtifactStore, RecoveryAction, UploadRecord},
 };
 use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -500,9 +501,71 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
         )
         .await
         .expect("second log");
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
+    let log_upload = foundation
+        .store
+        .start_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &StartUploadRequest {
+                name: "log".into(),
+                media_type: "application/x-ndjson".into(),
+                size_bytes: 3,
+                sha256: digest("log"),
+            },
+            17,
+        )
+        .await
+        .expect("log upload");
     foundation
         .store
-        .fail_attempt(claim.exec_id, ErrorCode::ExecutorFailed, "failed", 17)
+        .append_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            log_upload.upload_id,
+            0,
+            &digest("log"),
+            b"log",
+            18,
+        )
+        .await
+        .expect("append log artifact");
+    foundation
+        .store
+        .verify_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            log_upload.upload_id,
+            &VerifyUploadRequest {
+                size_bytes: 3,
+                sha256: digest("log"),
+            },
+            19,
+        )
+        .await
+        .expect("verify log artifact");
+    let manifest = ArtifactManifest::new(
+        foundation.job_id,
+        foundation.task_id,
+        claim.exec_id,
+        vec![log_upload.artifact],
+    );
+    foundation
+        .store
+        .fail_authenticated_attempt(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &FailAttemptRequest {
+                error_code: ErrorCode::ExecutorFailed,
+                manifest_sha256: Some(digest(
+                    &serde_json::to_string(&manifest).expect("failure manifest"),
+                )),
+            },
+            20,
+        )
         .await
         .expect("finish attempt");
     assert_eq!(
@@ -512,7 +575,7 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
                 foundation.runner_id,
                 claim.exec_id,
                 &[frame(3, r#"{"message":"late"}"#)],
-                18,
+                21,
             )
             .await
             .expect_err("late log rejected")
@@ -635,6 +698,12 @@ async fn attempt_upload_recovers_cursor_and_rename_crash_windows() {
         100 * 1024 * 1024,
     )
     .expect("upload record");
+    assert_eq!(
+        artifacts
+            .recovery_action(&record, true)
+            .expect("ledger before first append"),
+        RecoveryAction::ResumeReceiving
+    );
     assert_eq!(
         artifacts
             .append_chunk(&record, 0, &digest("abc"), b"abc")
@@ -941,6 +1010,251 @@ async fn attempt_upload_enforces_wildcard_names_counts_sizes_and_fence() {
 }
 
 #[tokio::test]
+async fn authenticated_completion_checks_required_usage_manifest_and_nas() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database, &["media"]).await;
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
+    let claim = foundation
+        .store
+        .poll_and_claim(foundation.runner_id, 10, 100, "https://flori.example")
+        .await
+        .expect("poll")
+        .expect("claim");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .complete_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &CompleteAttemptRequest {
+                        manifest_sha256: manifest_digest(&foundation, claim.exec_id, Vec::new()),
+                    },
+                    11,
+                )
+                .await,
+        ),
+        ErrorCode::ArtifactUndeclared
+    );
+    let original = upload_bytes(
+        &foundation,
+        &artifacts,
+        claim.exec_id,
+        "original",
+        "application/pdf",
+        b"pdf",
+        12,
+    )
+    .await;
+    let log = upload_bytes(
+        &foundation,
+        &artifacts,
+        claim.exec_id,
+        "log",
+        "application/x-ndjson",
+        b"log",
+        15,
+    )
+    .await;
+    let expected = manifest_digest(&foundation, claim.exec_id, vec![&original, &log]);
+    sqlx::query(
+        "INSERT INTO ai_usage(id,job_id,task_id,attempt_id,invocation_key,state,tool,model, \
+         effort,created_at_ms) VALUES(?,?,?,?,?,'started','qoder_cli','test','high',18)",
+    )
+    .bind(AiUsageId::generate().to_string())
+    .bind(foundation.job_id.to_string())
+    .bind(foundation.task_id.to_string())
+    .bind(claim.exec_id.to_string())
+    .bind("open")
+    .execute(&foundation.pool)
+    .await
+    .expect("open usage");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .complete_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &CompleteAttemptRequest {
+                        manifest_sha256: expected.clone(),
+                    },
+                    19,
+                )
+                .await,
+        ),
+        ErrorCode::UsageConflict
+    );
+    sqlx::query("DELETE FROM ai_usage WHERE attempt_id=?")
+        .bind(claim.exec_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("close usage fixture");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .complete_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &CompleteAttemptRequest {
+                        manifest_sha256: digest("wrong"),
+                    },
+                    20,
+                )
+                .await,
+        ),
+        ErrorCode::DigestMismatch
+    );
+    let original_path = database
+        .directory
+        .join("artifacts")
+        .join(&original.artifact.relative_path);
+    fs::write(&original_path, b"bad").expect("mutate final artifact");
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .complete_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &CompleteAttemptRequest {
+                        manifest_sha256: expected.clone(),
+                    },
+                    21,
+                )
+                .await,
+        ),
+        ErrorCode::CorruptState
+    );
+    fs::write(&original_path, b"pdf").expect("restore final artifact");
+    let request = CompleteAttemptRequest {
+        manifest_sha256: expected,
+    };
+    assert_eq!(
+        foundation
+            .store
+            .complete_authenticated_attempt(
+                &artifacts,
+                foundation.runner_id,
+                claim.exec_id,
+                &request,
+                22,
+            )
+            .await
+            .expect("complete")
+            .state,
+        AttemptState::Succeeded
+    );
+    assert_eq!(
+        foundation
+            .store
+            .complete_authenticated_attempt(
+                &artifacts,
+                foundation.runner_id,
+                claim.exec_id,
+                &request,
+                23,
+            )
+            .await
+            .expect("idempotent complete")
+            .state,
+        AttemptState::Succeeded
+    );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .complete_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &CompleteAttemptRequest {
+                        manifest_sha256: digest("different"),
+                    },
+                    24,
+                )
+                .await,
+        ),
+        ErrorCode::DigestMismatch
+    );
+}
+
+#[tokio::test]
+async fn authenticated_failure_commits_only_always_artifacts() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database, &["media"]).await;
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
+    let claim = foundation
+        .store
+        .poll_and_claim(foundation.runner_id, 10, 100, "https://flori.example")
+        .await
+        .expect("poll")
+        .expect("claim");
+    let original = upload_bytes(
+        &foundation,
+        &artifacts,
+        claim.exec_id,
+        "original",
+        "application/pdf",
+        b"pdf",
+        11,
+    )
+    .await;
+    let log = upload_bytes(
+        &foundation,
+        &artifacts,
+        claim.exec_id,
+        "log",
+        "application/x-ndjson",
+        b"log",
+        14,
+    )
+    .await;
+    foundation
+        .store
+        .fail_authenticated_attempt(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &FailAttemptRequest {
+                error_code: ErrorCode::ExecutorFailed,
+                manifest_sha256: Some(manifest_digest(&foundation, claim.exec_id, vec![&log])),
+            },
+            17,
+        )
+        .await
+        .expect("fail attempt");
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM artifacts WHERE attempt_id=? ORDER BY name")
+            .bind(claim.exec_id.to_string())
+            .fetch_all(&foundation.pool)
+            .await
+            .expect("committed artifacts");
+    assert_eq!(names, vec!["log"]);
+    assert!(
+        !database
+            .directory
+            .join("artifacts")
+            .join(original.artifact.relative_path)
+            .exists()
+    );
+    assert!(
+        database
+            .directory
+            .join("artifacts")
+            .join(log.artifact.relative_path)
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn usage_bridge_is_idempotent_and_only_existing_usage_can_finish_late() {
     let database = TestDatabase::new();
     let foundation = foundation(&database, &["media"]).await;
@@ -1059,6 +1373,80 @@ fn digest(value: &str) -> Sha256Digest {
         write!(&mut output, "{byte:02x}").expect("write digest");
     }
     Sha256Digest::parse(output).expect("digest")
+}
+
+async fn upload_bytes(
+    foundation: &Foundation,
+    artifacts: &NasArtifactStore,
+    attempt_id: AttemptId,
+    name: &str,
+    media_type: &str,
+    bytes: &[u8],
+    now_ms: i64,
+) -> StartUploadResponse {
+    let sha256 = digest(std::str::from_utf8(bytes).expect("test bytes are UTF-8"));
+    let upload = foundation
+        .store
+        .start_attempt_upload(
+            artifacts,
+            foundation.runner_id,
+            attempt_id,
+            &StartUploadRequest {
+                name: name.into(),
+                media_type: media_type.into(),
+                size_bytes: bytes.len() as u64,
+                sha256: sha256.clone(),
+            },
+            now_ms,
+        )
+        .await
+        .expect("start upload");
+    foundation
+        .store
+        .append_attempt_upload(
+            artifacts,
+            foundation.runner_id,
+            upload.upload_id,
+            0,
+            &sha256,
+            bytes,
+            now_ms + 1,
+        )
+        .await
+        .expect("append upload");
+    foundation
+        .store
+        .verify_attempt_upload(
+            artifacts,
+            foundation.runner_id,
+            upload.upload_id,
+            &VerifyUploadRequest {
+                size_bytes: bytes.len() as u64,
+                sha256,
+            },
+            now_ms + 2,
+        )
+        .await
+        .expect("verify upload");
+    upload
+}
+
+fn manifest_digest(
+    foundation: &Foundation,
+    attempt_id: AttemptId,
+    mut uploads: Vec<&StartUploadResponse>,
+) -> Sha256Digest {
+    uploads.sort_by(|left, right| left.artifact.name.cmp(&right.artifact.name));
+    let manifest = ArtifactManifest::new(
+        foundation.job_id,
+        foundation.task_id,
+        attempt_id,
+        uploads
+            .into_iter()
+            .map(|upload| upload.artifact.clone())
+            .collect(),
+    );
+    digest(&serde_json::to_string(&manifest).expect("manifest"))
 }
 
 fn frame(sequence: u64, line: &str) -> LogFrame {
