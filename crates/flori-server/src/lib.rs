@@ -3,10 +3,12 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod knowledge_http;
 mod protocol;
 mod runner;
 mod runner_content;
 mod runner_upload;
+mod source_job;
 mod source_upload;
 
 use std::sync::Arc;

@@ -22,8 +22,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     error::HttpError,
+    knowledge_http,
     protocol::{BearerToken, StrictBytes, StrictJson, StrictPath, require_v1},
-    runner_content, runner_upload, source_upload,
+    runner_content, runner_upload, source_job, source_upload,
 };
 
 #[derive(Clone)]
@@ -50,7 +51,9 @@ pub(super) fn routes(
         lease_ms,
     };
     Ok(Router::new()
+        .merge(source_job::routes())
         .merge(source_upload::routes())
+        .merge(knowledge_http::routes())
         .merge(runner_content::routes())
         .route("/runner/v1/register", post(register))
         .route(
