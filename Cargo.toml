@@ -18,12 +18,13 @@ version = "0.0.0"
 [workspace.dependencies]
 flori-core = { path = "crates/flori-core", version = "=0.0.0" }
 flori-pipeline = { path = "crates/flori-pipeline", version = "=0.0.0" }
+reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_yaml_ng = "=0.10.0"
 sha2 = "=0.11.0"
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "macros"] }
-tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
 utoipa = "5.5.0"
 uuid = { version = "1.24.1", features = ["serde", "v7"] }
 
