@@ -12,7 +12,7 @@
 | `local-video.srt` | 固定字幕 | 标准化为三个连续时间段，所有时间引用落在视频范围内 |
 | `keyframe-1000ms.jpg` | 固定关键帧 | 与 1000 ms 引用绑定，摘要匹配 manifest |
 
-`expected/` 是结构验收样例，不是第二套产品 DTO。WP03 冻结的 Rust 类型是唯一契约；实现测试读取这些文件后必须反序列化到正式类型。
+`expected/` 是结构验收样例，不是第二套产品 DTO。每个 JSON 都带精确 `flori.*.v1` schema；`flori-core` 的 `golden_contracts` 测试直接反序列化并验证这些文件，fixture 不定义任何字段。
 
 ## 验收原则
 
@@ -20,6 +20,7 @@
 - Figure 保留 caption 与 PDF 页坐标；Table 只保留页面区域和普通文本，不解析单元格模型。
 - 机械笔记只能重组字幕事实。智能笔记必须把 AI 分析与来源事实分开。
 - canonical evidence 必须能定位到 PDF 页坐标或视频毫秒区间和关键帧。
+- 智能笔记和摘要只用 `[[evidence:<UUIDv7>]]` 引用候选；Rust 校验通过后才生成 canonical evidence。
 - 搜索只验可重建索引的命中、Source/Job 归属和 evidence，不固定排序分数。
 - 所有离线二进制都是本项目生成的 CC0 合成样本，不含生产 Artifact、账号、cookie 或私有内容。
 

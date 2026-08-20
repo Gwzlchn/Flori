@@ -19,7 +19,10 @@ offline:
     path: local-video.mp4
     sha256: 3cd46336569e51d6f489b4d9bf597a850bbb3ec6be0653cd38297159126ed397
     media_type: video/mp4
-    expected: expected/video.json
+    expected:
+      transcript: expected/transcript.json
+      parts: expected/parts.json
+      evidence: expected/video-evidence.json
     invariant: duration is 3000 ms at 320x180 and 10 fps
     scenarios:
       subtitle_first:
@@ -37,12 +40,20 @@ offline:
     path: keyframe-1000ms.jpg
     sha256: dea5b2fcf0d6801fe58cf77f3594e547aa88aa0bf04b32f1d43d97afbc0d9f3f
     media_type: image/jpeg
-    invariant: evidence timestamp is 1000 ms
+    artifact_name: frames/0000000001000.jpg
+    invariant: evidence timestamp is 1000 ms and matches the frozen Artifact logical name
 
 expected_outputs:
   mechanical_note: expected/mechanical-note.md
-  smart_note: expected/smart-note.md
-  evidence: expected/evidence.json
+  pdf_smart_note: expected/pdf-smart-note.md
+  pdf_summary: expected/pdf-summary.md
+  video_smart_note: expected/video-smart-note.md
+  video_summary: expected/video-summary.md
+  pdf_evidence: expected/pdf-evidence.json
+  video_evidence: expected/video-evidence.json
+  terms: expected/terms.json
+  video_terms: expected/video-terms.json
+  subscription: expected/subscription.json
   search: expected/search.json
 
 external:

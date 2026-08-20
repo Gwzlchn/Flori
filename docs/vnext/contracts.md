@@ -199,16 +199,18 @@ Rust core 为下列结构定义唯一 Serde 类型；JSON都带精确 `schema=fl
 
 | kind | 必填内容与不变量 |
 |---|---|
-| `document_structure` | `language`、pages尺寸、ordered sections、figures和tables；Figure含ID/page/bbox/caption/Artifact逻辑名，Table含ID/page/bbox/caption/text/截图逻辑名，不含cells |
+| `document_structure` | `source_artifact_id`、`language`、pages尺寸、ordered sections和其ordered `{page,bbox,text}` blocks、figures和tables；Figure含ID/page/bbox/caption/Artifact逻辑名，Table含ID/page/bbox/caption/text/截图逻辑名，不含cells |
 | `parts_manifest` | 一个逻辑视频的ordered parts；每项含index/title/duration和原视频、字幕、弹幕Artifact逻辑名，引用可缺但不能指向未声明输出 |
 | `subscription_manifest` | newest-first items；每项只有平台视频kind、canonical_ref、title、published_at_ms，去重且数量不超过Collection fanout |
-| `transcript` | `language`、`duration_ms`、ordered cues `{start_ms,end_ms,text}`；区间有效且不重叠 |
-| `terms` | ordered `{term,explanation,evidence_ids}`；term规范化后唯一，解释非空 |
+| `transcript` | `source_artifact_id`、`language`、`duration_ms`、ordered cues `{start_ms,end_ms,text}`；区间有效且不重叠 |
+| `terms` | ordered `{term,explanation,evidence_ids}` 和 ordered `evidence_candidates`；term规范化后唯一，解释非空，候选直接使用唯一 `EvidenceEntry` 类型但尚未成为 canonical evidence |
 | `evidence` | ordered canonical evidence；字段与本文件 locator规则一致，ID唯一且只能引用同Source本Job可见Artifact |
 | `ai_audit` | tool/model/effort、PromptSnapshot摘要、脱敏参数、websearch URL、usage keys、退出状态和输出摘要；不含prompt全文或secret |
 | `task_log` | UTF-8 NDJSON；每行是 `{timestamp_ms,level,message}`，level只有debug/info/warn/error，无任意上下文字段 |
 
-`mechanical_note`、`smart_note`、`translation` 和 `summary` 是 UTF-8 Markdown。机械笔记只重组字幕事实并带视频时间范围；智能笔记必须分开“来源事实”和“AI分析”，事实、摘要和关键名词用 evidence ID关联。Figure/Table/keyframe等二进制元数据只在上述结构JSON中维护。
+`mechanical_note`、`smart_note`、`translation` 和 `summary` 是 UTF-8 Markdown。机械笔记只重组字幕事实并带视频时间范围；智能笔记必须分开“来源事实”和“AI分析”，事实和摘要使用精确 `[[evidence:<UUIDv7>]]` 标记，关键名词使用 `evidence_ids`。Figure/Table/keyframe等二进制元数据只在上述结构JSON中维护。
+
+`EvidenceLocator` 是相邻标记的封闭union：PDF为 `{kind:"pdf",value:{page,bbox}}`，视频为 `{kind:"video",value:{start_ms,end_ms,keyframe?}}`，其中keyframe是同Job `{artifact_id,timestamp_ms}`。`video.frames` 的通配输出逻辑名固定为 `frames/<13位零填充毫秒>.jpg`，Home Core从受信Task Artifact名恢复时间并与locator精确比较，不从AI输出或任意文件名猜测。PDF文本quote必须匹配同页且包围该bbox的结构化text block；Figure/Table quote必须匹配同页同bbox的caption或Table文本。视频区间和关键帧由视频validator对Transcript及同Job Artifact重验。
 
 ### 保留
 
@@ -223,7 +225,9 @@ Rust core 为下列结构定义唯一 Serde 类型；JSON都带精确 `schema=fl
 - PDF locator 使用 1-based page 与左上角原点 point 坐标，满足 `0 <= x1 < x2 <= width`、`0 <= y1 < y2 <= height`。
 - 视频 locator 满足 `0 <= start_ms < end_ms <= duration_ms`；关键帧时间落在区间或距离边界不超过一帧。
 - quote 必须能在对应结构化文本或字幕中规范化匹配。
-- `core.validate` 校验全部笔记引用后，唯一 sink `core.publish` 才可执行。publish用一个CAS事务完成自身 Task、Job、current/previous、FTS、Glossary occurrence 和 Concept 投影；事务开始时其它Task必须全部 `succeeded`/`skipped`，否则拒绝。
+- PDF `core.validate` 的 `source` 输入是 `document.extract` 的完整 ArtifactSet，`notes` 输入是 `ai.document_note` 的完整 ArtifactSet。它严格解析 `document_structure`、`smart_note`、`summary` 和 `terms`，确认结构绑定的 `source_artifact_id` 是同Job上游PDF，逐项校验候选页码、bbox、quote、Markdown标记和术语引用，再把相同 `EvidenceEntry` 写成唯一 `evidence` Artifact。Runner候选不是发布真相。
+- AI Runner在上传笔记前使用同一 Rust validator做本地预检。首次结果为 `evidence_invalid` 时，它可以在同一 Attempt 内发起至多一次带错误摘要的修复调用；两次调用使用不同且稳定的 `invocation_key` 并分别记账。第二次仍失败则 Task失败。Home Core 的 `core.validate` 仍独立重验，不信任 Runner；这里不增加 Task、状态、DSL字段、fallback或自动 retry。
+- `core.publish` 只接受 `core.validate` 的 `evidence` Artifact。唯一 sink 校验全部其它Task已 `succeeded`/`skipped`，然后用一个CAS事务提交自身Task与Job、轮换current/previous并重建FTS、Glossary occurrence和Concept投影；失败事务不改变已有current。
 - FTS、Concept graph、timeline 和 topic 都只读 current；它们可从 current Artifact 重建，不成为第三份成果真相。
 
 ## AI usage 幂等
