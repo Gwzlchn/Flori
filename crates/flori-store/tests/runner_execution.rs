@@ -8,8 +8,8 @@ use flori_core::{
     PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
     PromptSnapshotPrompt, RegisterRunnerRequest, ResolvedTaskInputs, RunnerId, RunnerTool,
     RunnerToolCapability, Sha256Digest, StartUploadRequest, StartUploadResponse, TaskId,
-    TaskInputBindings, TaskInputReference, UploadState, UsageOrigin, UsageUpdate,
-    VerifyUploadRequest,
+    TaskInputBindings, TaskInputReference, TaskLogLevel, TaskLogLine, UploadState, UsageOrigin,
+    UsageUpdate, VerifyUploadRequest,
 };
 use flori_pipeline::compile;
 use flori_store::{
@@ -412,6 +412,8 @@ async fn poll_waits_on_tag_tool_and_pinned_model_capability_mismatch() {
 async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
     let database = TestDatabase::new();
     let foundation = foundation(&database, &["media"]).await;
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
     let claim = foundation
         .store
         .poll_and_claim(foundation.runner_id, 10, 70, "https://flori.example")
@@ -426,11 +428,43 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
         credential_value,
     )
     .await;
-    let first = frame(1, r#"{"message":"first"}"#);
+    let first = frame(1, "first");
+    let (upload_id, final_path, max_bytes, rolling_sha): (String, String, i64, String) =
+        sqlx::query_as(
+            "SELECT id,final_relative_path,expected_size_bytes,expected_sha256 FROM uploads \
+             WHERE owner_kind='attempt' AND owner_id=? AND name='log'",
+        )
+        .bind(claim.exec_id.to_string())
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("server log ledger");
+    let mut file_ahead = UploadRecord::new(
+        upload_id.parse().expect("upload ID"),
+        "log",
+        final_path,
+        u64::try_from(max_bytes).expect("log max"),
+        Sha256Digest::parse(rolling_sha).expect("rolling SHA"),
+        "log",
+        u64::try_from(max_bytes).expect("log max"),
+    )
+    .expect("server log record");
+    file_ahead
+        .restore_progress(0, UploadState::Receiving)
+        .expect("empty server log");
+    let first_chunk = format!("{}\n", first.line);
+    artifacts
+        .append_chunk(
+            &file_ahead,
+            0,
+            &digest(&first_chunk),
+            first_chunk.as_bytes(),
+        )
+        .expect("simulate fs-ahead log frame");
     assert_eq!(
         foundation
             .store
             .append_log_frames(
+                &artifacts,
                 foundation.runner_id,
                 claim.exec_id,
                 std::slice::from_ref(&first),
@@ -441,22 +475,99 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
             .last_sequence,
         1
     );
+    let legacy = r#"{"message":"legacy"}"#.to_owned();
     assert_eq!(
         foundation
             .store
-            .append_log_frames(foundation.runner_id, claim.exec_id, &[first], 12)
+            .append_log_frames(
+                &artifacts,
+                foundation.runner_id,
+                claim.exec_id,
+                &[LogFrame {
+                    sequence: 2,
+                    sha256: digest(&legacy),
+                    line: legacy,
+                }],
+                12,
+            )
             .await
-            .expect("idempotent log")
+            .expect_err("legacy message object is not a TaskLogLine")
+            .code(),
+        ErrorCode::InvalidRequest
+    );
+    let second = frame(2, "second");
+    let (final_path, max_bytes, rolling_sha, received): (String, i64, String, i64) =
+        sqlx::query_as(
+            "SELECT final_relative_path,expected_size_bytes,expected_sha256,received_bytes \
+             FROM uploads WHERE id=?",
+        )
+        .bind(&upload_id)
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("advanced server log ledger");
+    let mut second_ahead = UploadRecord::new(
+        upload_id.parse().expect("upload ID"),
+        "log",
+        final_path,
+        u64::try_from(max_bytes).expect("log max"),
+        Sha256Digest::parse(rolling_sha).expect("rolling SHA"),
+        "log",
+        u64::try_from(max_bytes).expect("log max"),
+    )
+    .expect("advanced server log record");
+    second_ahead
+        .restore_progress(
+            u64::try_from(received).expect("received log bytes"),
+            UploadState::Receiving,
+        )
+        .expect("advanced server log");
+    let second_chunk = format!("{}\n", second.line);
+    artifacts
+        .append_chunk(
+            &second_ahead,
+            u64::try_from(received).expect("received log bytes"),
+            &digest(&second_chunk),
+            second_chunk.as_bytes(),
+        )
+        .expect("simulate second fs-ahead frame");
+    assert_eq!(
+        foundation
+            .store
+            .append_log_frames(
+                &artifacts,
+                foundation.runner_id,
+                claim.exec_id,
+                &[first.clone(), second],
+                12,
+            )
+            .await
+            .expect("duplicate prefix reaches fs-ahead frame")
             .last_sequence,
-        1
+        2
     );
     assert_eq!(
         foundation
             .store
             .append_log_frames(
+                &artifacts,
                 foundation.runner_id,
                 claim.exec_id,
-                &[frame(1, r#"{"message":"changed"}"#)],
+                &[first],
+                12
+            )
+            .await
+            .expect("idempotent log")
+            .last_sequence,
+        2
+    );
+    assert_eq!(
+        foundation
+            .store
+            .append_log_frames(
+                &artifacts,
+                foundation.runner_id,
+                claim.exec_id,
+                &[frame(1, "changed")],
                 13,
             )
             .await
@@ -468,9 +579,10 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
         foundation
             .store
             .append_log_frames(
+                &artifacts,
                 foundation.runner_id,
                 claim.exec_id,
-                &[frame(3, r#"{"message":"gap"}"#)],
+                &[frame(4, "gap")],
                 14,
             )
             .await
@@ -482,9 +594,10 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
         foundation
             .store
             .append_log_frames(
+                &artifacts,
                 foundation.runner_id,
                 claim.exec_id,
-                &[frame(2, &json_escaped(credential_value))],
+                &[frame(3, credential_value)],
                 15,
             )
             .await
@@ -495,63 +608,33 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
     foundation
         .store
         .append_log_frames(
+            &artifacts,
             foundation.runner_id,
             claim.exec_id,
-            &[frame(2, r#"{"message":"second"}"#)],
+            &[frame(3, "third")],
             16,
         )
         .await
         .expect("second log");
-    let artifacts =
-        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
-    let log_upload = foundation
-        .store
-        .start_attempt_upload(
-            &artifacts,
-            foundation.runner_id,
-            claim.exec_id,
-            &StartUploadRequest {
-                name: "log".into(),
-                media_type: "application/x-ndjson".into(),
-                size_bytes: 3,
-                sha256: digest("log"),
-            },
-            17,
-        )
-        .await
-        .expect("log upload");
-    foundation
-        .store
-        .append_attempt_upload(
-            &artifacts,
-            foundation.runner_id,
-            log_upload.upload_id,
-            0,
-            &digest("log"),
-            b"log",
-            18,
-        )
-        .await
-        .expect("append log artifact");
-    foundation
-        .store
-        .verify_attempt_upload(
-            &artifacts,
-            foundation.runner_id,
-            log_upload.upload_id,
-            &VerifyUploadRequest {
-                size_bytes: 3,
-                sha256: digest("log"),
-            },
-            19,
-        )
-        .await
-        .expect("verify log artifact");
-    let manifest = ArtifactManifest::new(
-        foundation.job_id,
-        foundation.task_id,
-        claim.exec_id,
-        vec![log_upload.artifact],
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .start_attempt_upload(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &StartUploadRequest {
+                        name: "log".into(),
+                        media_type: "application/x-ndjson".into(),
+                        size_bytes: 3,
+                        sha256: digest("log"),
+                    },
+                    17,
+                )
+                .await,
+        ),
+        ErrorCode::Conflict
     );
     foundation
         .store
@@ -561,9 +644,7 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
             claim.exec_id,
             &FailAttemptRequest {
                 error_code: ErrorCode::ExecutorFailed,
-                manifest_sha256: Some(digest(
-                    &serde_json::to_string(&manifest).expect("failure manifest"),
-                )),
+                manifest_sha256: None,
             },
             20,
         )
@@ -573,9 +654,10 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
         foundation
             .store
             .append_log_frames(
+                &artifacts,
                 foundation.runner_id,
                 claim.exec_id,
-                &[frame(3, r#"{"message":"late"}"#)],
+                &[frame(4, "late")],
                 21,
             )
             .await
@@ -589,6 +671,8 @@ async fn log_sequence_is_idempotent_strict_and_fenced_after_attempt_end() {
 async fn log_limit_counts_the_complete_ndjson_frame() {
     let database = TestDatabase::new();
     let foundation = foundation(&database, &["media"]).await;
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
     let spec_json: String = sqlx::query_scalar("SELECT spec_json FROM tasks WHERE id=?")
         .bind(foundation.task_id.to_string())
         .fetch_one(&foundation.pool)
@@ -615,12 +699,117 @@ async fn log_limit_counts_the_complete_ndjson_frame() {
     assert_eq!(
         foundation
             .store
-            .append_log_frames(foundation.runner_id, claim.exec_id, &[frame(1, "")], 11)
+            .append_log_frames(
+                &artifacts,
+                foundation.runner_id,
+                claim.exec_id,
+                &[frame(1, "")],
+                11
+            )
             .await
             .expect_err("frame metadata counts against declaration")
             .code(),
         ErrorCode::ArtifactTooLarge
     );
+}
+
+#[tokio::test]
+async fn server_owned_log_supports_log_only_success_and_empty_failure() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database, &["media"]).await;
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
+    let spec_json: String = sqlx::query_scalar("SELECT spec_json FROM tasks WHERE id=?")
+        .bind(foundation.task_id.to_string())
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("task spec");
+    let mut spec: CompiledTaskSpec = serde_json::from_str(&spec_json).expect("task spec");
+    spec.artifacts
+        .retain(|artifact| artifact.kind == ArtifactKind::TaskLog);
+    sqlx::query("UPDATE tasks SET spec_json=? WHERE id=?")
+        .bind(serde_json::to_string(&spec).expect("log-only spec"))
+        .bind(foundation.task_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("log-only task");
+    let claim = foundation
+        .store
+        .poll_and_claim(foundation.runner_id, 10, 70, "https://flori.example")
+        .await
+        .expect("poll")
+        .expect("claim");
+    foundation
+        .store
+        .append_log_frames(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &[frame(1, "only output")],
+            11,
+        )
+        .await
+        .expect("task log");
+    let request = CompleteAttemptRequest {
+        manifest_sha256: manifest_digest(&foundation, claim.exec_id, Vec::new()),
+    };
+    assert_eq!(
+        foundation
+            .store
+            .complete_authenticated_attempt(
+                &artifacts,
+                foundation.runner_id,
+                claim.exec_id,
+                &request,
+                12,
+            )
+            .await
+            .expect("log-only completion")
+            .state,
+        AttemptState::Succeeded
+    );
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM artifacts WHERE attempt_id=? ORDER BY name")
+            .bind(claim.exec_id.to_string())
+            .fetch_all(&foundation.pool)
+            .await
+            .expect("log artifact");
+    assert_eq!(names, vec!["log"]);
+
+    let second_database = TestDatabase::new();
+    let second = self::foundation(&second_database, &["media"]).await;
+    let second_artifacts = NasArtifactStore::new(second_database.directory.join("artifacts"), 1024)
+        .expect("artifact store");
+    let empty = second
+        .store
+        .poll_and_claim(second.runner_id, 10, 70, "https://flori.example")
+        .await
+        .expect("poll")
+        .expect("claim");
+    assert_eq!(
+        second
+            .store
+            .fail_authenticated_attempt(
+                &second_artifacts,
+                second.runner_id,
+                empty.exec_id,
+                &FailAttemptRequest {
+                    error_code: ErrorCode::ExecutorFailed,
+                    manifest_sha256: None,
+                },
+                11,
+            )
+            .await
+            .expect("empty-log failure")
+            .state,
+        AttemptState::Failed
+    );
+    let upload_count: i64 = sqlx::query_scalar("SELECT count(*) FROM uploads WHERE owner_id=?")
+        .bind(empty.exec_id.to_string())
+        .fetch_one(&second.pool)
+        .await
+        .expect("cleaned empty log ledger");
+    assert_eq!(upload_count, 0);
 }
 
 #[tokio::test]
@@ -693,6 +882,17 @@ async fn attempt_upload_recovers_cursor_and_rename_crash_windows() {
         )
         .await
         .expect("start upload");
+    foundation
+        .store
+        .append_log_frames(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &[frame(1, "upload recovery")],
+            12,
+        )
+        .await
+        .expect("task log");
     let original_commit: String = sqlx::query_scalar("SELECT commit_json FROM uploads WHERE id=?")
         .bind(upload.upload_id.to_string())
         .fetch_one(&foundation.pool)
@@ -1107,17 +1307,18 @@ async fn authenticated_completion_checks_required_usage_manifest_and_nas() {
         12,
     )
     .await;
-    let log = upload_bytes(
-        &foundation,
-        &artifacts,
-        claim.exec_id,
-        "log",
-        "application/x-ndjson",
-        b"log",
-        15,
-    )
-    .await;
-    let expected = manifest_digest(&foundation, claim.exec_id, vec![&original, &log]);
+    foundation
+        .store
+        .append_log_frames(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &[frame(1, "complete")],
+            15,
+        )
+        .await
+        .expect("task log");
+    let expected = manifest_digest(&foundation, claim.exec_id, vec![&original]);
     sqlx::query(
         "INSERT INTO ai_usage(id,job_id,task_id,attempt_id,invocation_key,state,tool,model, \
          effort,created_at_ms) VALUES(?,?,?,?,?,'started','qoder_cli','test','high',18)",
@@ -1295,16 +1496,39 @@ async fn authenticated_failure_commits_only_always_artifacts() {
         11,
     )
     .await;
-    let log = upload_bytes(
-        &foundation,
-        &artifacts,
-        claim.exec_id,
-        "log",
-        "application/x-ndjson",
-        b"log",
-        14,
+    let orphan: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        i64,
+        String,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT id,commit_json,name,target_id,staging_path,final_relative_path, \
+             expected_size_bytes,expected_sha256,received_bytes,state,created_at_ms,updated_at_ms \
+             FROM uploads WHERE id=?",
     )
-    .await;
+    .bind(original.upload_id.to_string())
+    .fetch_one(&foundation.pool)
+    .await
+    .expect("discarded upload ledger");
+    foundation
+        .store
+        .append_log_frames(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &[frame(1, "failed")],
+            14,
+        )
+        .await
+        .expect("task log");
     foundation
         .store
         .fail_authenticated_attempt(
@@ -1313,7 +1537,7 @@ async fn authenticated_failure_commits_only_always_artifacts() {
             claim.exec_id,
             &FailAttemptRequest {
                 error_code: ErrorCode::ExecutorFailed,
-                manifest_sha256: Some(manifest_digest(&foundation, claim.exec_id, vec![&log])),
+                manifest_sha256: None,
             },
             17,
         )
@@ -1326,6 +1550,12 @@ async fn authenticated_failure_commits_only_always_artifacts() {
             .await
             .expect("committed artifacts");
     assert_eq!(names, vec!["log"]);
+    let log_path: String =
+        sqlx::query_scalar("SELECT relative_path FROM artifacts WHERE attempt_id=? AND name='log'")
+            .bind(claim.exec_id.to_string())
+            .fetch_one(&foundation.pool)
+            .await
+            .expect("log artifact path");
     assert!(
         !database
             .directory
@@ -1333,12 +1563,111 @@ async fn authenticated_failure_commits_only_always_artifacts() {
             .join(original.artifact.relative_path)
             .exists()
     );
-    assert!(
-        database
-            .directory
-            .join("artifacts")
-            .join(log.artifact.relative_path)
-            .exists()
+    assert!(database.directory.join("artifacts").join(log_path).exists());
+    sqlx::query(
+        "INSERT INTO uploads(id,owner_kind,owner_id,commit_json,name,target_id,staging_path, \
+         final_relative_path,expected_size_bytes,expected_sha256,received_bytes,state, \
+         created_at_ms,updated_at_ms) VALUES(?,'attempt',?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(&orphan.0)
+    .bind(claim.exec_id.to_string())
+    .bind(&orphan.1)
+    .bind(&orphan.2)
+    .bind(&orphan.3)
+    .bind(&orphan.4)
+    .bind(&orphan.5)
+    .bind(orphan.6)
+    .bind(&orphan.7)
+    .bind(orphan.8)
+    .bind(&orphan.9)
+    .bind(orphan.10)
+    .bind(orphan.11)
+    .execute(&foundation.pool)
+    .await
+    .expect("simulate post-terminal cleanup crash");
+    let orphan_path = database.directory.join("artifacts").join(&orphan.5);
+    fs::write(&orphan_path, b"pdf").expect("restore discarded final file");
+    let same = FailAttemptRequest {
+        error_code: ErrorCode::ExecutorFailed,
+        manifest_sha256: None,
+    };
+    assert_eq!(
+        foundation
+            .store
+            .fail_authenticated_attempt(&artifacts, foundation.runner_id, claim.exec_id, &same, 18,)
+            .await
+            .expect("failed replay completes cleanup")
+            .state,
+        AttemptState::Failed
+    );
+    assert!(!orphan_path.exists());
+    let orphan_count: i64 = sqlx::query_scalar("SELECT count(*) FROM uploads WHERE id=?")
+        .bind(&orphan.0)
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("orphan ledger count");
+    assert_eq!(orphan_count, 0);
+    assert_eq!(
+        foundation
+            .store
+            .fail_authenticated_attempt(&artifacts, foundation.runner_id, claim.exec_id, &same, 19,)
+            .await
+            .expect("lost response replay")
+            .state,
+        AttemptState::Failed
+    );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .fail_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &FailAttemptRequest {
+                        error_code: ErrorCode::ExecutorFailed,
+                        manifest_sha256: Some(digest("different")),
+                    },
+                    20,
+                )
+                .await,
+        ),
+        ErrorCode::DigestMismatch
+    );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .fail_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &FailAttemptRequest {
+                        error_code: ErrorCode::AttemptTimeout,
+                        manifest_sha256: None,
+                    },
+                    21,
+                )
+                .await,
+        ),
+        ErrorCode::Conflict
+    );
+    assert_eq!(
+        store_error_code(
+            foundation
+                .store
+                .complete_authenticated_attempt(
+                    &artifacts,
+                    foundation.runner_id,
+                    claim.exec_id,
+                    &CompleteAttemptRequest {
+                        manifest_sha256: manifest_digest(&foundation, claim.exec_id, Vec::new(),),
+                    },
+                    22,
+                )
+                .await,
+        ),
+        ErrorCode::StaleAttempt
     );
 }
 
@@ -1537,19 +1866,18 @@ fn manifest_digest(
     digest(&serde_json::to_string(&manifest).expect("manifest"))
 }
 
-fn frame(sequence: u64, line: &str) -> LogFrame {
+fn frame(sequence: u64, message: &str) -> LogFrame {
+    let line = serde_json::to_string(&TaskLogLine {
+        timestamp_ms: sequence,
+        level: TaskLogLevel::Info,
+        message: message.into(),
+    })
+    .expect("task log line");
     LogFrame {
         sequence,
-        sha256: digest(line),
-        line: line.into(),
+        sha256: digest(&line),
+        line,
     }
-}
-
-fn json_escaped(value: &str) -> String {
-    serde_json::to_string(value)
-        .expect("JSON string")
-        .trim_matches('"')
-        .to_owned()
 }
 
 fn store_error_code<T>(result: Result<T, flori_store::StoreError>) -> ErrorCode {

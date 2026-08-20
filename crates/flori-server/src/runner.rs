@@ -172,7 +172,7 @@ async fn logs(
     Ok(Json(
         state
             .store
-            .append_log_frames(runner_id, exec_id, &frames, now_ms)
+            .append_log_frames(&state.artifacts, runner_id, exec_id, &frames, now_ms)
             .await?,
     ))
 }

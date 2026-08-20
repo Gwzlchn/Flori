@@ -12,6 +12,8 @@ use super::{
     resolve::{resolved_inputs, secret_inputs},
 };
 
+pub(super) mod server_log;
+
 struct ExecutionSelection {
     model: Option<String>,
     effort: Option<String>,
@@ -51,7 +53,7 @@ impl Store {
              t.attempt_limit,t.timeout_ms,t.pinned_runner_id,t.selected_model,t.selected_effort, \
              t.runner_config_revision, \
              (SELECT count(*) FROM attempts a WHERE a.task_id=t.id) AS attempt_count, \
-             s.kind AS source_kind FROM tasks t JOIN jobs j ON j.id=t.job_id \
+             s.id AS source_id,s.kind AS source_kind FROM tasks t JOIN jobs j ON j.id=t.job_id \
              JOIN sources s ON s.id=j.source_id \
              WHERE t.state='ready' AND j.state IN ('queued','running') \
              AND (t.ready_at_ms IS NULL OR t.ready_at_ms<=?) \
@@ -112,14 +114,18 @@ impl Store {
             let exec_id = AttemptId::generate();
             let attempt_no = u8::try_from(attempt_count + 1)
                 .map_err(|_| StoreError::new(ErrorCode::CorruptState))?;
-            start_attempt(
+            server_log::start_attempt(
                 &mut transaction,
+                row.try_get::<String, _>("source_id")?
+                    .parse()
+                    .map_err(|_| corrupt())?,
                 &job_id_text,
                 &task_id_text,
                 &runner_id_text,
                 exec_id,
                 attempt_no,
                 &selection,
+                &spec,
                 now_ms,
                 lease_expires_at_ms,
             )
@@ -204,60 +210,6 @@ fn select_execution(
     } else {
         Ok(None)
     }
-}
-#[allow(clippy::too_many_arguments)]
-async fn start_attempt(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    job_id: &str,
-    task_id: &str,
-    runner_id: &str,
-    exec_id: AttemptId,
-    attempt_no: u8,
-    selection: &ExecutionSelection,
-    now_ms: i64,
-    lease_expires_at_ms: i64,
-) -> Result<(), StoreError> {
-    let started = sqlx::query(
-        "UPDATE jobs SET state='running',started_at_ms=COALESCE(started_at_ms,?) \
-         WHERE id=? AND state IN ('queued','running')",
-    )
-    .bind(now_ms)
-    .bind(job_id)
-    .execute(&mut **transaction)
-    .await?;
-    if started.rows_affected() != 1 {
-        return Err(StoreError::new(ErrorCode::Conflict));
-    }
-    sqlx::query(
-        "INSERT INTO attempts(id,task_id,attempt_no,runner_id,state,model,effort, \
-         runner_config_revision,lease_expires_at_ms,last_log_sequence,started_at_ms) \
-         VALUES(?,?,?,?,'leased',?,?,?,?,0,?)",
-    )
-    .bind(exec_id.to_string())
-    .bind(task_id)
-    .bind(i64::from(attempt_no))
-    .bind(runner_id)
-    .bind(&selection.model)
-    .bind(&selection.effort)
-    .bind(i64::try_from(selection.config_revision).map_err(|_| corrupt())?)
-    .bind(lease_expires_at_ms)
-    .bind(now_ms)
-    .execute(&mut **transaction)
-    .await?;
-    let leased = sqlx::query(
-        "UPDATE tasks SET state='leased',current_attempt_id=?,started_at_ms=COALESCE(started_at_ms,?) \
-         WHERE id=? AND state='ready' AND job_id=?",
-    )
-    .bind(exec_id.to_string())
-    .bind(now_ms)
-    .bind(task_id)
-    .bind(job_id)
-    .execute(&mut **transaction)
-    .await?;
-    if leased.rows_affected() != 1 {
-        return Err(StoreError::new(ErrorCode::Conflict));
-    }
-    Ok(())
 }
 fn valid_download_base(value: &str) -> bool {
     let value = value.trim_end_matches('/');

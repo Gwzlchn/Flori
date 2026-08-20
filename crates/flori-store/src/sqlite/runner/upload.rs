@@ -45,13 +45,16 @@ impl Store {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
         }
         if let Some(row) = sqlx::query(
-            "SELECT id FROM uploads WHERE owner_kind='attempt' AND owner_id=? AND name=?",
+            "SELECT id,commit_json FROM uploads WHERE owner_kind='attempt' AND owner_id=? AND name=?",
         )
         .bind(attempt_id.to_string())
         .bind(&request.name)
         .fetch_optional(&mut *transaction)
         .await?
         {
+            if row.try_get::<Option<String>, _>("commit_json")?.is_none() {
+                return Err(StoreError::new(ErrorCode::Conflict));
+            }
             let upload_id = UploadId::from_str(row.try_get("id")?).map_err(|_| corrupt())?;
             let loaded = load_upload(&mut transaction, runner_id, upload_id, now_ms).await?;
             if loaded.pending.artifact.media_type != request.media_type
@@ -169,8 +172,11 @@ pub(super) async fn load_upload(
     }
     let attempt_id = AttemptId::from_str(row.try_get("owner_id")?).map_err(|_| corrupt())?;
     let active = active_attempt(transaction, runner_id, attempt_id, now_ms).await?;
+    let Some(commit_json) = row.try_get::<Option<String>, _>("commit_json")? else {
+        return Err(StoreError::new(ErrorCode::Conflict));
+    };
     let pending: PendingAttemptUpload =
-        serde_json::from_str(row.try_get("commit_json")?).map_err(|_| corrupt())?;
+        serde_json::from_str(&commit_json).map_err(|_| corrupt())?;
     let (declaration, _) = declaration(&active.spec, &pending.artifact.name)?;
     if pending.declaration_name != declaration.name
         || pending.artifact.kind != declaration.kind

@@ -11,9 +11,10 @@ use crate::artifact::{NasArtifactStore, RecoveryAction, UploadRecord};
 
 use super::{
     super::{Store, StoreError},
+    poll::server_log,
     terminal_common::{
-        commit_uploads, delete_attempt_uploads, entries_manifest, exact_moved,
-        load_attempt_uploads, manifest, manifest_digest, required_present,
+        commit_uploads, exact_moved, load_attempt_uploads, manifest, manifest_digest,
+        required_present,
     },
     upload::active_attempt,
     upload_rule::{declaration, retention},
@@ -52,6 +53,15 @@ impl Store {
             return Err(StoreError::new(ErrorCode::StaleAttempt));
         }
         let active = active_attempt(&mut transaction, runner_id, attempt_id, now_ms).await?;
+        server_log::finalize(
+            &mut transaction,
+            artifacts,
+            &active,
+            attempt_id,
+            false,
+            now_ms,
+        )
+        .await?;
         let uploads = load_attempt_uploads(&mut transaction, runner_id, attempt_id, now_ms).await?;
         let selected = uploads.iter().collect::<Vec<_>>();
         exact_moved(artifacts, &selected)?;
@@ -65,11 +75,21 @@ impl Store {
         if open_usage != 0 {
             return Err(StoreError::new(ErrorCode::UsageConflict));
         }
-        if manifest_digest(&manifest(&active, attempt_id, &selected))? != request.manifest_sha256 {
+        let runner_owned = selected
+            .iter()
+            .copied()
+            .filter(|upload| upload.pending.artifact.kind != ArtifactKind::TaskLog)
+            .collect::<Vec<_>>();
+        if manifest_digest(&manifest(&active, attempt_id, &runner_owned))?
+            != request.manifest_sha256
+        {
             return Err(StoreError::new(ErrorCode::DigestMismatch));
         }
         commit_uploads(&mut transaction, &active, attempt_id, &selected, now_ms).await?;
-        delete_attempt_uploads(&mut transaction, attempt_id).await?;
+        sqlx::query("DELETE FROM uploads WHERE owner_kind='attempt' AND owner_id=?")
+            .bind(attempt_id.to_string())
+            .execute(&mut *transaction)
+            .await?;
         super::super::scheduler::finish_success(
             &mut transaction,
             &attempt_id.to_string(),
@@ -205,7 +225,16 @@ async fn replay_complete(
             return Err(StoreError::new(ErrorCode::ArtifactUndeclared));
         }
     }
-    let actual = manifest_digest(&entries_manifest(job_id, task_id, attempt_id, entries))?;
+    let runner_entries = entries
+        .into_iter()
+        .filter(|entry| entry.kind != ArtifactKind::TaskLog)
+        .collect();
+    let actual = manifest_digest(&flori_core::ArtifactManifest::new(
+        job_id,
+        task_id,
+        attempt_id,
+        runner_entries,
+    ))?;
     if &actual != expected {
         return Err(StoreError::new(ErrorCode::DigestMismatch));
     }
