@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod artifact;
+mod document;
 mod enums;
 mod ids;
 mod job;
@@ -12,6 +13,7 @@ mod runner_claim;
 mod runner_protocol;
 
 pub use artifact::*;
+pub use document::*;
 pub use enums::*;
 pub use ids::*;
 pub use job::*;
