@@ -5,6 +5,12 @@ license.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+default = ["codex", "media", "qoder"]
+codex = []
+media = []
+qoder = []
+
 [dependencies]
 flori-core.workspace = true
 reqwest.workspace = true

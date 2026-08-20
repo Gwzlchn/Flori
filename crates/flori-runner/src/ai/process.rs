@@ -19,6 +19,7 @@ use tokio::{
 };
 
 #[path = "process/qoder_process.rs"]
+#[cfg(feature = "qoder")]
 pub(crate) mod qoder_process;
 
 pub struct AiProcessConfig {

@@ -1,16 +1,22 @@
-use std::{ffi::OsString, path::Path, time::Duration};
+#[cfg(feature = "qoder")]
+use std::ffi::OsString;
+use std::{path::Path, time::Duration};
 
 use flori_core::{
     AiResultEnvelope, AiTool, ErrorCode, TaskClaim, UsageOrigin, UsageUpdate, ai_result_schema_json,
 };
 use sha2::{Digest, Sha256};
-use tokio::{fs, io::AsyncReadExt, sync::watch};
+use tokio::sync::watch;
+#[cfg(feature = "codex")]
+use tokio::{fs, io::AsyncReadExt};
 
+#[cfg(feature = "qoder")]
 use crate::ai::process::qoder_process;
-use crate::{
-    AiProcessConfig, AiProcessTermination, CodexWebSearchObservation, QoderError,
-    build_codex_command, qoder_invocation_command, qoder_parse_result, run_ai_process,
-};
+use crate::{AiProcessConfig, AiProcessTermination};
+#[cfg(feature = "codex")]
+use crate::{CodexWebSearchObservation, build_codex_command, run_ai_process};
+#[cfg(feature = "qoder")]
+use crate::{QoderError, qoder_invocation_command, qoder_parse_result};
 
 use super::DaemonConfig;
 
@@ -48,6 +54,7 @@ pub(super) async fn run(
     let effort = claim.effort.as_deref().ok_or(ErrorCode::CorruptState)?;
     let result_schema = ai_result_schema_json().map_err(|_| ErrorCode::Internal)?;
     let (arguments, stdin, redacted) = match config.tool {
+        #[cfg(feature = "qoder")]
         AiTool::QoderCli => {
             let cwd = workspace.to_str().ok_or(ErrorCode::InvalidRequest)?;
             let mut prompt = prompt;
@@ -62,6 +69,7 @@ pub(super) async fn run(
             let arguments = command.arguments().iter().map(OsString::from).collect();
             (arguments, stdin, command.redacted_arguments())
         }
+        #[cfg(feature = "codex")]
         AiTool::CodexCli => {
             let schema = workspace.join("ai-result.schema.json");
             let result = workspace.join("ai-result.json");
@@ -90,6 +98,8 @@ pub(super) async fn run(
                 .collect::<Result<Vec<_>, _>>()?;
             (command.args, command.stdin.into_bytes(), redacted)
         }
+        #[allow(unreachable_patterns)]
+        _ => return Err(ErrorCode::InvalidRequest),
     };
     let process_config = AiProcessConfig {
         tool: config.tool,
@@ -103,8 +113,12 @@ pub(super) async fn run(
         proxy_url: config.proxy_url.clone(),
     };
     let result = match config.tool {
+        #[cfg(feature = "qoder")]
         AiTool::QoderCli => qoder_process::run(process_config, &stdin, cancel).await,
+        #[cfg(feature = "codex")]
         AiTool::CodexCli => run_ai_process(&process_config, &stdin, cancel).await,
+        #[allow(unreachable_patterns)]
+        _ => return Err(ErrorCode::InvalidRequest),
     };
     let process = match result {
         Ok(process) => process,
@@ -129,6 +143,7 @@ pub(super) async fn run(
         Err((ErrorCode::TaskCanceled, unavailable(invocation_key)))
     } else {
         match config.tool {
+            #[cfg(feature = "qoder")]
             AiTool::QoderCli => qoder_parse_result(
                 process.exit_code,
                 &process.stdout,
@@ -148,6 +163,7 @@ pub(super) async fn run(
                 .unwrap_or_else(|_| unavailable(invocation_key));
                 (code, usage)
             }),
+            #[cfg(feature = "codex")]
             AiTool::CodexCli => {
                 let stdout =
                     String::from_utf8(process.stdout).map_err(|_| ErrorCode::ExecutorFailed)?;
@@ -163,6 +179,8 @@ pub(super) async fn run(
                 .map(|parsed| (parsed.result, parsed.usage, urls(parsed.websearch)))
                 .map_err(|_| (ErrorCode::ExecutorFailed, unavailable(invocation_key)))
             }
+            #[allow(unreachable_patterns)]
+            _ => return Err(ErrorCode::InvalidRequest),
         }
     };
     let (result, usage, websearch_urls) = match result {
@@ -180,6 +198,7 @@ pub(super) async fn run(
     })
 }
 
+#[cfg(feature = "qoder")]
 fn append_section(target: &mut String, name: &str, content: &str) {
     if !target.ends_with('\n') {
         target.push('\n');
@@ -203,6 +222,7 @@ pub(super) fn unavailable(invocation_key: &str) -> UsageUpdate {
     }
 }
 
+#[cfg(feature = "codex")]
 async fn read_result(path: &Path, max: usize) -> Result<String, ErrorCode> {
     let limit = u64::try_from(max)
         .ok()
@@ -222,6 +242,7 @@ async fn read_result(path: &Path, max: usize) -> Result<String, ErrorCode> {
     String::from_utf8(bytes).map_err(|_| ErrorCode::ExecutorFailed)
 }
 
+#[cfg(feature = "codex")]
 fn urls(observations: Vec<CodexWebSearchObservation>) -> Vec<String> {
     observations
         .into_iter()
@@ -229,6 +250,7 @@ fn urls(observations: Vec<CodexWebSearchObservation>) -> Vec<String> {
         .collect()
 }
 
+#[cfg(feature = "qoder")]
 fn qoder_error(error: QoderError) -> ErrorCode {
     match error {
         QoderError::OutputTooLarge => ErrorCode::ArtifactTooLarge,
