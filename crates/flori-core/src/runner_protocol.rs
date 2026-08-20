@@ -99,6 +99,7 @@ pub enum UsageUpdate {
 pub struct UsageAck {
     pub usage_id: AiUsageId,
     pub state: AiUsageState,
+    pub applied: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -186,6 +187,61 @@ mod tests {
         assert_eq!(serde_json::to_string(&update).expect("wire JSON"), json);
         serde_json::from_str::<UsageUpdate>(&json.replace('}', ",\"extra\":1}"))
             .expect_err("unknown field");
+    }
+
+    #[test]
+    fn usage_preserves_codex_tokens_and_qoder_credits() {
+        let codex = UsageUpdate::Final {
+            invocation_key: "codex-1".to_owned(),
+            origin: UsageOrigin::Observed,
+            input_tokens: Some(120),
+            output_tokens: Some(30),
+            cost_micros: None,
+            credits_micros: None,
+        };
+        let qoder = UsageUpdate::Final {
+            invocation_key: "qoder-1".to_owned(),
+            origin: UsageOrigin::Observed,
+            input_tokens: None,
+            output_tokens: None,
+            cost_micros: None,
+            credits_micros: Some(2_500_000),
+        };
+
+        let codex_json = serde_json::to_string(&codex).expect("Codex usage");
+        assert!(codex_json.contains(r#""input_tokens":120"#));
+        assert!(codex_json.contains(r#""credits_micros":null"#));
+        let qoder_json = serde_json::to_string(&qoder).expect("Qoder usage");
+        assert!(qoder_json.contains(r#""input_tokens":null"#));
+        assert!(qoder_json.contains(r#""output_tokens":null"#));
+        assert!(qoder_json.contains(r#""credits_micros":2500000"#));
+        assert!(!qoder_json.contains(r#""input_tokens":0"#));
+        assert!(!qoder_json.contains(r#""output_tokens":0"#));
+    }
+
+    #[test]
+    fn usage_ack_distinguishes_application_from_idempotent_replay() {
+        let usage_id = AiUsageId::generate();
+        let applied = UsageAck {
+            usage_id,
+            state: AiUsageState::Started,
+            applied: true,
+        };
+        let replayed = UsageAck {
+            applied: false,
+            ..applied
+        };
+
+        assert!(
+            serde_json::to_string(&applied)
+                .expect("applied ack")
+                .contains(r#""applied":true"#)
+        );
+        assert!(
+            serde_json::to_string(&replayed)
+                .expect("replayed ack")
+                .contains(r#""applied":false"#)
+        );
     }
 
     #[test]

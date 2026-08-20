@@ -1,10 +1,11 @@
 use utoipa::OpenApi;
 
 use crate::{
-    AiModelCapability, AiRunnerSelection, AiTool, AiUsageId, AiUsageState, ArtifactDeclaration,
-    ArtifactId, ArtifactKind, ArtifactManifest, ArtifactManifestEntry, ArtifactManifestSchema,
-    ArtifactOrigin, ArtifactRetention, ArtifactWhen, AttemptAck, AttemptId, AttemptState,
-    CollectionId, CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId, CreateJobRequest,
+    AiAudit, AiAuditSchema, AiModelCapability, AiResultEnvelope, AiResultSchema, AiRunnerSelection,
+    AiTool, AiUsageId, AiUsageState, ArtifactDeclaration, ArtifactId, ArtifactKind,
+    ArtifactManifest, ArtifactManifestEntry, ArtifactManifestSchema, ArtifactOrigin,
+    ArtifactRetention, ArtifactWhen, AttemptAck, AttemptId, AttemptState, CollectionId,
+    CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId, CreateJobRequest,
     CreateRemoteSource, CreateRunnerSlot, CreateRunnerSlotResponse, CreatedJob, CreatedSource,
     CredentialId, CredentialKind, DomainId, ErrorBody, ErrorCode, ErrorResponse, EvidenceId,
     EvidenceLocatorKind, Executor, FailAttemptRequest, GlossaryTermId, GlossaryTermState,
@@ -15,8 +16,9 @@ use crate::{
     ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool, RunnerToolCapability, SearchChunkId,
     SecretCredential, SecretInputs, Sha256Digest, SourceId, SourceInputId, SourceKind,
     StartUploadRequest, StartUploadResponse, SystemHealthStatus, TaskClaim, TaskId, TaskLogEvent,
-    TaskLogLevel, TaskLogLine, TaskState, UploadCursor, UploadId, UploadOwnerKind, UploadState,
-    UsageAck, UsageOrigin, UsageUpdate, VerifyUploadRequest, VerifyUploadResponse,
+    TaskLogLevel, TaskLogLine, TaskState, TermEntry, TermsManifest, TermsManifestSchema,
+    UploadCursor, UploadId, UploadOwnerKind, UploadState, UsageAck, UsageOrigin, UsageUpdate,
+    VerifyUploadRequest, VerifyUploadResponse,
 };
 
 #[derive(OpenApi)]
@@ -82,6 +84,13 @@ use crate::{
     ResolvedPrompt,
     ResolvedProfile,
     ResolvedTaskInputs,
+    TermsManifestSchema,
+    TermEntry,
+    TermsManifest,
+    AiAuditSchema,
+    AiAudit,
+    AiResultSchema,
+    AiResultEnvelope,
     SecretCredential,
     SecretInputs,
     TaskClaim,
