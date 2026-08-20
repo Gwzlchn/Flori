@@ -10,6 +10,7 @@ use sqlx::{
 
 const SCHEMA: &str = include_str!("../migrations/0001_v1.sql");
 
+mod knowledge;
 mod lease;
 mod reconcile;
 mod runner;

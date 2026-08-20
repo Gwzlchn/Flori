@@ -1,4 +1,6 @@
+use super::super::knowledge::rebuild_source_projection;
 use super::super::{Store, StoreError};
+use crate::artifact::NasArtifactStore;
 use flori_core::{AttemptId, ErrorCode, JobId, TaskId};
 use sqlx::Row;
 
@@ -9,6 +11,30 @@ impl Store {
         task_id: TaskId,
         attempt_id: AttemptId,
         now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.publish(job_id, task_id, attempt_id, now_ms, None)
+            .await
+    }
+
+    pub async fn publish_job_with_projection(
+        &self,
+        artifacts: &NasArtifactStore,
+        job_id: JobId,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.publish(job_id, task_id, attempt_id, now_ms, Some(artifacts))
+            .await
+    }
+
+    async fn publish(
+        &self,
+        job_id: JobId,
+        task_id: TaskId,
+        attempt_id: AttemptId,
+        now_ms: i64,
+        artifacts: Option<&NasArtifactStore>,
     ) -> Result<(), StoreError> {
         if now_ms < 0 {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
@@ -63,6 +89,23 @@ impl Store {
         if unfinished != 0 {
             transaction.rollback().await?;
             return Err(StoreError::new(ErrorCode::Conflict));
+        }
+
+        let has_evidence: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE job_id=? AND kind='evidence')",
+        )
+        .bind(&job_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        match (artifacts, has_evidence) {
+            (Some(artifacts), true) => {
+                rebuild_source_projection(&mut transaction, artifacts, &source_id, &job_id).await?;
+            }
+            (None, true) | (Some(_), false) => {
+                transaction.rollback().await?;
+                return Err(StoreError::new(ErrorCode::EvidenceInvalid));
+            }
+            (None, false) => {}
         }
 
         sqlx::query(
