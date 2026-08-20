@@ -17,16 +17,21 @@ pub(super) fn validate_core_input(
         ],
         _ => return Err(invalid()),
     };
-    expected
+    let content_artifacts = producer
+        .artifacts
         .iter()
-        .all(|(kind, required)| {
-            producer
+        .filter(|artifact| !matches!(artifact.kind, ArtifactKind::TaskLog | ArtifactKind::AiAudit));
+    (content_artifacts.count() == expected.len()
+        && expected.iter().all(|(kind, required)| {
+            let mut matching = producer
                 .artifacts
                 .iter()
-                .filter(|artifact| artifact.kind == *kind && artifact.required == *required)
-                .count()
-                == 1
-        })
-        .then_some(())
-        .ok_or_else(invalid)
+                .filter(|artifact| artifact.kind == *kind);
+            matching
+                .next()
+                .is_some_and(|artifact| artifact.required == *required)
+                && matching.next().is_none()
+        }))
+    .then_some(())
+    .ok_or_else(invalid)
 }

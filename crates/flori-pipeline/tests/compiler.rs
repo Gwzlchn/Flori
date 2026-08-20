@@ -206,6 +206,16 @@ fn rejects_wrong_input_shapes_and_duplicate_keys() {
             1,
         ),
         PDF.replacen(
+            "    - { name: figures, kind: figure, path: output/figures/*, required: false, when: on_success, max_files: 128, max_bytes: 20971520 }",
+            "    - { name: figures, kind: figure, path: output/figures/*, required: false, when: on_success, max_files: 128, max_bytes: 20971520 }\n    - { name: shadow_structure, kind: document_structure, path: output/shadow.json, required: false, when: on_success, max_bytes: 10485760 }",
+            1,
+        ),
+        PDF.replacen(
+            "    - { name: terms, kind: terms, path: output/terms.json, required: true, when: on_success, max_bytes: 10485760 }",
+            "    - { name: terms, kind: terms, path: output/terms.json, required: true, when: on_success, max_bytes: 10485760 }\n    - { name: shadow_note, kind: smart_note, path: output/shadow.md, required: false, when: on_success, max_bytes: 10485760 }",
+            1,
+        ),
+        PDF.replacen(
             "    pdf: $needs.acquire.original",
             "    pdf: $needs.acquire.original\n    pdf: $needs.acquire.original",
             1,
