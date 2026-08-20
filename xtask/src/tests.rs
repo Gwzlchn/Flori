@@ -53,6 +53,7 @@ fn exposes_only_fixed_image_mappings() {
             .iter()
             .any(|arg| arg == "HTTPS_PROXY=http://proxy:8080")
     );
+    assert!(ai_args.windows(2).any(|args| args == ["--network", "host"]));
     assert_eq!(ai_args.last().unwrap(), ".");
     assert!(
         ai_args
@@ -66,6 +67,7 @@ fn exposes_only_fixed_image_mappings() {
     );
 
     let server = image_command("server", None, true).unwrap();
+    assert!(!server.get_args().any(|arg| arg == "--network"));
     assert!(
         server
             .get_args()

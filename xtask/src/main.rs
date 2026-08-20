@@ -157,6 +157,7 @@ fn image_command(name: &str, proxy: Option<&str>, gha_cache: bool) -> Result<Com
         command.args(["--target", target]);
     }
     if let Some(proxy) = proxy {
+        command.args(["--network", "host"]);
         command.args(["--build-arg", &format!("HTTP_PROXY={proxy}")]);
         command.args(["--build-arg", &format!("HTTPS_PROXY={proxy}")]);
     }
