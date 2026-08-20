@@ -8,12 +8,13 @@ use std::{
 };
 
 use flori_core::{
-    AiAudit, AiModelCapability, AiTool, ArtifactKind, ArtifactManifestEntry, AttemptId,
-    CreateRunnerSlot, DomainId, ErrorCode, Executor, JobId, JobInputs, JobTrigger, LogFrame,
-    PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
-    PromptSnapshotPrompt, RegisterRunnerRequest, RerunJobRequest, RerunMode, ResolvedTaskInputs,
-    RunnerTool, RunnerToolCapability, Sha256Digest, SourceInputId, SourceKind, StartUploadRequest,
-    TaskClaim, TaskId, TaskLogLevel, TaskLogLine, UsageOrigin, UsageUpdate, VerifyUploadRequest,
+    AiAudit, AiModelCapability, AiTool, ArtifactId, ArtifactKind, ArtifactManifestEntry,
+    CreateRunnerSlot, DocumentStructure, DomainId, ErrorCode, EvidenceId, Executor, JobId,
+    JobInputs, JobTrigger, LogFrame, PipelineId, PipelineRevisionId, PromptSnapshot,
+    PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt, RegisterRunnerRequest,
+    RerunJobRequest, RerunMode, ResolvedTaskInputs, RunnerTool, RunnerToolCapability, Sha256Digest,
+    SourceInputId, SourceKind, StartUploadRequest, TaskClaim, TaskLogLevel, TaskLogLine,
+    UsageOrigin, UsageUpdate, VerifyUploadRequest,
 };
 use flori_pipeline::{Compilation, compile};
 use flori_runner::{DaemonConfig, RunnerClient, manifest_sha256, run_ai_daemon};
@@ -344,20 +345,52 @@ async fn upload(
         .artifact
 }
 
-fn artifact_body(kind: ArtifactKind) -> (&'static str, &'static [u8]) {
+fn artifact_body(
+    claim: &TaskClaim,
+    kind: ArtifactKind,
+    evidence: Option<(EvidenceId, ArtifactId)>,
+) -> (&'static str, Vec<u8>) {
     match kind {
-        ArtifactKind::SourceOriginal => ("application/pdf", b"%PDF-1.7\n"),
+        ArtifactKind::SourceOriginal => ("application/pdf", b"%PDF-1.7\n".to_vec()),
         ArtifactKind::DocumentStructure => (
             "application/json",
-            br#"{"schema":"flori.document_structure.v1","pages":[]}"#,
+            format!(
+                r#"{{"schema":"flori.document_structure.v1","source_artifact_id":"{}","language":"en","pages":[{{"page":1,"width_pt":100.0,"height_pt":200.0}}],"sections":[{{"id":"section-1","heading":"Introduction","blocks":[{{"page":1,"bbox":{{"x1":1.0,"y1":1.0,"x2":90.0,"y2":20.0}},"text":"Attention is all you need."}}]}}],"figures":[],"tables":[]}}"#,
+                match &claim.resolved_inputs {
+                    ResolvedTaskInputs::DocumentExtract { pdf } => pdf.artifact_id,
+                    _ => panic!("document structure requires extract inputs"),
+                }
+            )
+            .into_bytes(),
         ),
-        ArtifactKind::SmartNote => ("text/markdown", b"# Smart note\n"),
-        ArtifactKind::Summary => ("text/markdown", b"# Summary\n"),
+        ArtifactKind::SmartNote => {
+            let (id, _) = evidence.expect("note evidence");
+            (
+                "text/markdown",
+                format!("# Smart note\n\n## 来源事实\nAttention is all you need. [[evidence:{id}]]\n\n## AI 分析\nThe source motivates attention.\n").into_bytes(),
+            )
+        }
+        ArtifactKind::Summary => {
+            let (id, _) = evidence.expect("summary evidence");
+            (
+                "text/markdown",
+                format!("Attention is all you need. [[evidence:{id}]]\n").into_bytes(),
+            )
+        }
         ArtifactKind::Terms => (
             "application/json",
-            br#"{"schema":"flori.terms.v1","terms":[],"evidence_candidates":[]}"#,
+            {
+                let (id, source) = evidence.expect("terms evidence");
+                format!(
+                    r#"{{"schema":"flori.terms.v1","terms":[{{"term":"Attention","explanation":"A mechanism that relates positions.","evidence_ids":["{id}"]}}],"evidence_candidates":[{{"evidence_id":"{id}","source_artifact_id":"{source}","locator":{{"kind":"pdf","value":{{"page":1,"bbox":{{"x1":1.0,"y1":1.0,"x2":90.0,"y2":20.0}}}}}},"quote":"Attention is all you need."}}]}}"#,
+                )
+                .into_bytes()
+            },
         ),
-        ArtifactKind::AiAudit => ("application/json", br#"{"tool":"codex_cli","status":"ok"}"#),
+        ArtifactKind::AiAudit => (
+            "application/json",
+            br#"{"tool":"codex_cli","status":"ok"}"#.to_vec(),
+        ),
         _ => panic!("unexpected required runner artifact: {kind:?}"),
     }
 }
@@ -413,14 +446,15 @@ async fn run_runner_task(client: &RunnerClient, claim: &TaskClaim) {
             .expect("usage final");
         assert_eq!(started.usage_id, finalized.usage_id);
     }
+    let evidence = note_evidence(client, claim).await;
     let mut entries = Vec::new();
     for output in claim
         .output_declarations
         .iter()
         .filter(|output| output.required && output.kind != ArtifactKind::TaskLog)
     {
-        let (media, bytes) = artifact_body(output.kind);
-        entries.push(upload(client, claim, &output.name, media, bytes).await);
+        let (media, bytes) = artifact_body(claim, output.kind, evidence);
+        entries.push(upload(client, claim, &output.name, media, &bytes).await);
     }
     let manifest =
         manifest_sha256(claim.job_id, claim.task_id, claim.exec_id, entries).expect("manifest");
@@ -428,6 +462,25 @@ async fn run_runner_task(client: &RunnerClient, claim: &TaskClaim) {
         .complete(claim.exec_id, manifest)
         .await
         .expect("complete");
+}
+
+async fn note_evidence(
+    client: &RunnerClient,
+    claim: &TaskClaim,
+) -> Option<(EvidenceId, ArtifactId)> {
+    let ResolvedTaskInputs::AiDocumentNote { document, .. } = &claim.resolved_inputs else {
+        return None;
+    };
+    let path = std::env::temp_dir().join(format!("flori-document-{}", claim.exec_id));
+    client
+        .download_artifact(document, &path)
+        .await
+        .expect("download document structure");
+    let bytes = fs::read(&path).expect("read document structure");
+    fs::remove_file(path).expect("remove downloaded structure");
+    let document: DocumentStructure =
+        serde_json::from_slice(&bytes).expect("strict document structure");
+    Some((EvidenceId::generate(), document.source_artifact_id))
 }
 
 async fn execute_and_publish(harness: &Harness, job_id: JobId) {
@@ -449,39 +502,7 @@ async fn execute_and_publish(harness: &Harness, job_id: JobId) {
             .expect("core tasks are not polled")
             .is_none()
     );
-    validate_and_publish(harness, job_id).await;
-}
-
-async fn validate_and_publish(harness: &Harness, job_id: JobId) {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT task_key,id FROM tasks WHERE job_id=? AND task_key IN ('validate','publish')",
-    )
-    .bind(job_id.to_string())
-    .fetch_all(&harness.pool)
-    .await
-    .expect("core tasks");
-    let ids = rows.into_iter().collect::<BTreeMap<_, _>>();
-    let now = now_ms();
-    harness
-        .store
-        .complete_core_task(
-            job_id,
-            ids["validate"].parse::<TaskId>().expect("validate ID"),
-            AttemptId::generate(),
-            now,
-        )
-        .await
-        .expect("validate");
-    harness
-        .store
-        .publish_job(
-            job_id,
-            ids["publish"].parse::<TaskId>().expect("publish ID"),
-            AttemptId::generate(),
-            now + 1,
-        )
-        .await
-        .expect("publish");
+    assert!(harness.client.poll().await.expect("drive core").is_none());
 }
 
 async fn assert_source_content(harness: &Harness, claim: &TaskClaim) {
@@ -642,7 +663,8 @@ async fn assert_published(harness: &Harness, job_id: JobId, usage_total: i64) {
             "note/log:task_log",
             "note/smart_note:smart_note",
             "note/summary:summary",
-            "note/terms:terms"
+            "note/terms:terms",
+            "validate/evidence:evidence"
         ]
         .map(str::to_owned)
     );
@@ -653,7 +675,7 @@ async fn assert_published(harness: &Harness, job_id: JobId, usage_total: i64) {
     .fetch_all(&harness.pool)
     .await
     .expect("artifacts");
-    assert_eq!(artifacts.len(), 9);
+    assert_eq!(artifacts.len(), 10);
     assert_eq!(
         artifacts
             .iter()
@@ -692,10 +714,31 @@ async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
         run_runner_task(&harness.client, &claim).await;
     }
 
-    let envelope = r#"{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"AI note","summary_markdown":"AI summary","terms":{"schema":"flori.terms.v1","terms":[],"evidence_candidates":[]}}"#;
+    let original_id: ArtifactId = sqlx::query_scalar::<_, String>(
+        "SELECT a.id FROM artifacts a JOIN tasks t ON t.id=a.task_id \
+         WHERE a.job_id=? AND t.task_key='acquire' AND a.kind='source_original'",
+    )
+    .bind(job_id.to_string())
+    .fetch_one(&harness.pool)
+    .await
+    .expect("source artifact")
+    .parse()
+    .expect("typed artifact ID");
+    let evidence_id = EvidenceId::generate();
+    let smart_note = serde_json::to_string(&format!(
+        "# Smart note\n\n## 来源事实\nAttention is all you need. [[evidence:{evidence_id}]]\n\n## AI 分析\nThe source motivates attention.\n"
+    ))
+    .expect("smart note JSON string");
+    let summary = serde_json::to_string(&format!(
+        "Attention is all you need. [[evidence:{evidence_id}]]"
+    ))
+    .expect("summary JSON string");
+    let envelope = format!(
+        r#"{{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":{smart_note},"summary_markdown":{summary},"terms":{{"schema":"flori.terms.v1","terms":[{{"term":"Attention","explanation":"A mechanism that relates positions.","evidence_ids":["{evidence_id}"]}}],"evidence_candidates":[{{"evidence_id":"{evidence_id}","source_artifact_id":"{original_id}","locator":{{"kind":"pdf","value":{{"page":1,"bbox":{{"x1":1.0,"y1":1.0,"x2":90.0,"y2":20.0}}}}}},"quote":"Attention is all you need."}}]}}}}"#,
+    );
     let agent = format!(
         r#"{{"type":"item.completed","item":{{"id":"item","type":"agent_message","text":{}}}}}"#,
-        serde_json::to_string(envelope).expect("nested result")
+        serde_json::to_string(&envelope).expect("nested result")
     );
     let events = [
         r#"{"type":"thread.started","thread_id":"thread"}"#.to_owned(),
@@ -717,6 +760,7 @@ async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
          cat > '{stdin}'\nprintf '%s' '{envelope}' > \"$result\"\n{event_writes}\n",
         argv = captured_argv.display(),
         stdin = captured_stdin.display(),
+        envelope = envelope,
     );
     fs::write(&executable, script).expect("fake Codex");
     let mut permissions = fs::metadata(&executable)
@@ -765,7 +809,7 @@ async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
     cancel_tx.send(true).expect("cancel daemon");
     assert_eq!(daemon.await.expect("daemon join"), Ok(()));
 
-    validate_and_publish(&harness, job_id).await;
+    assert!(harness.client.poll().await.expect("drive core").is_none());
     assert_published(&harness, job_id, 1).await;
     let pointers: (Option<String>, Option<String>) =
         sqlx::query_as("SELECT current_job_id,previous_job_id FROM sources WHERE id=?")
@@ -806,12 +850,19 @@ async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
     let artifact = |name: &str| {
         fs::read(harness.root.join("artifacts").join(&note_artifacts[name])).expect("NAS artifact")
     };
-    assert_eq!(artifact("smart_note"), b"AI note");
-    assert_eq!(artifact("summary"), b"AI summary");
-    assert_eq!(
-        artifact("terms"),
-        br#"{"schema":"flori.terms.v1","terms":[],"evidence_candidates":[]}"#
+    assert!(
+        String::from_utf8(artifact("smart_note"))
+            .expect("note UTF-8")
+            .contains("## AI 分析")
     );
+    assert!(
+        String::from_utf8(artifact("summary"))
+            .expect("summary UTF-8")
+            .contains("[[evidence:")
+    );
+    let terms: flori_core::TermsManifest =
+        serde_json::from_slice(&artifact("terms")).expect("strict terms");
+    assert_eq!((terms.terms.len(), terms.evidence_candidates.len()), (1, 1));
     let audit: AiAudit = serde_json::from_slice(&artifact("audit")).expect("strict AI audit");
     assert_eq!(
         (audit.tool, audit.model.as_str()),
@@ -827,7 +878,7 @@ async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
     let stdin = fs::read_to_string(captured_stdin).expect("captured stdin");
     let log = String::from_utf8(artifact("log")).expect("task log");
     assert!(stdin.contains("PROMPT 4\nnote\n"));
-    assert!(stdin.contains(r#"{"schema":"flori.document_structure.v1","pages":[]}"#));
+    assert!(stdin.contains(r#"{"schema":"flori.document_structure.v1"#));
     assert!(!argv.contains("flori.document_structure.v1"));
     assert!(!argv.contains(&stdin));
     assert!(log.contains("AI task started"));
