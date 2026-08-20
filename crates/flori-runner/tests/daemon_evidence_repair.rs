@@ -7,7 +7,7 @@ use std::{fs, net::TcpListener, time::Duration};
 
 use flori_core::{
     AiAudit, ArtifactId, ArtifactKind, ArtifactWhen, AttemptId, AttemptState, ErrorCode,
-    EvidenceId, Executor, ResolvedTaskInputs, UsageUpdate,
+    EvidenceId, EvidenceLocator, Executor, ResolvedTaskInputs, UsageUpdate,
 };
 use flori_runner::{DaemonConfig, RunnerClient, run_ai_daemon};
 use tokio::sync::watch;
@@ -19,6 +19,8 @@ use support::*;
 enum Case {
     RepairSucceeds,
     RepairFails,
+    BadBboxRepairs,
+    BadQuoteRepairs,
     PrimaryValid,
     InvalidOuter,
 }
@@ -31,6 +33,12 @@ async fn invalid_evidence_repairs_once_and_succeeds() {
 #[tokio::test]
 async fn invalid_repair_fails_after_exactly_two_calls() {
     run_case(Case::RepairFails).await;
+}
+
+#[tokio::test]
+async fn invalid_bbox_and_quote_each_repair_once() {
+    run_case(Case::BadBboxRepairs).await;
+    run_case(Case::BadQuoteRepairs).await;
 }
 
 #[tokio::test]
@@ -47,6 +55,8 @@ async fn run_case(case: Case) {
     let root = temp_root(match case {
         Case::RepairSucceeds => "repair-success",
         Case::RepairFails => "repair-failure",
+        Case::BadBboxRepairs => "repair-bbox",
+        Case::BadQuoteRepairs => "repair-quote",
         Case::PrimaryValid => "primary-valid",
         Case::InvalidOuter => "invalid-outer",
     });
@@ -56,9 +66,24 @@ async fn run_case(case: Case) {
     let evidence_id = EvidenceId::generate();
     let valid = note(source_id, evidence_id, true);
     let invalid = note(source_id, evidence_id, false);
+    let mut bad_bbox = valid.clone();
+    let flori_core::AiResultEnvelope::DocumentNote { terms, .. } = &mut bad_bbox else {
+        panic!("document note");
+    };
+    let EvidenceLocator::Pdf { bbox, .. } = &mut terms.evidence_candidates[0].locator else {
+        panic!("PDF evidence");
+    };
+    bbox.x2 = 101.0;
+    let mut bad_quote = valid.clone();
+    let flori_core::AiResultEnvelope::DocumentNote { terms, .. } = &mut bad_quote else {
+        panic!("document note");
+    };
+    terms.evidence_candidates[0].quote = "invented quote".into();
     let (primary, repair) = match case {
         Case::RepairSucceeds => (invalid.clone(), valid.clone()),
         Case::RepairFails => (invalid.clone(), invalid),
+        Case::BadBboxRepairs => (bad_bbox, valid.clone()),
+        Case::BadQuoteRepairs => (bad_quote, valid.clone()),
         Case::PrimaryValid => (valid.clone(), valid),
         Case::InvalidOuter => (valid.clone(), valid),
     };
@@ -157,7 +182,10 @@ async fn run_case(case: Case) {
         calls - 1
     );
     match case {
-        Case::RepairSucceeds | Case::PrimaryValid => {
+        Case::RepairSucceeds
+        | Case::BadBboxRepairs
+        | Case::BadQuoteRepairs
+        | Case::PrimaryValid => {
             assert_eq!(observed.state, AttemptState::Succeeded);
             assert_eq!(observed.error, None);
             assert!(observed.uploaded.contains_key("smart_note"));

@@ -2,7 +2,7 @@ mod core_validation_support;
 
 use std::{fs, path::Path};
 
-use flori_core::ErrorCode;
+use flori_core::{ErrorCode, EvidenceLocator, TermsManifest};
 
 use core_validation_support::{CrashPoint, Fixture, assert_reserved, digest, evidence_bytes};
 
@@ -139,6 +139,74 @@ async fn core_validation_recovery_fails_closed_on_digest_or_path_drift() {
         .expect_err("path drift must fail");
     assert_eq!(error.code(), ErrorCode::CorruptState);
     assert_reserved(&path_fixture, &path_reserved, "receiving").await;
+}
+
+#[tokio::test]
+async fn core_validation_rejects_forged_bbox_and_quote_without_artifact_residue() {
+    for bad_quote in [false, true] {
+        let fixture = Fixture::new().await;
+        let (path, original): (String, String) = sqlx::query_as(
+            "SELECT relative_path,sha256 FROM artifacts WHERE job_id=? AND kind='terms'",
+        )
+        .bind(fixture.job_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("terms artifact");
+        let mut terms: TermsManifest =
+            serde_json::from_slice(&fs::read(fixture.root.join(&path)).expect("terms bytes"))
+                .expect("terms manifest");
+        let item = terms
+            .evidence_candidates
+            .first_mut()
+            .expect("evidence candidate");
+        if bad_quote {
+            item.quote = "invented quote".into();
+        } else if let EvidenceLocator::Pdf { bbox, .. } = &mut item.locator {
+            bbox.x2 += 1.0;
+        } else {
+            panic!("PDF locator");
+        }
+        let bytes = serde_json::to_vec(&terms).expect("mutated terms");
+        assert_ne!(digest(&bytes).as_str(), original);
+        fs::write(fixture.root.join(&path), &bytes).expect("write forged terms");
+        sqlx::query("UPDATE artifacts SET size_bytes=?,sha256=? WHERE job_id=? AND kind='terms'")
+            .bind(i64::try_from(bytes.len()).expect("size"))
+            .bind(digest(&bytes).as_str())
+            .bind(fixture.job_id.to_string())
+            .execute(&fixture.pool)
+            .await
+            .expect("freeze forged digest");
+
+        assert!(
+            fixture
+                .store
+                .drive_core_once(&fixture.artifacts(), 10)
+                .await
+                .unwrap()
+        );
+        let state: (String, String, String) = sqlx::query_as(
+            "SELECT j.state,t.state,t.error_code FROM jobs j JOIN tasks t ON t.job_id=j.id \
+             WHERE j.id=? AND t.id=?",
+        )
+        .bind(fixture.job_id.to_string())
+        .bind(fixture.validate_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("failed validation");
+        assert_eq!(
+            state,
+            ("failed".into(), "failed".into(), "evidence_invalid".into())
+        );
+        let residue: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM uploads), \
+             (SELECT count(*) FROM artifacts WHERE job_id=? AND kind='evidence')",
+        )
+        .bind(fixture.job_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("residue counts");
+        assert_eq!(residue, (0, 0));
+    }
 }
 
 fn file_count(path: &Path) -> usize {
