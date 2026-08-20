@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE ai_usage SET state='final',origin=?,input_tokens=?,output_tokens=?,\n                 cost_micros=?,credits_micros=?,finalized_at_ms=?\n             WHERE attempt_id=? AND invocation_key=? AND state='started'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "e019b4d2e713d2806484a4f5f45a44f1267f4ebe6c73131eb8892f8343354d3a"
+}

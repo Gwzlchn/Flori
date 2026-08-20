@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE attempts SET lease_expires_at_ms=?\n             WHERE id=? AND runner_id=? AND state='leased'\n               AND lease_expires_at_ms>? AND lease_expires_at_ms<=?\n               AND EXISTS(\n                 SELECT 1 FROM tasks t JOIN jobs j ON j.id=t.job_id\n                 WHERE t.id=attempts.task_id AND t.state='leased'\n                   AND t.current_attempt_id=attempts.id AND j.state='running'\n               )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "f4648a6d7a1cc285b1d4c5ff83bcef075dee50918656c76b22623029f3600d2d"
+}

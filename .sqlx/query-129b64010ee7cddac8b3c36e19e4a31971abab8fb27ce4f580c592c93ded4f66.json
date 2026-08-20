@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tasks SET state='leased',current_attempt_id=?,\n                 started_at_ms=COALESCE(started_at_ms,?)\n             WHERE id=? AND state='ready'\n               AND EXISTS(SELECT 1 FROM jobs WHERE id=tasks.job_id AND state='running')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "129b64010ee7cddac8b3c36e19e4a31971abab8fb27ce4f580c592c93ded4f66"
+}

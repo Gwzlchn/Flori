@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS 'id!',state AS 'state!',origin,created_at_ms AS 'created_at_ms!',\n                    input_tokens,output_tokens,cost_micros,credits_micros\n             FROM ai_usage WHERE attempt_id=? AND invocation_key=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "state!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "origin",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "origin"
+          }
+        }
+      },
+      {
+        "name": "created_at_ms!",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "created_at_ms"
+          }
+        }
+      },
+      {
+        "name": "input_tokens",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "input_tokens"
+          }
+        }
+      },
+      {
+        "name": "output_tokens",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "output_tokens"
+          }
+        }
+      },
+      {
+        "name": "cost_micros",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "cost_micros"
+          }
+        }
+      },
+      {
+        "name": "credits_micros",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "credits_micros"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "d071e3b0fd0367e9cd965a48ef4460302c4d5edf8d2fc98aa5db62b6d2dc7278"
+}

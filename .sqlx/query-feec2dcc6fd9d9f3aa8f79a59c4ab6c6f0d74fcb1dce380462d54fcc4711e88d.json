@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS 'id!',job_id AS 'job_id!',task_id AS 'task_id!',\n                    state AS 'state!',tool AS 'tool!',model AS 'model!',effort AS 'effort!'\n             FROM ai_usage WHERE attempt_id=? AND invocation_key=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "job_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "job_id"
+          }
+        }
+      },
+      {
+        "name": "task_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "task_id"
+          }
+        }
+      },
+      {
+        "name": "state!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "tool!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "tool"
+          }
+        }
+      },
+      {
+        "name": "model!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "model"
+          }
+        }
+      },
+      {
+        "name": "effort!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "effort"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "feec2dcc6fd9d9f3aa8f79a59c4ab6c6f0d74fcb1dce380462d54fcc4711e88d"
+}

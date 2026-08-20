@@ -16,6 +16,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  SQLX_OFFLINE: true
 
 jobs:
   check:
@@ -48,12 +49,17 @@ jobs:
         env:
           BASE: ${{ steps.diff-base.outputs.base }}
         run: |
-          if git show "$BASE:ROADMAP.md" | grep -Eq '^\| WP04 .*完成'; then
+          if git show "$BASE:ROADMAP.md" | grep -Eq '^\| WP05-WP07 首批产品实现 \| 完成 \|'; then
             cargo xtask diff-budget "$BASE"
           else
-            FLORI_DIFF_MAX_LINES=5000 FLORI_DIFF_MAX_FILES=100 cargo xtask diff-budget "$BASE"
+            FLORI_DIFF_MAX_LINES=1800 FLORI_DIFF_MAX_FILES=20 cargo xtask diff-budget "$BASE"
           fi
       - run: cargo xtask check
+      - name: Verify SQLx offline metadata
+        run: |
+          cargo install sqlx-cli --version 0.9.0 --locked --no-default-features --features sqlite
+          sqlite3 "$RUNNER_TEMP/flori-sqlx.db" ".read crates/flori-store/migrations/0001_v1.sql"
+          DATABASE_URL="sqlite://$RUNNER_TEMP/flori-sqlx.db" cargo sqlx prepare --check --workspace -- --all-targets
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   test:

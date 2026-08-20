@@ -80,6 +80,7 @@ fn numstat_excludes_generated_lock_and_binary_files() {
         "50\t0\tCargo.lock\n",
         "75\t0\tfrontend/package-lock.json\n",
         "90\t0\tfrontend/.generated/api.ts\n",
+        "40\t0\t.sqlx/query.json\n",
         "-\t-\ttests/fixture.pdf\n",
         "1\t8\tfrontend/src/App.vue\n",
     );

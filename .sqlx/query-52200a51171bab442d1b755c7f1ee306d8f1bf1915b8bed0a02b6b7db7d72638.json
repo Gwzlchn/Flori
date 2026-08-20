@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attempts(\n                 id,task_id,attempt_no,runner_id,state,model,effort,runner_config_revision,\n                 lease_expires_at_ms,last_log_sequence,started_at_ms\n             ) SELECT ?,t.id,\n                 COALESCE((SELECT MAX(previous.attempt_no)+1 FROM attempts previous WHERE previous.task_id=t.id),1),\n                 ?,'leased',t.selected_model,t.selected_effort,t.runner_config_revision,?,0,?\n             FROM tasks t JOIN jobs j ON j.id=t.job_id JOIN runners r ON r.id=?\n             WHERE t.id=? AND t.state='ready' AND j.state='running' AND r.state='enabled'\n               AND (t.ready_at_ms IS NULL OR t.ready_at_ms<=?)\n               AND (t.pinned_runner_id IS NULL OR t.pinned_runner_id=r.id)\n               AND (SELECT COUNT(*) FROM attempts previous WHERE previous.task_id=t.id)<t.attempt_limit",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "52200a51171bab442d1b755c7f1ee306d8f1bf1915b8bed0a02b6b7db7d72638"
+}

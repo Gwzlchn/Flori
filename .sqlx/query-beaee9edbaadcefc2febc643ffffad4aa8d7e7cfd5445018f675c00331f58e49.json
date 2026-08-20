@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.runner_id AS 'runner_id?',a.state AS 'state!',\n                    a.lease_expires_at_ms AS 'lease_expires_at_ms!',\n                    t.state AS 'task_state!',t.current_attempt_id AS 'current_attempt_id?',\n                    j.state AS 'job_state!'\n             FROM attempts a JOIN tasks t ON t.id=a.task_id JOIN jobs j ON j.id=t.job_id\n             WHERE a.id=?",
+  "describe": {
+    "columns": [
+      {
+        "name": "runner_id?",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempts",
+            "name": "runner_id"
+          }
+        }
+      },
+      {
+        "name": "state!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attempts",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "lease_expires_at_ms!",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "attempts",
+            "name": "lease_expires_at_ms"
+          }
+        }
+      },
+      {
+        "name": "task_state!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "current_attempt_id?",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tasks",
+            "name": "current_attempt_id"
+          }
+        }
+      },
+      {
+        "name": "job_state!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "beaee9edbaadcefc2febc643ffffad4aa8d7e7cfd5445018f675c00331f58e49"
+}

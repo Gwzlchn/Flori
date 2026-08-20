@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ai_usage(\n                 id,job_id,task_id,attempt_id,invocation_key,state,tool,model,effort,created_at_ms\n             ) SELECT ?,j.id,t.id,a.id,?,'started',?,?,?,?\n             FROM attempts a JOIN tasks t ON t.id=a.task_id JOIN jobs j ON j.id=t.job_id\n             WHERE a.id=? AND a.task_id=? AND t.job_id=?\n               AND a.state='leased' AND a.lease_expires_at_ms>?\n               AND t.state='leased' AND t.current_attempt_id=a.id AND j.state='running'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "7ba858139d4c260f2daf33a15450464f66e1fe77cf4418acd350ad46a502534d"
+}
