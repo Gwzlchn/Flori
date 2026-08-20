@@ -10,8 +10,10 @@ mod spool;
 mod upload;
 
 pub use ai::qoder::{
-    QODERCLI_PROGRAM, QODERCLI_VERSION, QoderCommand, QoderError, QoderResult, invocation_command,
-    model_list_command, parse_result, verify_model_allowlist, verify_version, version_command,
+    QODERCLI_PROGRAM, QODERCLI_VERSION, QoderCommand, QoderError, QoderResult,
+    invocation_command as qoder_invocation_command, model_list_command as qoder_model_list_command,
+    parse_result as qoder_parse_result, verify_model_allowlist as qoder_verify_model_allowlist,
+    verify_version as qoder_verify_version, version_command as qoder_version_command,
 };
 pub use client::{ClientError, RunnerClient};
 pub use spool::{Spool, SpoolError, SpoolUpload};

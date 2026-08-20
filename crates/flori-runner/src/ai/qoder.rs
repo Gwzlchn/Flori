@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::Number;
 
 pub const QODERCLI_VERSION: &str = "1.1.26";
-pub const QODERCLI_PROGRAM: &str = "qoder";
+pub const QODERCLI_PROGRAM: &str = "qodercli";
 const MAX_PROBE_BYTES: usize = 64 * 1024;
 
 pub struct QoderCommand {

@@ -1,7 +1,9 @@
 use flori_core::{AiModelCapability, AiResultEnvelope, Executor, UsageOrigin, UsageUpdate};
 use flori_runner::{
-    QODERCLI_PROGRAM, QODERCLI_VERSION, QoderError, invocation_command, model_list_command,
-    parse_result, verify_model_allowlist, verify_version, version_command,
+    QODERCLI_PROGRAM, QODERCLI_VERSION, QoderError, qoder_invocation_command as invocation_command,
+    qoder_model_list_command as model_list_command, qoder_parse_result as parse_result,
+    qoder_verify_model_allowlist as verify_model_allowlist, qoder_verify_version as verify_version,
+    qoder_version_command as version_command,
 };
 
 const DOCUMENT_NOTE: &str = r#"{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"note","summary_markdown":"summary","terms":{"schema":"flori.terms.v1","terms":[]}}"#;
@@ -27,7 +29,7 @@ fn parse_note(output: &[u8]) -> Result<flori_runner::QoderResult, QoderError> {
 
 #[test]
 fn commands_are_fixed_and_keep_prompt_and_secrets_out_of_audit_arguments() {
-    assert_eq!(QODERCLI_PROGRAM, "qoder");
+    assert_eq!(QODERCLI_PROGRAM, "qodercli");
     assert_eq!(version_command().arguments(), ["--version"]);
     assert_eq!(model_list_command().arguments(), ["--list-models"]);
 
