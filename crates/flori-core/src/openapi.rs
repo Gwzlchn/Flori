@@ -1,4 +1,6 @@
-use utoipa::OpenApi;
+use std::collections::BTreeMap;
+
+use utoipa::{OpenApi, PartialSchema, ToSchema};
 
 use crate::{
     AiAudit, AiAuditSchema, AiModelCapability, AiResultEnvelope, AiResultSchema, AiRunnerSelection,
@@ -132,6 +134,26 @@ pub fn openapi_json() -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(&document)
 }
 
+pub fn ai_result_schema_json() -> Result<String, serde_json::Error> {
+    let root = serde_json::to_string(&AiResultEnvelope::schema())?;
+    let mut dependencies = Vec::new();
+    AiResultEnvelope::schemas(&mut dependencies);
+    let definitions = serde_json::to_string(
+        &dependencies
+            .into_iter()
+            .collect::<BTreeMap<String, utoipa::openapi::RefOr<utoipa::openapi::Schema>>>(),
+    )?;
+    Ok(format!(
+        r#"{{"$schema":"https://json-schema.org/draft/2020-12/schema","allOf":[{}],"$defs":{}}}"#,
+        rewrite_schema_refs(root),
+        rewrite_schema_refs(definitions),
+    ))
+}
+
+fn rewrite_schema_refs(json: String) -> String {
+    json.replace("#/components/schemas/", "#/$defs/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +184,18 @@ mod tests {
         );
         assert!(json.contains("\n  \"openapi\""));
         assert!(json.contains("^[0-9a-f]{64}$"));
+    }
+
+    #[test]
+    fn exports_ai_result_schema_from_the_same_rust_types() {
+        let schema: serde_json::Value =
+            serde_json::from_str(&ai_result_schema_json().expect("AI result schema"))
+                .expect("parse AI result schema");
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        assert!(schema["$defs"]["TermsManifest"].is_object());
+        assert!(!schema.to_string().contains("#/components/schemas/"));
     }
 }

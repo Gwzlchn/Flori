@@ -16,7 +16,7 @@ pub use enums::*;
 pub use ids::*;
 pub use job::*;
 pub use materialize::*;
-pub use openapi::openapi_json;
+pub use openapi::{ai_result_schema_json, openapi_json};
 pub use runner_claim::*;
 pub use runner_protocol::*;
 
