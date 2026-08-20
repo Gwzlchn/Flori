@@ -1,13 +1,14 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    AiModelCapability, AiTool, CreateRunnerSlot, DomainId, ErrorCode, JobInputs, JobTrigger,
-    LogFrame, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
-    PromptSnapshotProfile, PromptSnapshotPrompt, RegisterRunnerRequest, RunnerTool,
-    RunnerToolCapability, Sha256Digest, UsageUpdate,
+    AiModelCapability, AiTool, ArtifactManifestEntry, AttemptState, CreateRunnerSlot, DomainId,
+    ErrorCode, FailAttemptRequest, JobInputs, JobTrigger, LogFrame, PipelineId, PipelineRevisionId,
+    PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt,
+    RegisterRunnerRequest, RunnerTool, RunnerToolCapability, Sha256Digest, StartUploadRequest,
+    UsageUpdate, VerifyUploadRequest,
 };
 use flori_pipeline::compile;
-use flori_runner::RunnerClient;
+use flori_runner::{RunnerClient, manifest_sha256};
 use flori_store::{CreateJob, CreateSource, Store, artifact::NasArtifactStore};
 use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -15,7 +16,9 @@ use tokio::{net::TcpListener, task::JoinHandle};
 
 struct Harness {
     root: PathBuf,
+    artifact_root: PathBuf,
     client: RunnerClient,
+    other: RunnerClient,
     server: Option<JoinHandle<()>>,
 }
 
@@ -104,6 +107,7 @@ impl Harness {
             .await
             .expect("job");
         create_slot(&store, "runner", "registration-one").await;
+        create_slot(&store, "other", "registration-two").await;
         let artifact_root = root.join("artifacts");
         let artifacts = Arc::new(
             NasArtifactStore::new(&artifact_root, 128 * 1024 * 1024).expect("artifact store"),
@@ -128,10 +132,15 @@ impl Harness {
         let registered = RunnerClient::register(&base, "registration-one", &capabilities())
             .await
             .expect("register runner");
+        let other = RunnerClient::register(&base, "registration-two", &capabilities())
+            .await
+            .expect("register other runner");
         drop(pool);
         Self {
             root,
+            artifact_root,
             client: RunnerClient::new(&base, registered.token).expect("runner client"),
+            other: RunnerClient::new(&base, other.token).expect("other runner client"),
             server: Some(server),
         }
     }
@@ -184,6 +193,40 @@ fn digest(bytes: &[u8]) -> Sha256Digest {
     .expect("digest")
 }
 
+async fn upload(
+    client: &RunnerClient,
+    exec_id: flori_core::AttemptId,
+    name: &str,
+    media_type: &str,
+    bytes: &[u8],
+) -> ArtifactManifestEntry {
+    let request = StartUploadRequest {
+        name: name.into(),
+        media_type: media_type.into(),
+        size_bytes: bytes.len() as u64,
+        sha256: digest(bytes),
+    };
+    let started = client
+        .start_upload(exec_id, &request)
+        .await
+        .expect("start upload");
+    client
+        .append_upload_chunk(started.upload_id, started.received_bytes, bytes.to_vec())
+        .await
+        .expect("append upload");
+    client
+        .verify_upload(
+            started.upload_id,
+            &VerifyUploadRequest {
+                size_bytes: request.size_bytes,
+                sha256: request.sha256,
+            },
+        )
+        .await
+        .expect("verify upload")
+        .artifact
+}
+
 #[tokio::test]
 async fn runner_client_reaches_foundation_routes() {
     let harness = Harness::new(60_000).await;
@@ -216,5 +259,176 @@ async fn runner_client_reaches_foundation_routes() {
         .await
         .expect_err("non-AI task rejects usage");
     assert_eq!(usage.code(), ErrorCode::UsageConflict);
+    harness.close().await;
+}
+
+#[tokio::test]
+async fn upload_resumes_and_complete_rejects_corrupt_artifact() {
+    let harness = Harness::new(60_000).await;
+    let claim = harness.client.poll().await.expect("poll").expect("claim");
+    let request = StartUploadRequest {
+        name: "original".into(),
+        media_type: "application/pdf".into(),
+        size_bytes: 3,
+        sha256: digest(b"PDF"),
+    };
+    let started = harness
+        .client
+        .start_upload(claim.exec_id, &request)
+        .await
+        .expect("start upload");
+    let wrong_runner = harness
+        .other
+        .start_upload(claim.exec_id, &request)
+        .await
+        .expect_err("other runner cannot upload");
+    assert_eq!(wrong_runner.code(), ErrorCode::StaleAttempt);
+    harness
+        .client
+        .append_upload_chunk(started.upload_id, 0, b"P".to_vec())
+        .await
+        .expect("first chunk");
+    let resumed = harness
+        .client
+        .start_upload(claim.exec_id, &request)
+        .await
+        .expect("resume upload");
+    assert_eq!(resumed.upload_id, started.upload_id);
+    assert_eq!(resumed.received_bytes, 1);
+    harness
+        .client
+        .append_upload_chunk(started.upload_id, 1, b"DF".to_vec())
+        .await
+        .expect("second chunk");
+    let original = harness
+        .client
+        .verify_upload(
+            started.upload_id,
+            &VerifyUploadRequest {
+                size_bytes: 3,
+                sha256: digest(b"PDF"),
+            },
+        )
+        .await
+        .expect("verify original")
+        .artifact;
+    let log = upload(
+        &harness.client,
+        claim.exec_id,
+        "log",
+        "application/x-ndjson",
+        b"{}\n",
+    )
+    .await;
+    let manifest = manifest_sha256(
+        claim.job_id,
+        claim.task_id,
+        claim.exec_id,
+        vec![original.clone(), log],
+    )
+    .expect("manifest digest");
+    let wrong_manifest = harness
+        .client
+        .complete(claim.exec_id, digest(b"wrong"))
+        .await
+        .expect_err("wrong manifest rejected");
+    assert_eq!(wrong_manifest.code(), ErrorCode::DigestMismatch);
+    let artifact_path = harness.artifact_root.join(&original.relative_path);
+    fs::write(&artifact_path, b"BAD").expect("mutate artifact");
+    let corrupt = harness
+        .client
+        .complete(claim.exec_id, manifest.clone())
+        .await
+        .expect_err("mutated artifact rejected");
+    assert_eq!(corrupt.code(), ErrorCode::CorruptState);
+    fs::write(&artifact_path, b"PDF").expect("restore artifact");
+    let completed = harness
+        .client
+        .complete(claim.exec_id, manifest.clone())
+        .await
+        .expect("complete attempt");
+    assert_eq!(completed.state, AttemptState::Succeeded);
+    let repeated = harness
+        .client
+        .complete(claim.exec_id, manifest)
+        .await
+        .expect("idempotent complete");
+    assert_eq!(repeated.state, AttemptState::Succeeded);
+    harness.close().await;
+}
+
+#[tokio::test]
+async fn fail_commits_only_always_artifacts() {
+    let harness = Harness::new(60_000).await;
+    let claim = harness.client.poll().await.expect("poll").expect("claim");
+    let original = upload(
+        &harness.client,
+        claim.exec_id,
+        "original",
+        "application/pdf",
+        b"PDF",
+    )
+    .await;
+    let log = upload(
+        &harness.client,
+        claim.exec_id,
+        "log",
+        "application/x-ndjson",
+        b"{}\n",
+    )
+    .await;
+    let manifest = manifest_sha256(
+        claim.job_id,
+        claim.task_id,
+        claim.exec_id,
+        vec![log.clone()],
+    )
+    .expect("failure manifest");
+    let failed = harness
+        .client
+        .fail(
+            claim.exec_id,
+            &FailAttemptRequest {
+                error_code: ErrorCode::ExecutorFailed,
+                manifest_sha256: Some(manifest),
+            },
+        )
+        .await
+        .expect("fail attempt");
+    assert_eq!(failed.state, AttemptState::Failed);
+    assert!(!harness.artifact_root.join(original.relative_path).exists());
+    assert!(harness.artifact_root.join(log.relative_path).exists());
+    harness.close().await;
+}
+
+#[tokio::test]
+async fn expired_lease_and_oversized_chunk_are_rejected() {
+    let harness = Harness::new(1).await;
+    let claim = harness.client.poll().await.expect("poll").expect("claim");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let expired = harness
+        .client
+        .start_upload(
+            claim.exec_id,
+            &StartUploadRequest {
+                name: "original".into(),
+                media_type: "application/pdf".into(),
+                size_bytes: 3,
+                sha256: digest(b"PDF"),
+            },
+        )
+        .await
+        .expect_err("expired lease rejects upload");
+    assert_eq!(expired.code(), ErrorCode::LeaseExpired);
+    let oversized = harness
+        .client
+        .append_upload_chunk(
+            flori_core::UploadId::generate(),
+            0,
+            vec![0; 8 * 1024 * 1024 + 1],
+        )
+        .await
+        .expect_err("oversized chunk rejected before storage");
+    assert_eq!(oversized.code(), ErrorCode::ArtifactTooLarge);
     harness.close().await;
 }
