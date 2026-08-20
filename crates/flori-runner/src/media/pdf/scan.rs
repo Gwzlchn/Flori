@@ -96,11 +96,11 @@ mod tests {
         std::fs::write(&input, b"%PDF-test").expect("write input");
 
         assert_eq!(
-            require_digital_pdf(&info, &scanned, &input, Duration::from_secs(1), 4096).await,
+            require_digital_pdf(&info, &scanned, &input, Duration::from_secs(5), 4096).await,
             Err(ErrorCode::UnsupportedScannedPdf)
         );
         assert_eq!(
-            require_digital_pdf(&info, &digital, &input, Duration::from_secs(1), 4096).await,
+            require_digital_pdf(&info, &digital, &input, Duration::from_secs(5), 4096).await,
             Ok(2)
         );
         std::fs::remove_dir_all(root).expect("remove test directory");

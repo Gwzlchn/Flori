@@ -26,11 +26,7 @@ pub async fn acquire_pdf(
         return Err(ErrorCode::InvalidRequest);
     }
     let (url, expected) = source_url(source)?;
-    let result = download(url, destination, config, expected).await;
-    if result.is_err() {
-        let _ = fs::remove_file(destination).await;
-    }
-    result
+    download(url, destination, config, expected).await
 }
 
 fn source_url(source: &ResolvedSource) -> Result<(Url, ExpectedPdf<'_>), ErrorCode> {
@@ -84,7 +80,7 @@ async fn download(
 ) -> Result<Sha256Digest, ErrorCode> {
     for redirect_count in 0..=MAX_REDIRECTS {
         let client = pinned_client(&url, config.timeout).await?;
-        let mut response = client
+        let response = client
             .get(url.clone())
             .header(header::ACCEPT, "application/pdf")
             .send()
@@ -107,13 +103,36 @@ async fn download(
             continue;
         }
         status(response.status())?;
+        let media_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim);
+        if media_type
+            .is_some_and(|value| !matches!(value, "application/pdf" | "application/octet-stream"))
+        {
+            return Err(ErrorCode::UnsupportedSource);
+        }
         if response
             .content_length()
             .is_some_and(|size| size > config.max_bytes)
         {
             return Err(ErrorCode::ArtifactTooLarge);
         }
-        let mut file = create_file(destination).await?;
+        return receive(response, destination, config.max_bytes, expected).await;
+    }
+    Err(ErrorCode::UnsupportedSource)
+}
+
+async fn receive(
+    mut response: reqwest::Response,
+    destination: &Path,
+    max_bytes: u64,
+    expected: ExpectedPdf<'_>,
+) -> Result<Sha256Digest, ErrorCode> {
+    let mut file = create_file(destination).await?;
+    let result = async {
         let mut digest = Sha256::new();
         let mut size = 0_u64;
         let mut prefix = Vec::<u8>::with_capacity(5);
@@ -124,7 +143,7 @@ async fn download(
         {
             size = size
                 .checked_add(u64::try_from(chunk.len()).map_err(|_| ErrorCode::ArtifactTooLarge)?)
-                .filter(|size| *size <= config.max_bytes)
+                .filter(|size| *size <= max_bytes)
                 .ok_or(ErrorCode::ArtifactTooLarge)?;
             if prefix.len() < 5 {
                 prefix.extend(chunk.iter().take(5 - prefix.len()));
@@ -153,9 +172,16 @@ async fn download(
         {
             return Err(ErrorCode::DigestMismatch);
         }
-        return Ok(actual);
+        Ok(actual)
     }
-    Err(ErrorCode::UnsupportedSource)
+    .await;
+    drop(file);
+    if result.is_err() {
+        fs::remove_file(destination)
+            .await
+            .map_err(|_| ErrorCode::StorageUnavailable)?;
+    }
+    result
 }
 
 async fn create_file(path: &Path) -> Result<fs::File, ErrorCode> {
@@ -216,6 +242,11 @@ fn valid_arxiv_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
+    use flori_core::ArtifactId;
+    use flori_core::{ResolvedSourceInput, SourceId, SourceInputId};
+
     use super::*;
 
     #[test]
@@ -226,5 +257,63 @@ mod tests {
         for value in ["", "../secret", "/1706.03762", "1706.03762?x=1"] {
             assert!(!valid_arxiv_id(value));
         }
+    }
+
+    #[test]
+    fn three_source_kinds_resolve_to_one_download_contract() {
+        let mut source = ResolvedSource {
+            source_id: SourceId::generate(),
+            kind: SourceKind::Arxiv,
+            canonical_ref: "arxiv:1706.03762".into(),
+            input: None,
+        };
+        let (url, expected) = source_url(&source).expect("arXiv source");
+        assert_eq!(url.as_str(), "https://arxiv.org/pdf/1706.03762");
+        assert!(expected.is_none());
+
+        source.kind = SourceKind::PdfUrl;
+        source.canonical_ref = "url:https://example.com/paper.pdf".into();
+        assert_eq!(
+            source_url(&source).expect("PDF URL").0.as_str(),
+            "https://example.com/paper.pdf"
+        );
+
+        let digest = Sha256Digest::parse("a".repeat(64)).expect("test digest");
+        source.kind = SourceKind::PdfUpload;
+        source.canonical_ref = "upload:paper".into();
+        source.input = Some(ResolvedSourceInput {
+            source_input_id: SourceInputId::generate(),
+            name: "paper.pdf".into(),
+            media_type: "application/pdf".into(),
+            size_bytes: 42,
+            sha256: digest.clone(),
+            download_url: "https://core.example.com/source-input".into(),
+        });
+        let (url, expected) = source_url(&source).expect("uploaded PDF");
+        assert_eq!(url.as_str(), "https://core.example.com/source-input");
+        assert_eq!(expected, Some((42, &digest)));
+    }
+
+    #[tokio::test]
+    async fn destination_creation_never_overwrites_or_follows_symlinks() {
+        let root = std::env::temp_dir().join(format!("flori-acquire-{}", ArtifactId::generate()));
+        std::fs::create_dir(&root).expect("create test root");
+        let existing = root.join("paper.pdf");
+        std::fs::write(&existing, b"keep").expect("write existing file");
+        assert!(create_file(&existing).await.is_err());
+        assert_eq!(
+            std::fs::read(&existing).expect("read existing file"),
+            b"keep"
+        );
+
+        let outside = root.join("outside");
+        let linked = root.join("linked");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        symlink(&outside, &linked).expect("create directory symlink");
+        assert_eq!(
+            create_file(&linked.join("paper.pdf")).await.err(),
+            Some(ErrorCode::ArtifactInvalidPath)
+        );
+        std::fs::remove_dir_all(root).expect("remove test root");
     }
 }
