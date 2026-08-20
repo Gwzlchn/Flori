@@ -10,7 +10,6 @@ use tokio::{
 
 use crate::{ClientError, RunnerClient};
 
-const CHUNK_BYTES: u64 = 1024 * 1024;
 const NETWORK_ATTEMPTS: usize = 3;
 
 impl RunnerClient {
@@ -65,6 +64,18 @@ impl RunnerClient {
         if declared != expected_url || destination.parent().is_none() {
             return Err(invalid());
         }
+        self.stream_to_file(&declared, media_type, size_bytes, sha256, destination)
+            .await
+    }
+
+    async fn stream_to_file(
+        &self,
+        url: &Url,
+        media_type: &str,
+        total: u64,
+        sha256: &Sha256Digest,
+        destination: &Path,
+    ) -> Result<(), ClientError> {
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -74,26 +85,59 @@ impl RunnerClient {
         let mut file = BufWriter::new(file);
         let mut hasher = Sha256::new();
         let mut offset = 0_u64;
-        while offset < size_bytes {
-            let end = offset
-                .saturating_add(CHUNK_BYTES)
-                .min(size_bytes)
-                .saturating_sub(1);
-            let bytes = self
-                .range(&declared, media_type, sha256, offset, end, size_bytes)
-                .await?;
-            file.write_all(&bytes)
-                .await
-                .map_err(|_| ClientError::local(ErrorCode::StorageUnavailable))?;
-            file.flush()
-                .await
-                .map_err(|_| ClientError::local(ErrorCode::StorageUnavailable))?;
-            file.get_ref()
-                .sync_data()
-                .await
-                .map_err(|_| ClientError::local(ErrorCode::StorageUnavailable))?;
-            hasher.update(&bytes);
-            offset = end + 1;
+        if total > 0 {
+            let end = total - 1;
+            for attempt in 0..NETWORK_ATTEMPTS {
+                let start = offset;
+                let response = self
+                    .send(
+                        self.content_request(url.clone())
+                            .header(header::RANGE, format!("bytes={start}-{end}")),
+                    )
+                    .await;
+                let mut response = match response {
+                    Ok(response) => response,
+                    Err(error) if error.code() == ErrorCode::NetworkTemporary => {
+                        if attempt + 1 == NETWORK_ATTEMPTS {
+                            return Err(error);
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                validate_headers(&response, media_type, sha256, start, end, total)?;
+                loop {
+                    match response.chunk().await {
+                        Ok(Some(chunk)) => {
+                            let chunk_len = u64::try_from(chunk.len())
+                                .map_err(|_| ClientError::local(ErrorCode::ArtifactTooLarge))?;
+                            if chunk_len > total - offset {
+                                return Err(ClientError::local(ErrorCode::CorruptState));
+                            }
+                            file.write_all(&chunk)
+                                .await
+                                .map_err(|_| ClientError::local(ErrorCode::StorageUnavailable))?;
+                            hasher.update(&chunk);
+                            offset += chunk_len;
+                        }
+                        Ok(None) if offset == total => break,
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+                file.flush()
+                    .await
+                    .map_err(|_| ClientError::local(ErrorCode::StorageUnavailable))?;
+                file.get_ref()
+                    .sync_data()
+                    .await
+                    .map_err(|_| ClientError::local(ErrorCode::StorageUnavailable))?;
+                if offset == total {
+                    break;
+                }
+                if attempt + 1 == NETWORK_ATTEMPTS {
+                    return Err(ClientError::local(ErrorCode::NetworkTemporary));
+                }
+            }
         }
         file.flush()
             .await
@@ -102,62 +146,10 @@ impl RunnerClient {
             .sync_all()
             .await
             .map_err(|_| ClientError::local(ErrorCode::StorageUnavailable))?;
-        if offset != size_bytes || !digest_is(&hasher.finalize(), sha256) {
+        if offset != total || !digest_is(&hasher.finalize(), sha256) {
             return Err(ClientError::local(ErrorCode::DigestMismatch));
         }
         Ok(())
-    }
-
-    async fn range(
-        &self,
-        url: &Url,
-        media_type: &str,
-        sha256: &Sha256Digest,
-        start: u64,
-        end: u64,
-        total: u64,
-    ) -> Result<Vec<u8>, ClientError> {
-        let expected_len = end - start + 1;
-        for attempt in 0..NETWORK_ATTEMPTS {
-            let response = self
-                .send(
-                    self.content_request(url.clone())
-                        .header(header::RANGE, format!("bytes={start}-{end}")),
-                )
-                .await;
-            let mut response = match response {
-                Ok(response) => response,
-                Err(error) if error.code() == ErrorCode::NetworkTemporary => {
-                    if attempt + 1 == NETWORK_ATTEMPTS {
-                        return Err(error);
-                    }
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            validate_headers(&response, media_type, sha256, start, end, total)?;
-            let mut bytes = Vec::with_capacity(
-                usize::try_from(expected_len)
-                    .map_err(|_| ClientError::local(ErrorCode::ArtifactTooLarge))?,
-            );
-            loop {
-                match response.chunk().await {
-                    Ok(Some(chunk)) => {
-                        if bytes.len().saturating_add(chunk.len()) > bytes.capacity() {
-                            return Err(ClientError::local(ErrorCode::CorruptState));
-                        }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    Ok(None) if bytes.len() == bytes.capacity() => return Ok(bytes),
-                    Ok(None) => break,
-                    Err(_) => break,
-                }
-            }
-            if attempt + 1 == NETWORK_ATTEMPTS {
-                return Err(ClientError::local(ErrorCode::NetworkTemporary));
-            }
-        }
-        Err(ClientError::local(ErrorCode::NetworkTemporary))
     }
 }
 
@@ -223,43 +215,75 @@ mod tests {
     use crate::digest;
 
     #[tokio::test]
-    async fn resumes_only_from_a_fully_verified_range() {
+    async fn streams_a_large_download_with_one_request() {
         let listener = TcpListener::bind("localhost:0").await.expect("listener");
         let address = listener.local_addr().expect("address");
-        let mut body = vec![b'a'; CHUNK_BYTES as usize];
+        let mut body = vec![b'a'; 256 * 1024];
         body.extend_from_slice(b"tail!");
         let digest = digest::sha256(&body).expect("digest");
         let digest_for_server = digest.clone();
         let body = Arc::new(body);
         let server_body = body.clone();
         let server = tokio::spawn(async move {
-            for (expected, bytes, truncated) in [
-                (
-                    "bytes=0-1048575",
-                    &server_body[..CHUNK_BYTES as usize],
-                    false,
-                ),
-                (
-                    "bytes=1048576-1048580",
-                    &server_body[CHUNK_BYTES as usize..],
-                    true,
-                ),
-                (
-                    "bytes=1048576-1048580",
-                    &server_body[CHUNK_BYTES as usize..],
-                    false,
-                ),
-            ] {
-                serve_range(
-                    &listener,
-                    expected,
-                    bytes,
-                    1_048_581,
-                    &digest_for_server,
-                    truncated,
-                )
-                .await;
-            }
+            serve_range(
+                &listener,
+                "bytes=0-262148",
+                &server_body,
+                262_149,
+                &digest_for_server,
+                None,
+            )
+            .await;
+        });
+        let base = format!("http://{address}");
+        let client = RunnerClient::new(&base, "token").expect("client");
+        let id = ArtifactId::generate();
+        let input = ResolvedArtifact {
+            artifact_id: id,
+            name: "input".into(),
+            kind: ArtifactKind::DocumentStructure,
+            media_type: "application/octet-stream".into(),
+            size_bytes: body.len() as u64,
+            sha256: digest,
+            download_url: format!("{base}/api/v1/artifacts/{id}/content"),
+        };
+        let output = temporary("single-request");
+        client
+            .download_artifact(&input, &output)
+            .await
+            .expect("download");
+        assert_eq!(fs::read(&output).expect("output"), body.as_slice());
+        server.await.expect("server");
+        fs::remove_file(output).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn resumes_from_the_fully_written_offset_after_disconnect() {
+        let listener = TcpListener::bind("localhost:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = Arc::new(b"resume-me".to_vec());
+        let digest = digest::sha256(&body).expect("digest");
+        let server_digest = digest.clone();
+        let server_body = body.clone();
+        let server = tokio::spawn(async move {
+            serve_range(
+                &listener,
+                "bytes=0-8",
+                &server_body,
+                9,
+                &server_digest,
+                Some(4),
+            )
+            .await;
+            serve_range(
+                &listener,
+                "bytes=4-8",
+                &server_body[4..],
+                9,
+                &server_digest,
+                None,
+            )
+            .await;
         });
         let base = format!("http://{address}");
         let client = RunnerClient::new(&base, "token").expect("client");
@@ -279,6 +303,49 @@ mod tests {
             .await
             .expect("download");
         assert_eq!(fs::read(&output).expect("output"), body.as_slice());
+        server.await.expect("server");
+        fs::remove_file(output).expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn stops_after_three_interrupted_requests() {
+        let listener = TcpListener::bind("localhost:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let body = Arc::new(b"four".to_vec());
+        let digest = digest::sha256(&body).expect("digest");
+        let server_digest = digest.clone();
+        let server_body = body.clone();
+        let server = tokio::spawn(async move {
+            for (expected, remaining) in [
+                ("bytes=0-3", &server_body[0..]),
+                ("bytes=1-3", &server_body[1..]),
+                ("bytes=2-3", &server_body[2..]),
+            ] {
+                serve_range(&listener, expected, remaining, 4, &server_digest, Some(1)).await;
+            }
+        });
+        let base = format!("http://{address}");
+        let client = RunnerClient::new(&base, "token").expect("client");
+        let id = ArtifactId::generate();
+        let input = ResolvedArtifact {
+            artifact_id: id,
+            name: "input".into(),
+            kind: ArtifactKind::DocumentStructure,
+            media_type: "application/octet-stream".into(),
+            size_bytes: body.len() as u64,
+            sha256: digest,
+            download_url: format!("{base}/api/v1/artifacts/{id}/content"),
+        };
+        let output = temporary("retry-limit");
+        assert_eq!(
+            client
+                .download_artifact(&input, &output)
+                .await
+                .expect_err("retry limit")
+                .code(),
+            ErrorCode::NetworkTemporary
+        );
+        assert_eq!(fs::read(&output).expect("partial output"), b"fou");
         server.await.expect("server");
         fs::remove_file(output).expect("cleanup");
     }
@@ -312,7 +379,7 @@ mod tests {
         let address = listener.local_addr().expect("address");
         let server_digest = expected.clone();
         let server = tokio::spawn(async move {
-            serve_range(&listener, "bytes=0-4", b"world", 5, &server_digest, false).await;
+            serve_range(&listener, "bytes=0-4", b"world", 5, &server_digest, None).await;
         });
         let base = format!("http://{address}");
         let client = RunnerClient::new(&base, "token").expect("client");
@@ -336,7 +403,7 @@ mod tests {
         bytes: &[u8],
         total: u64,
         digest: &Sha256Digest,
-        truncated: bool,
+        sent_bytes: Option<usize>,
     ) {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let mut request = Vec::new();
@@ -371,7 +438,7 @@ mod tests {
             .write_all(response.as_bytes())
             .await
             .expect("headers");
-        let sent = if truncated { &bytes[..2] } else { bytes };
+        let sent = &bytes[..sent_bytes.unwrap_or(bytes.len())];
         stream.write_all(sent).await.expect("body");
     }
 

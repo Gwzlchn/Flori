@@ -10,6 +10,8 @@ use axum::{
     routing::get,
 };
 use flori_core::{ArtifactId, ErrorCode, SourceInputId};
+use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
 
 use crate::{
     error::HttpError,
@@ -83,14 +85,17 @@ async fn content(
     };
     let artifacts = state.artifacts.clone();
     let digest = sha256.clone();
-    let bytes = tokio::task::spawn_blocking(move || {
-        artifacts.read_verified_range(&relative_path, size_bytes, &digest, start, end_exclusive)
+    let file = tokio::task::spawn_blocking(move || {
+        artifacts.open_verified_range(&relative_path, size_bytes, &digest, start, end_exclusive)
     })
     .await
     .map_err(|_| HttpError::new(ErrorCode::Internal))?
     .map_err(|error| HttpError::new(error.code()))?;
 
-    let mut response = Response::new(Body::from(bytes));
+    let remaining = end_exclusive - start;
+    let file = tokio::fs::File::from_std(file).take(remaining);
+    let body = ReaderStream::with_capacity(file, 64 * 1024);
+    let mut response = Response::new(Body::from_stream(body));
     *response.status_mut() = if partial {
         StatusCode::PARTIAL_CONTENT
     } else {
