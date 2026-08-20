@@ -8,18 +8,25 @@ use std::{
 
 use flori_core::{
     AiModelCapability, AiTool, ArtifactKind, ArtifactManifestEntry, AttemptId, CreateRunnerSlot,
-    DomainId, Executor, JobId, JobInputs, JobTrigger, LogFrame, PipelineId, PipelineRevisionId,
-    PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt,
-    RegisterRunnerRequest, RerunJobRequest, RerunMode, RunnerTool, RunnerToolCapability,
-    Sha256Digest, SourceKind, StartUploadRequest, TaskClaim, TaskId, TaskLogLevel, TaskLogLine,
-    UsageOrigin, UsageUpdate, VerifyUploadRequest,
+    DomainId, ErrorCode, Executor, JobId, JobInputs, JobTrigger, LogFrame, PipelineId,
+    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
+    PromptSnapshotPrompt, RegisterRunnerRequest, RerunJobRequest, RerunMode, ResolvedTaskInputs,
+    RunnerTool, RunnerToolCapability, Sha256Digest, SourceInputId, SourceKind, StartUploadRequest,
+    TaskClaim, TaskId, TaskLogLevel, TaskLogLine, UsageOrigin, UsageUpdate, VerifyUploadRequest,
 };
 use flori_pipeline::{Compilation, compile};
 use flori_runner::{RunnerClient, manifest_sha256};
-use flori_store::{CreateJob, CreateSource, Store, artifact::NasArtifactStore};
+use flori_store::{
+    CreateJob, CreateSource, Store,
+    artifact::{NasArtifactStore, source_input_path},
+};
 use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    task::JoinHandle,
+};
 
 struct Harness {
     root: PathBuf,
@@ -30,6 +37,12 @@ struct Harness {
     compilation: Compilation,
     revision_id: PipelineRevisionId,
     source_id: flori_core::SourceId,
+    address: std::net::SocketAddr,
+    runner_token: String,
+    other_runner_token: String,
+    source_input_id: SourceInputId,
+    source_input_path: String,
+    wrong_source_input_id: SourceInputId,
     server: Option<JoinHandle<()>>,
 }
 
@@ -42,6 +55,9 @@ impl Harness {
         fs::create_dir(&root).expect("test root");
         let database = root.join("flori.sqlite");
         let store = Arc::new(Store::open(&database).await.expect("store"));
+        let artifacts = Arc::new(
+            NasArtifactStore::new(root.join("artifacts"), 128 * 1024 * 1024).expect("NAS"),
+        );
         let pool = SqlitePool::connect_with(
             SqliteConnectOptions::new()
                 .filename(&database)
@@ -81,6 +97,50 @@ impl Harness {
             })
             .await
             .expect("source");
+        let input_bytes = b"%PDF input\n";
+        let source_input_id = SourceInputId::generate();
+        let source_relative_path =
+            source_input_path(source_id, source_input_id, "input.pdf").expect("source input path");
+        write_artifact(&root, &source_relative_path, input_bytes);
+        sqlx::query(
+            "INSERT INTO source_inputs(id,source_id,name,media_type,size_bytes,sha256, \
+             relative_path,created_at_ms) VALUES(?,?,'input.pdf','application/pdf',?,?,?,2)",
+        )
+        .bind(source_input_id.to_string())
+        .bind(source_id.to_string())
+        .bind(i64::try_from(input_bytes.len()).expect("input size"))
+        .bind(digest(input_bytes).as_str())
+        .bind(&source_relative_path)
+        .execute(&pool)
+        .await
+        .expect("source input");
+        let wrong_source = store
+            .create_source(CreateSource {
+                kind: SourceKind::PdfUpload,
+                canonical_ref: "wrong-source",
+                title: None,
+                domain_id,
+                request_key: "wrong-source",
+                request_sha256: &"e".repeat(64),
+                created_at_ms: 2,
+            })
+            .await
+            .expect("wrong source");
+        let wrong_source_input_id = SourceInputId::generate();
+        let wrong_path = source_input_path(wrong_source, wrong_source_input_id, "wrong.pdf")
+            .expect("wrong source input path");
+        write_artifact(&root, &wrong_path, b"wrong");
+        sqlx::query(
+            "INSERT INTO source_inputs(id,source_id,name,media_type,size_bytes,sha256, \
+             relative_path,created_at_ms) VALUES(?,?,'wrong.pdf','application/pdf',5,?,?,2)",
+        )
+        .bind(wrong_source_input_id.to_string())
+        .bind(wrong_source.to_string())
+        .bind(digest(b"wrong").as_str())
+        .bind(wrong_path)
+        .execute(&pool)
+        .await
+        .expect("wrong source input");
         let initial = store
             .create_job(
                 CreateJob {
@@ -114,32 +174,46 @@ impl Harness {
             )
             .await
             .expect("runner slot");
-        let artifacts = Arc::new(
-            NasArtifactStore::new(root.join("artifacts"), 128 * 1024 * 1024).expect("NAS"),
-        );
+        store
+            .create_runner_slot(
+                &CreateRunnerSlot {
+                    name: "other-runner".into(),
+                    tags: vec!["ai".into(), "media".into()],
+                    max_concurrency: 1,
+                    default_model: Some("model-a".into()),
+                    default_effort: Some("high".into()),
+                },
+                &digest(b"other-registration"),
+                i64::MAX,
+                4,
+            )
+            .await
+            .expect("other runner slot");
         let listener = TcpListener::bind("localhost:0").await.expect("bind server");
         let address = listener.local_addr().expect("server address");
+        let base = format!("http://{address}");
+        let download_base = base.clone();
         let server_store = Arc::clone(&store);
         let server_artifacts = Arc::clone(&artifacts);
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                flori_server::app(
-                    server_store,
-                    server_artifacts,
-                    "http://localhost/content".into(),
-                    60_000,
-                )
-                .expect("app"),
+                flori_server::app(server_store, server_artifacts, download_base, 60_000)
+                    .expect("app"),
             )
             .await
             .expect("serve");
         });
-        let base = format!("http://{address}");
         let registered = RunnerClient::register(&base, "registration", &capabilities())
             .await
             .expect("register");
-        let client = RunnerClient::new(&base, registered.token).expect("client");
+        let runner_token = registered.token;
+        let client = RunnerClient::new(&base, runner_token.clone()).expect("client");
+        let other_runner_token =
+            RunnerClient::register(&base, "other-registration", &capabilities())
+                .await
+                .expect("register other runner")
+                .token;
         (
             Self {
                 root,
@@ -150,6 +224,12 @@ impl Harness {
                 compilation,
                 revision_id,
                 source_id,
+                address,
+                runner_token,
+                other_runner_token,
+                source_input_id,
+                source_input_path: source_relative_path,
+                wrong_source_input_id,
                 server: Some(server),
             },
             initial,
@@ -209,6 +289,12 @@ fn digest(bytes: &[u8]) -> Sha256Digest {
             .collect::<String>(),
     )
     .expect("digest")
+}
+
+fn write_artifact(root: &std::path::Path, relative: &str, bytes: &[u8]) {
+    let path = root.join("artifacts").join(relative);
+    fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact directory");
+    fs::write(path, bytes).expect("artifact bytes");
 }
 
 fn now_ms() -> i64 {
@@ -344,6 +430,11 @@ async fn execute_and_publish(harness: &Harness, job_id: JobId) {
     for expected in ["acquire", "extract", "note"] {
         let claim = harness.client.poll().await.expect("poll").expect("claim");
         assert_eq!((claim.job_id, claim.task_key.as_str()), (job_id, expected));
+        if expected == "acquire" {
+            assert_source_content(harness, &claim).await;
+        } else if expected == "extract" {
+            assert_artifact_content(harness, &claim).await;
+        }
         run_runner_task(&harness.client, &claim).await;
     }
     assert!(
@@ -383,6 +474,134 @@ async fn execute_and_publish(harness: &Harness, job_id: JobId) {
         )
         .await
         .expect("publish");
+}
+
+async fn assert_source_content(harness: &Harness, claim: &TaskClaim) {
+    let ResolvedTaskInputs::DocumentAcquire { source } = &claim.resolved_inputs else {
+        panic!("acquire inputs");
+    };
+    assert_eq!(
+        source.input.as_ref().map(|input| input.source_input_id),
+        Some(harness.source_input_id)
+    );
+    let path = format!("/api/v1/source-inputs/{}/content", harness.source_input_id);
+    let partial = content_get(harness, &path, &harness.runner_token, Some("bytes=1-4")).await;
+    assert_eq!((status(&partial), body(&partial)), (206, &b"PDF "[..]));
+    assert_eq!(header(&partial, "content-range"), Some("bytes 1-4/11"));
+
+    assert_error(
+        &content_get(harness, &path, &harness.other_runner_token, None).await,
+        404,
+        ErrorCode::NotFound,
+    );
+    let wrong = format!(
+        "/api/v1/source-inputs/{}/content",
+        harness.wrong_source_input_id
+    );
+    assert_error(
+        &content_get(harness, &wrong, &harness.runner_token, None).await,
+        404,
+        ErrorCode::NotFound,
+    );
+    let invalid = content_get(harness, &path, &harness.runner_token, Some("bytes=99-")).await;
+    assert_eq!(status(&invalid), 416);
+    assert_eq!(header(&invalid, "content-range"), Some("bytes */11"));
+
+    sqlx::query("UPDATE attempts SET lease_expires_at_ms=0 WHERE id=?")
+        .bind(claim.exec_id.to_string())
+        .execute(&harness.pool)
+        .await
+        .expect("expire lease");
+    assert_error(
+        &content_get(harness, &path, &harness.runner_token, None).await,
+        404,
+        ErrorCode::NotFound,
+    );
+    sqlx::query("UPDATE attempts SET lease_expires_at_ms=? WHERE id=?")
+        .bind(claim.lease_expires_at_ms)
+        .bind(claim.exec_id.to_string())
+        .execute(&harness.pool)
+        .await
+        .expect("restore lease");
+    sqlx::query("UPDATE tasks SET current_attempt_id=NULL WHERE id=?")
+        .bind(claim.task_id.to_string())
+        .execute(&harness.pool)
+        .await
+        .expect("clear current attempt");
+    assert_error(
+        &content_get(harness, &path, &harness.runner_token, None).await,
+        404,
+        ErrorCode::NotFound,
+    );
+    sqlx::query("UPDATE tasks SET current_attempt_id=? WHERE id=?")
+        .bind(claim.exec_id.to_string())
+        .bind(claim.task_id.to_string())
+        .execute(&harness.pool)
+        .await
+        .expect("restore current attempt");
+
+    let file = harness
+        .root
+        .join("artifacts")
+        .join(&harness.source_input_path);
+    fs::write(&file, b"size drift!").expect("size drift");
+    assert_error(
+        &content_get(harness, &path, &harness.runner_token, Some("bytes=0-0")).await,
+        400,
+        ErrorCode::DigestMismatch,
+    );
+    fs::write(&file, b"same length").expect("digest drift");
+    assert_error(
+        &content_get(harness, &path, &harness.runner_token, None).await,
+        400,
+        ErrorCode::DigestMismatch,
+    );
+    fs::write(&file, b"%PDF input\n").expect("restore input");
+    #[cfg(unix)]
+    {
+        fs::remove_file(&file).expect("remove input");
+        std::os::unix::fs::symlink(harness.root.join("flori.sqlite"), &file).expect("symlink");
+        assert_error(
+            &content_get(harness, &path, &harness.runner_token, None).await,
+            400,
+            ErrorCode::ArtifactInvalidPath,
+        );
+        fs::remove_file(&file).expect("remove symlink");
+        fs::write(file, b"%PDF input\n").expect("restore input");
+    }
+}
+
+async fn assert_artifact_content(harness: &Harness, claim: &TaskClaim) {
+    let ResolvedTaskInputs::DocumentExtract { pdf } = &claim.resolved_inputs else {
+        panic!("extract inputs");
+    };
+    let path = format!("/api/v1/artifacts/{}/content", pdf.artifact_id);
+    let response = content_get(harness, &path, &harness.runner_token, None).await;
+    assert_eq!(
+        (status(&response), body(&response)),
+        (200, &b"%PDF-1.7\n"[..])
+    );
+    assert_eq!(header(&response, "accept-ranges"), Some("bytes"));
+    assert_eq!(header(&response, "content-type"), Some("application/pdf"));
+    let undeclared: String = sqlx::query_scalar(
+        "SELECT a.id FROM artifacts a JOIN tasks t ON t.id=a.task_id \
+         WHERE a.job_id=? AND t.task_key='acquire' AND a.kind='task_log'",
+    )
+    .bind(claim.job_id.to_string())
+    .fetch_one(&harness.pool)
+    .await
+    .expect("undeclared artifact");
+    assert_error(
+        &content_get(
+            harness,
+            &format!("/api/v1/artifacts/{undeclared}/content"),
+            &harness.runner_token,
+            None,
+        )
+        .await,
+        404,
+        ErrorCode::NotFound,
+    );
 }
 
 async fn task_ids(pool: &SqlitePool, job_id: JobId) -> BTreeMap<String, String> {
@@ -538,4 +757,56 @@ async fn snapshot_domain(pool: &SqlitePool) -> DomainId {
         .expect("domain ID")
         .parse()
         .expect("typed domain ID")
+}
+
+async fn content_get(harness: &Harness, path: &str, token: &str, range: Option<&str>) -> Vec<u8> {
+    let range = range.map_or(String::new(), |value| format!("Range: {value}\r\n"));
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         X-Flori-Protocol: 1\r\nAuthorization: Bearer {token}\r\n\
+         Content-Length: 0\r\n{range}\r\n"
+    );
+    let mut stream = TcpStream::connect(harness.address).await.expect("connect");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.expect("read");
+    response
+}
+
+fn status(response: &[u8]) -> u16 {
+    std::str::from_utf8(response)
+        .expect("HTTP")
+        .split_whitespace()
+        .nth(1)
+        .expect("status")
+        .parse()
+        .expect("numeric status")
+}
+
+fn header<'a>(response: &'a [u8], name: &str) -> Option<&'a str> {
+    let split = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?;
+    std::str::from_utf8(&response[..split])
+        .ok()?
+        .split("\r\n")
+        .skip(1)
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+}
+
+fn body(response: &[u8]) -> &[u8] {
+    let split = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("header terminator");
+    &response[split + 4..]
+}
+
+fn assert_error(response: &[u8], expected_status: u16, expected_code: ErrorCode) {
+    assert_eq!(status(response), expected_status);
+    let error: flori_core::ErrorResponse = serde_json::from_slice(body(response)).expect("error");
+    assert_eq!(error.error.code, expected_code);
 }

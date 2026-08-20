@@ -8,6 +8,7 @@ use std::{
 use flori_core::{ErrorCode, UploadState};
 use sha2::{Digest, Sha256};
 
+mod content;
 mod path;
 mod record;
 mod recovery;
@@ -200,11 +201,7 @@ impl NasArtifactStore {
             hasher.update(&buffer[..read]);
         }
         let digest = hasher.finalize();
-        if !digest
-            .iter()
-            .zip(upload.expected_sha256.as_str().as_bytes().chunks_exact(2))
-            .all(|(actual, hex)| *actual == (hex_value(hex[0]) << 4 | hex_value(hex[1])))
-        {
+        if !digest_is(&digest, &upload.expected_sha256) {
             return Err(ArtifactStoreError::with_code(ErrorCode::DigestMismatch));
         }
         Ok(())
@@ -277,6 +274,13 @@ fn hex_value(byte: u8) -> u8 {
     } else {
         byte - b'a' + 10
     }
+}
+
+fn digest_is(actual: &[u8], expected: &flori_core::Sha256Digest) -> bool {
+    actual
+        .iter()
+        .zip(expected.as_str().as_bytes().chunks_exact(2))
+        .all(|(actual, hex)| *actual == (hex_value(hex[0]) << 4 | hex_value(hex[1])))
 }
 
 fn sha256(bytes: &[u8]) -> flori_core::Sha256Digest {

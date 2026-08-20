@@ -1,3 +1,4 @@
+mod content;
 mod credential;
 mod log;
 mod normalize;
