@@ -2,9 +2,10 @@ use std::{fmt::Write, fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
     ArtifactManifest, AttemptId, AttemptState, CompiledTaskSpec, CompleteAttemptRequest, DomainId,
-    ErrorCode, Executor, FailAttemptRequest, JobId, JobTrigger, PipelineId, PipelineRevisionId,
-    PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt, RunnerId,
-    Sha256Digest, SourceId, SourceKind, TaskId, TaskInputBindings, TaskInputReference, TaskState,
+    ErrorCode, Executor, FailAttemptRequest, JobId, JobInputs, JobTrigger, PipelineId,
+    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
+    PromptSnapshotPrompt, RunnerId, Sha256Digest, SourceId, SourceKind, TaskId, TaskInputBindings,
+    TaskInputReference, TaskState,
 };
 use flori_pipeline::compile;
 use flori_store::{CreateJob, CreateSource, Store, artifact::NasArtifactStore};
@@ -99,7 +100,7 @@ async fn insert_job(pool: &SqlitePool, foundation: &Foundation, ordinal: u8) -> 
     let work_id = TaskId::generate();
     let validate_id = TaskId::generate();
     let publish_id = TaskId::generate();
-    sqlx::query("INSERT INTO jobs(id,source_id,pipeline_revision_id,trigger,state,prompt_snapshot_id,prompt_snapshot_sha256,prompt_snapshot_json,request_key,request_sha256,created_at_ms) VALUES(?,?,?,'pipeline_rerun','queued',?,?,'{}',?,?,?)")
+    sqlx::query("INSERT INTO jobs(id,source_id,pipeline_revision_id,trigger,state,prompt_snapshot_id,prompt_snapshot_sha256,prompt_snapshot_json,inputs_json,request_key,request_sha256,created_at_ms) VALUES(?,?,?,'pipeline_rerun','queued',?,?,'{}','{\"translate\":false}',?,?,?)")
         .bind(job_id.to_string()).bind(foundation.source_id.to_string()).bind(foundation.revision_id.to_string())
         .bind(JobId::generate().to_string()).bind("2".repeat(64)).bind(format!("job-{job_id}"))
         .bind("3".repeat(64)).bind(i64::from(ordinal))
@@ -470,7 +471,7 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
         prompt_snapshot: &prompt_snapshot,
         request_key: "job-initial",
         request_sha256: &"3".repeat(64),
-        translate: false,
+        inputs: JobInputs { translate: false },
         created_at_ms: 4,
     };
     let first_job = store
@@ -493,17 +494,22 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
     assert_eq!(states.len(), compilation.pipeline.tasks.len());
     assert!(states.contains(&("acquire".into(), "ready".into())));
     assert!(states.contains(&("translate".into(), "skipped".into())));
-    let stored_snapshot: (String, String) =
-        sqlx::query_as("SELECT prompt_snapshot_json,prompt_snapshot_sha256 FROM jobs WHERE id=?")
-            .bind(first_job.to_string())
-            .fetch_one(&pool)
-            .await
-            .expect("stored prompt snapshot");
+    let stored_snapshot: (String, String, String) = sqlx::query_as(
+        "SELECT prompt_snapshot_json,prompt_snapshot_sha256,inputs_json FROM jobs WHERE id=?",
+    )
+    .bind(first_job.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("stored prompt snapshot");
     assert_eq!(
         serde_json::from_str::<PromptSnapshot>(&stored_snapshot.0).expect("strict prompt snapshot"),
         prompt_snapshot
     );
     assert_eq!(stored_snapshot.1, digest(&stored_snapshot.0).as_str());
+    assert_eq!(
+        serde_json::from_str::<JobInputs>(&stored_snapshot.2).expect("strict job inputs"),
+        initial.inputs
+    );
     let frozen_tasks: Vec<(String, String)> = sqlx::query_as(
         "SELECT spec_json,input_bindings_json FROM tasks WHERE job_id=? ORDER BY task_key",
     )
@@ -566,7 +572,7 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
         prompt_snapshot: &unsorted_prompts,
         request_key: "job-unsorted-prompts",
         request_sha256: &"4".repeat(64),
-        translate: true,
+        inputs: JobInputs { translate: true },
         ..initial
     };
     assert_eq!(

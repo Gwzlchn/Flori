@@ -8,9 +8,9 @@ use super::{
     wire::{executor, job_trigger, source_kind},
 };
 use flori_core::{
-    CompiledTaskSpec, DomainId, ErrorCode, JobId, JobTrigger, PipelineRevisionId, PromptSnapshot,
-    PromptSnapshotId, Sha256Digest, SourceId, SourceKind, TaskId, TaskInputBindings,
-    TaskInputReference,
+    CompiledTaskSpec, DomainId, ErrorCode, JobId, JobInputs, JobTrigger, PipelineRevisionId,
+    PromptSnapshot, PromptSnapshotId, Sha256Digest, SourceId, SourceKind, TaskId,
+    TaskInputBindings, TaskInputReference,
 };
 use flori_pipeline::{Compilation, RuleCondition};
 use sqlx::Row;
@@ -34,7 +34,7 @@ pub struct CreateJob<'a> {
     pub prompt_snapshot: &'a PromptSnapshot,
     pub request_key: &'a str,
     pub request_sha256: &'a str,
-    pub translate: bool,
+    pub inputs: JobInputs,
     pub created_at_ms: i64,
 }
 
@@ -48,7 +48,7 @@ impl Store {
         let source_id = input.source_id.to_string();
         let revision_id = input.pipeline_revision_id.to_string();
         let (kind, domain_id) = source_context(&self.pool, &source_id).await?;
-        let frozen_tasks = freeze_tasks(compilation, kind, input.translate)?;
+        let frozen_tasks = freeze_tasks(compilation, kind, input.inputs.translate)?;
         let required_prompts = frozen_tasks
             .iter()
             .filter(|task| task.included)
@@ -56,6 +56,8 @@ impl Store {
             .collect::<BTreeSet<_>>();
         let (prompt_snapshot_json, prompt_snapshot_sha256) =
             freeze_prompt_snapshot(input.prompt_snapshot, domain_id, &required_prompts)?;
+        let inputs_json = serde_json::to_string(&input.inputs)
+            .map_err(|_| StoreError::new(ErrorCode::InvalidRequest))?;
 
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(row) = sqlx::query(
@@ -117,8 +119,8 @@ impl Store {
         let job_id = JobId::generate();
         sqlx::query(
             "INSERT INTO jobs(id,source_id,pipeline_revision_id,trigger,rerun_of_job_id,state, \
-             prompt_snapshot_id,prompt_snapshot_sha256,prompt_snapshot_json,request_key, \
-             request_sha256,created_at_ms) VALUES(?,?,?,?,?,'queued',?,?,?,?,?,?)",
+             prompt_snapshot_id,prompt_snapshot_sha256,prompt_snapshot_json,inputs_json,request_key, \
+             request_sha256,created_at_ms) VALUES(?,?,?,?,?,'queued',?,?,?,?,?,?,?)",
         )
         .bind(job_id.to_string())
         .bind(&source_id)
@@ -128,6 +130,7 @@ impl Store {
         .bind(input.prompt_snapshot_id.to_string())
         .bind(prompt_snapshot_sha256.as_str())
         .bind(prompt_snapshot_json)
+        .bind(inputs_json)
         .bind(input.request_key)
         .bind(input.request_sha256)
         .bind(input.created_at_ms)

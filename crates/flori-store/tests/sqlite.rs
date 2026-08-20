@@ -106,9 +106,9 @@ async fn seed_ready_ai_task(pool: &SqlitePool) -> Seed {
     sqlx::query(
         "INSERT INTO jobs(\
            id,source_id,pipeline_revision_id,trigger,state,prompt_snapshot_id,\
-           prompt_snapshot_sha256,prompt_snapshot_json,request_key,request_sha256,\
+           prompt_snapshot_sha256,prompt_snapshot_json,inputs_json,request_key,request_sha256,\
            created_at_ms,started_at_ms\
-         ) VALUES(?,?,?,'initial','queued',?,?, '{}',?,?,0,NULL)",
+         ) VALUES(?,?,?,'initial','queued',?,?, '{}','{\"translate\":false}',?,?,0,NULL)",
     )
     .bind(job_id.to_string())
     .bind(source_id.to_string())
