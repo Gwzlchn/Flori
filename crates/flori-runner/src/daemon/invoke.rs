@@ -4,7 +4,7 @@ use flori_core::{
     AiResultEnvelope, AiTool, ErrorCode, TaskClaim, UsageOrigin, UsageUpdate, ai_result_schema_json,
 };
 use sha2::{Digest, Sha256};
-use tokio::{fs, sync::watch};
+use tokio::{fs, io::AsyncReadExt, sync::watch};
 
 use crate::{
     AiProcessConfig, AiProcessTermination, CodexWebSearchObservation, QoderError,
@@ -193,7 +193,16 @@ pub(super) fn unavailable(invocation_key: &str) -> UsageUpdate {
 }
 
 async fn read_result(path: &Path, max: usize) -> Result<String, ErrorCode> {
-    let bytes = fs::read(path)
+    let limit = u64::try_from(max)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or(ErrorCode::ArtifactTooLarge)?;
+    let file = fs::File::open(path)
+        .await
+        .map_err(|_| ErrorCode::ExecutorFailed)?;
+    let mut bytes = Vec::with_capacity(max.min(64 * 1024));
+    file.take(limit)
+        .read_to_end(&mut bytes)
         .await
         .map_err(|_| ErrorCode::ExecutorFailed)?;
     if bytes.len() > max {
@@ -389,6 +398,18 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn codex_result_file_is_read_with_a_hard_byte_limit() {
+        let root = TestDir::new();
+        let path = root.0.join("oversize-result");
+        let file = std_fs::File::create(&path).expect("result file");
+        file.set_len(8 * 1024 * 1024).expect("sparse result");
+        assert_eq!(
+            read_result(&path, 64).await,
+            Err(ErrorCode::ArtifactTooLarge)
+        );
     }
 
     async fn invoke(
