@@ -134,6 +134,19 @@ impl RunnerClient {
             .bearer_auth(&self.bearer_token))
     }
 
+    pub(crate) fn content_url(&self, path: &str) -> Result<Url, ClientError> {
+        self.base_url
+            .join(path)
+            .map_err(|_| ClientError::local(ErrorCode::InvalidRequest))
+    }
+
+    pub(crate) fn content_request(&self, url: Url) -> RequestBuilder {
+        self.http
+            .request(Method::GET, url)
+            .header(PROTOCOL_HEADER, PROTOCOL_VERSION)
+            .bearer_auth(&self.bearer_token)
+    }
+
     pub(crate) async fn send_json<T>(&self, request: RequestBuilder) -> Result<T, ClientError>
     where
         T: DeserializeOwned,
@@ -154,7 +167,7 @@ impl RunnerClient {
         self.send_json(request.json(body)).await
     }
 
-    async fn send(&self, request: RequestBuilder) -> Result<Response, ClientError> {
+    pub(crate) async fn send(&self, request: RequestBuilder) -> Result<Response, ClientError> {
         let response = request
             .send()
             .await

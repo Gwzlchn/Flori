@@ -5,6 +5,7 @@
 mod ai;
 mod attempt;
 mod client;
+mod content;
 mod digest;
 mod spool;
 mod upload;
