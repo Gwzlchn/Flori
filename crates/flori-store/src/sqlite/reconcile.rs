@@ -6,6 +6,7 @@ use crate::artifact::NasArtifactStore;
 use super::{Store, StoreError};
 
 mod attempt;
+pub(in crate::sqlite) mod attempt_record;
 mod materialize;
 mod server_log;
 mod source;

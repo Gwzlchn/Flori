@@ -10,5 +10,5 @@ mod terminal_common;
 mod terminal_fail;
 mod upload;
 mod upload_io;
-mod upload_rule;
+pub(in crate::sqlite) mod upload_rule;
 mod usage_bridge;

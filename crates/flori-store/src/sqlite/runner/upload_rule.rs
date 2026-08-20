@@ -4,7 +4,7 @@ use flori_core::{ArtifactDeclaration, ArtifactKind, CompiledTaskSpec, ErrorCode}
 
 use super::super::StoreError;
 
-pub(super) fn declaration<'a>(
+pub(in crate::sqlite) fn declaration<'a>(
     spec: &'a CompiledTaskSpec,
     name: &str,
 ) -> Result<(&'a ArtifactDeclaration, String), StoreError> {
