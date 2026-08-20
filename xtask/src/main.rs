@@ -2,7 +2,12 @@
 
 #![forbid(unsafe_code)]
 
-use std::{env, fs, path::Path, process::Command};
+use std::{
+    env, fs,
+    path::Path,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 mod policy;
 
@@ -69,9 +74,9 @@ fn image(name: &str) -> Option<(&'static str, Option<&'static str>)> {
     match name {
         "edge" => Some(("frontend/Dockerfile", Some("edge"))),
         "server" => Some(("docker/server.Dockerfile", None)),
-        "runner-media" => Some(("docker/runner.Dockerfile", Some("runner-media"))),
-        "runner-ai-qoder" => Some(("docker/runner.Dockerfile", Some("runner-ai-qoder"))),
-        "runner-ai-codex" => Some(("docker/runner.Dockerfile", Some("runner-ai-codex"))),
+        "runner-media" => Some(("docker/runner-media.Dockerfile", None)),
+        "runner-ai-qoder" => Some(("docker/runner-ai-qoder.Dockerfile", None)),
+        "runner-ai-codex" => Some(("docker/runner-ai-codex.Dockerfile", None)),
         _ => None,
     }
 }
@@ -108,16 +113,16 @@ fn run(task: Task) -> Result<(), String> {
                 command(&root, "cargo", EXPORT)?;
             }
             let github = env::var_os("GITHUB_ACTIONS").is_some();
-            let configured = if github {
-                None
-            } else {
-                match env::var("FLORI_BUILD_PROXY") {
+            let configured = match (!github).then(|| image_proxy_environment(&name)).flatten() {
+                Some(variable) => match env::var(variable) {
                     Ok(proxy) => Some(proxy),
                     Err(env::VarError::NotPresent) => None,
-                    Err(error) => return Err(format!("invalid FLORI_BUILD_PROXY: {error}")),
-                }
+                    Err(error) => return Err(format!("invalid {variable}: {error}")),
+                },
+                None => None,
             };
             let proxy = image_proxy(&name, github, configured);
+            let started = Instant::now();
             execute(
                 &root,
                 &mut image_command(
@@ -125,10 +130,30 @@ fn run(task: Task) -> Result<(), String> {
                     proxy.as_deref(),
                     env::var_os("GITHUB_ACTIONS").is_some(),
                 )?,
-            )
+            )?;
+            let elapsed = started.elapsed();
+            eprintln!("image build {name}: {:.3}s", elapsed.as_secs_f64());
+            if let Some(limit) = image_time_limit()?
+                && elapsed > limit
+            {
+                return Err(format!(
+                    "warm image build exceeded {}s: {name} took {:.3}s",
+                    limit.as_secs(),
+                    elapsed.as_secs_f64()
+                ));
+            }
+            Ok(())
         }
         Task::DiffBudget(base) => diff_budget(&root, &base),
         Task::Janitor(apply) => janitor(&root, apply),
+    }
+}
+
+fn image_proxy_environment(name: &str) -> Option<&'static str> {
+    match name {
+        "runner-ai-qoder" => Some("FLORI_QODER_BUILD_PROXY"),
+        "runner-ai-codex" => Some("FLORI_CODEX_BUILD_PROXY"),
+        _ => None,
     }
 }
 
@@ -137,6 +162,20 @@ fn image_proxy(name: &str, github: bool, proxy: Option<String>) -> Option<String
         .then_some(proxy)
         .flatten()
         .filter(|proxy| !proxy.is_empty() && matches!(name, "runner-ai-qoder" | "runner-ai-codex"))
+}
+
+fn image_time_limit() -> Result<Option<Duration>, String> {
+    match env::var("FLORI_IMAGE_MAX_SECONDS") {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs)
+            .map(Some)
+            .ok_or_else(|| "FLORI_IMAGE_MAX_SECONDS must be a positive integer".into()),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("invalid FLORI_IMAGE_MAX_SECONDS: {error}")),
+    }
 }
 
 fn command(root: &Path, program: &str, args: &str) -> Result<(), String> {
@@ -170,14 +209,10 @@ fn image_command(name: &str, proxy: Option<&str>, gha_cache: bool) -> Result<Com
         command.args(["--build-arg", &format!("HTTPS_PROXY={proxy}")]);
     }
     if gha_cache {
-        let scope = match name {
-            "edge" | "server" => name,
-            _ => "runner",
-        };
-        command.args(["--cache-from", &format!("type=gha,scope=flori-{scope}")]);
+        command.args(["--cache-from", &format!("type=gha,scope=flori-{name}")]);
         command.args([
             "--cache-to",
-            &format!("type=gha,mode=max,scope=flori-{scope}"),
+            &format!("type=gha,mode=max,scope=flori-{name}"),
         ]);
     }
     let context = if name == "edge" { "frontend" } else { "." };

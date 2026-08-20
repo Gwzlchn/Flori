@@ -32,9 +32,18 @@ fn parses_only_declared_commands() {
 fn exposes_only_fixed_image_mappings() {
     assert_eq!(image("edge"), Some(("frontend/Dockerfile", Some("edge"))));
     assert_eq!(image("server"), Some(("docker/server.Dockerfile", None)));
-    for name in ["runner-media", "runner-ai-qoder", "runner-ai-codex"] {
-        assert_eq!(image(name).unwrap().0, "docker/runner.Dockerfile");
-    }
+    assert_eq!(
+        image("runner-media"),
+        Some(("docker/runner-media.Dockerfile", None))
+    );
+    assert_eq!(
+        image("runner-ai-qoder"),
+        Some(("docker/runner-ai-qoder.Dockerfile", None))
+    );
+    assert_eq!(
+        image("runner-ai-codex"),
+        Some(("docker/runner-ai-codex.Dockerfile", None))
+    );
     assert_eq!(image("custom"), None);
 
     let edge = image_command("edge", None, false).unwrap();
@@ -58,12 +67,12 @@ fn exposes_only_fixed_image_mappings() {
     assert!(
         ai_args
             .iter()
-            .any(|arg| arg == "type=gha,scope=flori-runner")
+            .any(|arg| arg == "type=gha,scope=flori-runner-ai-codex")
     );
     assert!(
         ai_args
             .iter()
-            .any(|arg| arg == "type=gha,mode=max,scope=flori-runner")
+            .any(|arg| arg == "type=gha,mode=max,scope=flori-runner-ai-codex")
     );
 
     let server = image_command("server", None, true).unwrap();
@@ -83,7 +92,17 @@ fn limits_local_proxy_to_ai_images() {
         proxy.clone()
     );
     assert_eq!(image_proxy("server", false, proxy.clone()), None);
-    assert_eq!(image_proxy("runner-ai-qoder", true, proxy), None);
+    assert_eq!(image_proxy("runner-ai-qoder", true, proxy.clone()), None);
+    assert_eq!(image_proxy("runner-ai-codex", true, proxy), None);
+    assert_eq!(
+        image_proxy_environment("runner-ai-qoder"),
+        Some("FLORI_QODER_BUILD_PROXY")
+    );
+    assert_eq!(
+        image_proxy_environment("runner-ai-codex"),
+        Some("FLORI_CODEX_BUILD_PROXY")
+    );
+    assert_eq!(image_proxy_environment("runner-media"), None);
 }
 
 #[test]
