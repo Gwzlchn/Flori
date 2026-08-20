@@ -15,6 +15,7 @@ mod rerun_plan;
 mod snapshot;
 mod source;
 mod validate;
+mod validate_commit;
 mod wire;
 
 pub(crate) use attempt::{finish_failure, finish_success};

@@ -2,17 +2,14 @@ use std::io::Read;
 
 use flori_core::{
     ArtifactId, ArtifactKind, AttemptId, CompiledTaskSpec, DocumentStructure, ErrorCode, JobId,
-    Sha256Digest, TaskId, TaskState, TermsManifest, UploadId, UploadState, validate_pdf_evidence,
+    Sha256Digest, TaskId, TaskState, TermsManifest, validate_pdf_evidence,
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
-use crate::artifact::{NasArtifactStore, UploadRecord, task_artifact_path};
+use crate::artifact::NasArtifactStore;
 
-use super::{
-    super::{Store, StoreError},
-    attempt::promote_ready,
-};
+use super::super::{Store, StoreError};
 
 struct InputArtifact {
     id: ArtifactId,
@@ -35,6 +32,37 @@ impl Store {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
         }
         let (source_id, declaration) = self.validate_task(job_id, task_id).await?;
+        let bytes = self.pdf_evidence_bytes(artifacts, job_id).await?;
+        let size =
+            u64::try_from(bytes.len()).map_err(|_| StoreError::new(ErrorCode::ArtifactTooLarge))?;
+        if size > declaration.max_bytes {
+            return Err(StoreError::new(ErrorCode::ArtifactTooLarge));
+        }
+        let digest = digest(&bytes)?;
+        let pending = self
+            .reserve_pdf_validation(
+                artifacts,
+                source_id,
+                job_id,
+                task_id,
+                attempt_id,
+                &declaration,
+                size,
+                &digest,
+                now_ms,
+            )
+            .await?;
+        self.persist_pdf_validation(
+            artifacts, job_id, task_id, attempt_id, pending, &bytes, now_ms,
+        )
+        .await
+    }
+
+    pub(super) async fn pdf_evidence_bytes(
+        &self,
+        artifacts: &NasArtifactStore,
+        job_id: JobId,
+    ) -> Result<Vec<u8>, StoreError> {
         let inputs = self.validation_inputs(job_id).await?;
         let document: DocumentStructure = serde_json::from_str(&read_text(
             artifacts,
@@ -52,62 +80,7 @@ impl Store {
         }
         let manifest = validate_pdf_evidence(&document, &terms, &smart_note, &summary)
             .map_err(StoreError::new)?;
-        let bytes =
-            serde_json::to_vec(&manifest).map_err(|_| StoreError::new(ErrorCode::Internal))?;
-        let size =
-            u64::try_from(bytes.len()).map_err(|_| StoreError::new(ErrorCode::ArtifactTooLarge))?;
-        if size > declaration.max_bytes {
-            return Err(StoreError::new(ErrorCode::ArtifactTooLarge));
-        }
-        let artifact_id = ArtifactId::generate();
-        let file_name = declaration.path.rsplit('/').next().ok_or_else(corrupt)?;
-        let relative = task_artifact_path(source_id, job_id, task_id, artifact_id, file_name)
-            .map_err(|error| StoreError::new(error.code()))?;
-        let digest = digest(&bytes)?;
-        let mut upload = UploadRecord::new(
-            UploadId::generate(),
-            &declaration.name,
-            &relative,
-            size,
-            digest.clone(),
-            &declaration.name,
-            declaration.max_bytes,
-        )
-        .map_err(|error| StoreError::new(error.code()))?;
-        artifacts
-            .append(&mut upload, 0, &bytes)
-            .map_err(|error| StoreError::new(error.code()))?;
-        artifacts
-            .verify_staging(&upload)
-            .map_err(|error| StoreError::new(error.code()))?;
-        upload
-            .restore_progress(size, UploadState::Verified)
-            .map_err(|error| StoreError::new(error.code()))?;
-        artifacts
-            .move_verified(&upload)
-            .map_err(|error| StoreError::new(error.code()))?;
-        upload
-            .restore_progress(size, UploadState::Moved)
-            .map_err(|error| StoreError::new(error.code()))?;
-        let result = self
-            .commit_validation(
-                job_id,
-                task_id,
-                attempt_id,
-                artifact_id,
-                &declaration.name,
-                &relative,
-                size,
-                &digest,
-                now_ms,
-            )
-            .await;
-        if result.is_err() {
-            artifacts
-                .discard(&upload)
-                .map_err(|error| StoreError::new(error.code()))?;
-        }
-        result
+        serde_json::to_vec(&manifest).map_err(|_| StoreError::new(ErrorCode::Internal))
     }
 
     async fn validate_task(
@@ -180,45 +153,6 @@ impl Store {
             })
             .collect()
     }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn commit_validation(
-        &self,
-        job_id: JobId,
-        task_id: TaskId,
-        attempt_id: AttemptId,
-        artifact_id: ArtifactId,
-        name: &str,
-        relative: &str,
-        size: u64,
-        sha256: &Sha256Digest,
-        now_ms: i64,
-    ) -> Result<TaskState, StoreError> {
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let state: Option<(String, String)> = sqlx::query_as(
-            "SELECT j.state,t.state FROM jobs j JOIN tasks t ON t.job_id=j.id WHERE j.id=? AND t.id=?",
-        )
-        .bind(job_id.to_string()).bind(task_id.to_string()).fetch_optional(&mut *transaction).await?;
-        if state
-            .as_ref()
-            .map(|(job, task)| (job.as_str(), task.as_str()))
-            != Some(("running", "ready"))
-        {
-            return Err(StoreError::new(ErrorCode::Conflict));
-        }
-        sqlx::query("INSERT INTO attempts(id,task_id,attempt_no,runner_id,state,lease_expires_at_ms,last_log_sequence,started_at_ms,finished_at_ms) VALUES(?,?,1,NULL,'succeeded',?,0,?,?)")
-            .bind(attempt_id.to_string()).bind(task_id.to_string()).bind(now_ms).bind(now_ms).bind(now_ms)
-            .execute(&mut *transaction).await?;
-        sqlx::query("INSERT INTO artifacts(id,source_id,job_id,task_id,attempt_id,origin,name,kind,media_type,file_name,size_bytes,sha256,relative_path,retention,created_at_ms) SELECT ?,source_id,?,?,?,'produced',?,'evidence','application/json','evidence.json',?,?,?,'published',? FROM jobs WHERE id=?")
-            .bind(artifact_id.to_string()).bind(job_id.to_string()).bind(task_id.to_string()).bind(attempt_id.to_string())
-            .bind(name).bind(i64::try_from(size).map_err(|_| corrupt())?).bind(sha256.as_str()).bind(relative).bind(now_ms).bind(job_id.to_string())
-            .execute(&mut *transaction).await?;
-        sqlx::query("UPDATE tasks SET state='succeeded',current_attempt_id=?,started_at_ms=?,finished_at_ms=? WHERE id=? AND state='ready'")
-            .bind(attempt_id.to_string()).bind(now_ms).bind(now_ms).bind(task_id.to_string()).execute(&mut *transaction).await?;
-        promote_ready(&mut transaction, &job_id.to_string(), now_ms).await?;
-        transaction.commit().await?;
-        Ok(TaskState::Succeeded)
-    }
 }
 
 fn one(values: &[InputArtifact], kind: ArtifactKind) -> Result<&InputArtifact, StoreError> {
@@ -243,7 +177,7 @@ fn read_text(artifacts: &NasArtifactStore, input: &InputArtifact) -> Result<Stri
     Ok(text)
 }
 
-fn digest(bytes: &[u8]) -> Result<Sha256Digest, StoreError> {
+pub(super) fn digest(bytes: &[u8]) -> Result<Sha256Digest, StoreError> {
     Sha256Digest::parse(
         Sha256::digest(bytes)
             .iter()
