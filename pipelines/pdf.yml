@@ -1,0 +1,72 @@
+acquire:
+  executor: document.acquire
+  with:
+    source: $source
+  tags: [media]
+  retry: 1
+  timeout: 10m
+  artifacts:
+    - { name: original, kind: source_original, path: output/source.pdf, required: true, when: on_success, max_bytes: 104857600 }
+    - { name: log, kind: task_log, path: logs/task.ndjson, required: true, when: always, max_bytes: 10485760 }
+
+extract:
+  executor: document.extract
+  with:
+    pdf: $needs.acquire.original
+  needs: [acquire]
+  tags: [media]
+  retry: 1
+  timeout: 20m
+  artifacts:
+    - { name: structure, kind: document_structure, path: output/document.json, required: true, when: on_success, max_bytes: 52428800 }
+    - { name: figures, kind: figure, path: output/figures/*, required: false, when: on_success, max_files: 128, max_bytes: 20971520 }
+    - { name: tables, kind: table_region, path: output/tables/*, required: false, when: on_success, max_files: 128, max_bytes: 20971520 }
+    - { name: log, kind: task_log, path: logs/task.ndjson, required: true, when: always, max_bytes: 10485760 }
+
+translate:
+  executor: ai.document_translate
+  with:
+    document: $needs.extract.structure
+    prompt: $prompts.document_translate
+  needs: [extract]
+  rules:
+    - if: $job.translate == true
+  tags: [ai]
+  timeout: 30m
+  artifacts:
+    - { name: translation, kind: translation, path: output/translation.md, required: true, when: on_success, max_bytes: 52428800 }
+    - { name: audit, kind: ai_audit, path: logs/ai-audit.json, required: true, when: always, max_bytes: 1048576 }
+    - { name: log, kind: task_log, path: logs/task.ndjson, required: true, when: always, max_bytes: 10485760 }
+
+note:
+  executor: ai.document_note
+  with:
+    document: $needs.extract.structure
+    prompt: $prompts.document_note
+  needs: [extract]
+  tags: [ai]
+  timeout: 30m
+  artifacts:
+    - { name: smart_note, kind: smart_note, path: output/smart-note.md, required: true, when: on_success, max_bytes: 10485760 }
+    - { name: summary, kind: summary, path: output/summary.md, required: true, when: on_success, max_bytes: 10485760 }
+    - { name: terms, kind: terms, path: output/terms.json, required: true, when: on_success, max_bytes: 10485760 }
+    - { name: audit, kind: ai_audit, path: logs/ai-audit.json, required: true, when: always, max_bytes: 1048576 }
+    - { name: log, kind: task_log, path: logs/task.ndjson, required: true, when: always, max_bytes: 10485760 }
+
+validate:
+  executor: core.validate
+  with:
+    source: $needs.extract.structure
+    notes: $needs.note
+  needs: [extract, note]
+  timeout: 2m
+  artifacts:
+    - { name: evidence, kind: evidence, path: output/evidence.json, required: true, when: on_success, max_bytes: 10485760 }
+
+publish:
+  executor: core.publish
+  with:
+    validated: $needs.validate.evidence
+  needs: [translate, validate]
+  timeout: 2m
+  artifacts: []
