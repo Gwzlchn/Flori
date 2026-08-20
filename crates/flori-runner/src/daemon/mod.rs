@@ -126,7 +126,7 @@ async fn execute_inner(
                 error,
             )
             .await?;
-            return Err(error);
+            return Ok(());
         }
     };
     let model = claim.model.as_deref().ok_or(ErrorCode::CorruptState)?;
@@ -153,7 +153,7 @@ async fn execute_inner(
             ErrorCode::UsageConflict,
         )
         .await?;
-        return Err(ErrorCode::UsageConflict);
+        return Ok(());
     }
     let outcome = match invoke::run(
         config,
@@ -172,7 +172,7 @@ async fn execute_inner(
         && let Err(error) = client.update_usage(claim.exec_id, usage).await
     {
         let code = error.code();
-        let _ = output::failure(
+        output::failure(
             client,
             claim,
             config.tool,
@@ -181,15 +181,15 @@ async fn execute_inner(
             &outcome,
             code,
         )
-        .await;
-        return Err(code);
+        .await?;
+        return Ok(());
     }
     match outcome.result {
         Ok(_) => {
             match output::success(client, claim, config.tool, INVOCATION_KEY, &outcome).await {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    let _ = output::failure(
+                    output::failure(
                         client,
                         claim,
                         config.tool,
@@ -198,8 +198,8 @@ async fn execute_inner(
                         &outcome,
                         error,
                     )
-                    .await;
-                    Err(error)
+                    .await?;
+                    Ok(())
                 }
             }
         }
@@ -214,7 +214,7 @@ async fn execute_inner(
                 error,
             )
             .await?;
-            Err(error)
+            Ok(())
         }
     }
 }

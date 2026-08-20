@@ -14,7 +14,7 @@ use tokio::sync::watch;
 use support::*;
 
 #[tokio::test]
-async fn replayed_usage_never_spawns_and_fails_with_only_audit() {
+async fn replayed_usage_never_spawns_and_daemon_continues_after_failure() {
     let root = temp_root("usage-replay");
     let marker = root.join("spawned");
     let executable = script(
@@ -55,7 +55,7 @@ async fn replayed_usage_never_spawns_and_fails_with_only_audit() {
     let (_keep, mut cancel) = watch::channel(false);
     assert_eq!(
         run_ai_daemon(&client, &config, &mut cancel).await,
-        Err(flori_core::ErrorCode::UsageConflict)
+        Err(flori_core::ErrorCode::NetworkTemporary)
     );
     let audit = server.join().expect("server");
     assert_eq!(audit.usage_invocation_keys, ["primary"]);
