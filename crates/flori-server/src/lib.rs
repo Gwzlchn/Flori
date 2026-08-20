@@ -7,6 +7,7 @@ mod protocol;
 mod runner;
 mod runner_content;
 mod runner_upload;
+mod source_upload;
 
 use std::sync::Arc;
 
