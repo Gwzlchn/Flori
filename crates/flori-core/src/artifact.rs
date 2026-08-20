@@ -15,6 +15,37 @@ pub struct ArtifactDeclaration {
     pub max_bytes: u64,
 }
 
+impl ArtifactKind {
+    #[must_use]
+    pub fn accepts_media_type(self, media_type: &str) -> bool {
+        match self {
+            Self::SourceOriginal => {
+                media_type == "application/pdf" || media_type.starts_with("video/")
+            }
+            Self::DocumentStructure
+            | Self::PartsManifest
+            | Self::SubscriptionManifest
+            | Self::Terms
+            | Self::Evidence
+            | Self::AiAudit => media_type == "application/json",
+            Self::Figure | Self::TableRegion | Self::Keyframe => media_type.starts_with("image/"),
+            Self::Translation | Self::MechanicalNote | Self::SmartNote | Self::Summary => {
+                media_type == "text/markdown"
+            }
+            Self::Subtitle => matches!(
+                media_type,
+                "text/vtt" | "text/plain" | "application/x-subrip"
+            ),
+            Self::Transcript => matches!(media_type, "application/json" | "text/vtt"),
+            Self::Danmaku => matches!(
+                media_type,
+                "application/json" | "application/xml" | "text/xml"
+            ),
+            Self::TaskLog => media_type == "application/x-ndjson",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 pub enum ArtifactManifestSchema {
     #[serde(rename = "flori.artifact.v1")]
@@ -135,6 +166,34 @@ mod tests {
             manifest_json("flori.artifact.v1", &"a".repeat(64), ",\"extra\":1"),
         ] {
             serde_json::from_str::<ArtifactManifest>(&json).expect_err("must reject drift");
+        }
+    }
+
+    #[test]
+    fn artifact_media_types_are_closed_by_kind() {
+        for (kind, media_type) in [
+            (ArtifactKind::SourceOriginal, "application/pdf"),
+            (ArtifactKind::SourceOriginal, "video/mp4"),
+            (ArtifactKind::DocumentStructure, "application/json"),
+            (ArtifactKind::Figure, "image/png"),
+            (ArtifactKind::TableRegion, "image/webp"),
+            (ArtifactKind::Translation, "text/markdown"),
+            (ArtifactKind::Subtitle, "text/vtt"),
+            (ArtifactKind::Transcript, "application/json"),
+            (ArtifactKind::Keyframe, "image/jpeg"),
+            (ArtifactKind::Danmaku, "application/xml"),
+            (ArtifactKind::PartsManifest, "application/json"),
+            (ArtifactKind::SubscriptionManifest, "application/json"),
+            (ArtifactKind::MechanicalNote, "text/markdown"),
+            (ArtifactKind::SmartNote, "text/markdown"),
+            (ArtifactKind::Summary, "text/markdown"),
+            (ArtifactKind::Terms, "application/json"),
+            (ArtifactKind::Evidence, "application/json"),
+            (ArtifactKind::TaskLog, "application/x-ndjson"),
+            (ArtifactKind::AiAudit, "application/json"),
+        ] {
+            assert!(kind.accepts_media_type(media_type));
+            assert!(!kind.accepts_media_type("text/html"));
         }
     }
 }
