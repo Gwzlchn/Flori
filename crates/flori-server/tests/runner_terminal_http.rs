@@ -5,7 +5,7 @@ use flori_core::{
     ErrorCode, FailAttemptRequest, JobInputs, JobTrigger, LogFrame, PipelineId, PipelineRevisionId,
     PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile, PromptSnapshotPrompt,
     RegisterRunnerRequest, RunnerTool, RunnerToolCapability, Sha256Digest, StartUploadRequest,
-    UsageUpdate, VerifyUploadRequest,
+    TaskLogLevel, TaskLogLine, UsageUpdate, VerifyUploadRequest,
 };
 use flori_pipeline::compile;
 use flori_runner::{RunnerClient, manifest_sha256};
@@ -193,6 +193,28 @@ fn digest(bytes: &[u8]) -> Sha256Digest {
     .expect("digest")
 }
 
+fn task_log_line(message: &str) -> String {
+    serde_json::to_string(&TaskLogLine {
+        timestamp_ms: 1,
+        level: TaskLogLevel::Info,
+        message: message.into(),
+    })
+    .expect("task log line")
+}
+
+fn files_under(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(root).expect("read artifact directory") {
+        let path = entry.expect("artifact entry").path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
 async fn upload(
     client: &RunnerClient,
     exec_id: flori_core::AttemptId,
@@ -232,7 +254,7 @@ async fn runner_client_reaches_foundation_routes() {
     let harness = Harness::new(60_000).await;
     let claim = harness.client.poll().await.expect("poll").expect("claim");
     harness.client.renew(claim.exec_id).await.expect("renew");
-    let line = r#"{"message":"ok"}"#.to_owned();
+    let line = task_log_line("ok");
     harness
         .client
         .append_logs(
@@ -318,19 +340,24 @@ async fn upload_resumes_and_complete_rejects_corrupt_artifact() {
         .await
         .expect("verify original")
         .artifact;
-    let log = upload(
-        &harness.client,
-        claim.exec_id,
-        "log",
-        "application/x-ndjson",
-        b"{}\n",
-    )
-    .await;
+    let line = task_log_line("complete");
+    harness
+        .client
+        .append_logs(
+            claim.exec_id,
+            &[LogFrame {
+                sequence: 1,
+                sha256: digest(line.as_bytes()),
+                line,
+            }],
+        )
+        .await
+        .expect("append task log");
     let manifest = manifest_sha256(
         claim.job_id,
         claim.task_id,
         claim.exec_id,
-        vec![original.clone(), log],
+        vec![original.clone()],
     )
     .expect("manifest digest");
     let wrong_manifest = harness
@@ -375,35 +402,38 @@ async fn fail_commits_only_always_artifacts() {
         b"PDF",
     )
     .await;
-    let log = upload(
-        &harness.client,
-        claim.exec_id,
-        "log",
-        "application/x-ndjson",
-        b"{}\n",
-    )
-    .await;
-    let manifest = manifest_sha256(
-        claim.job_id,
-        claim.task_id,
-        claim.exec_id,
-        vec![log.clone()],
-    )
-    .expect("failure manifest");
+    let line = task_log_line("failed");
+    let expected_log = format!("{line}\n").into_bytes();
+    harness
+        .client
+        .append_logs(
+            claim.exec_id,
+            &[LogFrame {
+                sequence: 1,
+                sha256: digest(line.as_bytes()),
+                line,
+            }],
+        )
+        .await
+        .expect("append task log");
     let failed = harness
         .client
         .fail(
             claim.exec_id,
             &FailAttemptRequest {
                 error_code: ErrorCode::ExecutorFailed,
-                manifest_sha256: Some(manifest),
+                manifest_sha256: None,
             },
         )
         .await
         .expect("fail attempt");
     assert_eq!(failed.state, AttemptState::Failed);
     assert!(!harness.artifact_root.join(original.relative_path).exists());
-    assert!(harness.artifact_root.join(log.relative_path).exists());
+    assert!(
+        files_under(&harness.artifact_root)
+            .into_iter()
+            .any(|path| fs::read(path).expect("read artifact") == expected_log)
+    );
     harness.close().await;
 }
 
