@@ -5,6 +5,7 @@ mod job;
 mod pipeline;
 mod publish;
 mod rerun;
+mod rerun_ai;
 mod rerun_artifact;
 mod rerun_commit;
 mod rerun_copy;

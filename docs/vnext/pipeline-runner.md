@@ -115,7 +115,7 @@ note:
 validate:
   executor: core.validate
   with:
-    source: $needs.extract.structure
+    source: $needs.extract
     notes: $needs.note
   needs: [extract, note]
   retry: 0
@@ -253,6 +253,8 @@ Server 启动时读取 Git 文件并执行：
 ### 初次与订阅
 
 创建 Job 时在一个 SQLite 写事务重新确认 Source存在，并固化 request SHA、PipelineRevision、rules结果、PromptSnapshot、Task/needs、Job inputs和已指定的 AI Runner选择。事务完成前 Runner不可见任何Task；它与 `delete_source` 的 `BEGIN IMMEDIATE` fence不能穿越。
+
+PDF 首次主 Job 的 `translate` 固定默认为 `false`，因此 `translate` Task为 `skipped`，笔记验证通过后即可发布。用户请求全文翻译时，对当前成功 Job创建 `mode=from_task, from_task_key=translate` 的新 Job：上游和笔记/验证结果按冻结物化规则复用，只执行 `translate` 及其后继 `publish`。翻译失败时新 Job失败且已有 current 不变；成功时才轮换 current/previous。不增加 `allow_failure`、特殊状态或第二条 Pipeline。
 
 ### 整条重跑
 

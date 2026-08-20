@@ -2,10 +2,11 @@ use std::{collections::BTreeMap, fmt::Write, fs, path::PathBuf};
 
 use flori_core::{
     AiModelCapability, AiRunnerSelection, ArtifactKind, ArtifactWhen, AttemptId, CreateRunnerSlot,
-    DomainId, ErrorCode, JobId, JobInputs, JobTrigger, PendingMaterializeCommit, PipelineId,
-    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
-    PromptSnapshotPrompt, RegisterRunnerRequest, RerunJobRequest, RerunMode, RunnerId, RunnerTool,
-    RunnerToolCapability, Sha256Digest, SourceId, SourceKind, TaskId, UploadState,
+    DomainId, ErrorCode, FailAttemptRequest, JobId, JobInputs, JobTrigger,
+    PendingMaterializeCommit, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
+    PromptSnapshotProfile, PromptSnapshotPrompt, RegisterRunnerRequest, RerunJobRequest, RerunMode,
+    RunnerId, RunnerTool, RunnerToolCapability, Sha256Digest, SourceId, SourceKind, TaskId,
+    UploadState,
 };
 use flori_pipeline::{Compilation, compile};
 use flori_store::{
@@ -32,6 +33,8 @@ left:
   timeout: 1m
   artifacts:
     - { name: structure, kind: document_structure, path: output/left.json, required: true, when: on_success, max_bytes: 1024 }
+    - { name: figures, kind: figure, path: output/figures/*, required: false, when: on_success, max_files: 4, max_bytes: 1024 }
+    - { name: tables, kind: table_region, path: output/tables/*, required: false, when: on_success, max_files: 4, max_bytes: 1024 }
 right:
   executor: document.extract
   with: { pdf: $needs.acquire.original }
@@ -50,11 +53,22 @@ translate:
   timeout: 1m
   artifacts:
     - { name: translation, kind: translation, path: output/translation.md, required: true, when: on_success, max_bytes: 1024 }
-    - { name: audit, kind: ai_audit, path: logs/ai-audit.json, required: true, when: always, max_bytes: 1024 }
+    - { name: audit, kind: ai_audit, path: logs/ai-audit.json, required: false, when: always, max_bytes: 1024 }
+note:
+  executor: ai.document_note
+  with: { document: $needs.right.structure, prompt: $prompts.document_note }
+  needs: [right]
+  tags: [ai]
+  timeout: 1m
+  artifacts:
+    - { name: smart_note, kind: smart_note, path: output/smart-note.md, required: true, when: on_success, max_bytes: 1024 }
+    - { name: summary, kind: summary, path: output/summary.md, required: true, when: on_success, max_bytes: 1024 }
+    - { name: terms, kind: terms, path: output/terms.json, required: true, when: on_success, max_bytes: 1024 }
+    - { name: audit, kind: ai_audit, path: logs/ai-audit.json, required: false, when: always, max_bytes: 1024 }
 join:
   executor: core.validate
-  with: { source: $needs.left.structure, notes: $needs.right }
-  needs: [left, right, translate]
+  with: { source: $needs.left, notes: $needs.note }
+  needs: [left, note, translate]
   timeout: 1m
   artifacts:
     - { name: evidence, kind: evidence, path: output/evidence.json, required: true, when: on_success, max_bytes: 1024 }
@@ -128,6 +142,10 @@ fn error<T>(result: Result<T, flori_store::StoreError>) -> ErrorCode {
 }
 
 async fn foundation(database: &TestDatabase) -> Foundation {
+    foundation_with_translate(database, true).await
+}
+
+async fn foundation_with_translate(database: &TestDatabase, translate: bool) -> Foundation {
     let store = Store::open(&database.path).await.expect("store");
     let pool = database.pool().await;
     let artifact_root = database.directory.join("artifacts");
@@ -150,6 +168,13 @@ async fn foundation(database: &TestDatabase) -> Foundation {
         .execute(&pool)
         .await
         .expect("current prompt");
+    sqlx::query("INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES(?,?,?,0)")
+        .bind("document_note")
+        .bind("note")
+        .bind(digest(b"note").as_str())
+        .execute(&pool)
+        .await
+        .expect("note prompt");
     let compilation = compile("branch", PIPELINE.as_bytes()).expect("pipeline");
     let pipeline_id = PipelineId::generate();
     let revision_id = PipelineRevisionId::generate();
@@ -171,17 +196,25 @@ async fn foundation(database: &TestDatabase) -> Foundation {
         .expect("source");
     let profile = "profile";
     let prompt = "translate";
+    let mut prompts = vec![PromptSnapshotPrompt {
+        key: "document_note".into(),
+        content: "note".into(),
+        sha256: digest(b"note"),
+    }];
+    if translate {
+        prompts.push(PromptSnapshotPrompt {
+            key: "document_translate".into(),
+            content: prompt.into(),
+            sha256: digest(prompt.as_bytes()),
+        });
+    }
     let snapshot = PromptSnapshot {
         profile: PromptSnapshotProfile {
             domain_id,
             profile_text: profile.into(),
             sha256: digest(profile.as_bytes()),
         },
-        prompts: vec![PromptSnapshotPrompt {
-            key: "document_translate".into(),
-            content: prompt.into(),
-            sha256: digest(prompt.as_bytes()),
-        }],
+        prompts,
     };
     let job_id = store
         .create_job(
@@ -194,7 +227,7 @@ async fn foundation(database: &TestDatabase) -> Foundation {
                 prompt_snapshot: &snapshot,
                 request_key: "base-job",
                 request_sha256: &"b".repeat(64),
-                inputs: JobInputs { translate: true },
+                inputs: JobInputs { translate },
                 created_at_ms: 3,
             },
             &compilation,
@@ -243,7 +276,7 @@ async fn foundation(database: &TestDatabase) -> Foundation {
         .expect("base runner registration");
     let mut task_ids = BTreeMap::new();
     let mut source_files = BTreeMap::new();
-    let rows = sqlx::query("SELECT id,task_key,spec_json FROM tasks WHERE job_id=?")
+    let rows = sqlx::query("SELECT id,task_key,spec_json,state FROM tasks WHERE job_id=?")
         .bind(job_id.to_string())
         .fetch_all(&pool)
         .await
@@ -257,6 +290,10 @@ async fn foundation(database: &TestDatabase) -> Foundation {
         let task_key: String = row.try_get("task_key").expect("task key");
         let spec: flori_core::CompiledTaskSpec =
             serde_json::from_str(row.try_get("spec_json").expect("spec JSON")).expect("spec");
+        if row.try_get::<String, _>("state").expect("task state") == "skipped" {
+            task_ids.insert(task_key, task_id);
+            continue;
+        }
         let attempt_id = AttemptId::generate();
         sqlx::query(
             "INSERT INTO attempts(id,task_id,attempt_no,runner_id,state,lease_expires_at_ms, \
@@ -356,7 +393,10 @@ fn media_type(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::SourceOriginal => "application/pdf",
         ArtifactKind::DocumentStructure | ArtifactKind::Evidence => "application/json",
-        ArtifactKind::Translation => "text/markdown",
+        ArtifactKind::Translation | ArtifactKind::SmartNote | ArtifactKind::Summary => {
+            "text/markdown"
+        }
+        ArtifactKind::Terms => "application/json",
         _ => panic!("unexpected test ArtifactKind"),
     }
 }
@@ -571,6 +611,7 @@ async fn from_task_materializes_parallel_branches_and_resolver_enforces_origin_s
             .collect();
     assert_eq!(states["acquire"], "skipped");
     assert_eq!(states["left"], "ready");
+    assert_eq!(states["note"], "skipped");
     assert_eq!(states["right"], "skipped");
     assert_eq!(states["translate"], "skipped");
     assert_eq!(states["join"], "pending");
@@ -596,6 +637,9 @@ async fn from_task_materializes_parallel_branches_and_resolver_enforces_origin_s
             .collect::<Vec<_>>(),
         vec![
             ("acquire", "original"),
+            ("note", "smart_note"),
+            ("note", "summary"),
+            ("note", "terms"),
             ("right", "structure"),
             ("translate", "translation"),
         ]
@@ -687,6 +731,75 @@ async fn from_task_materializes_parallel_branches_and_resolver_enforces_origin_s
 }
 
 #[tokio::test]
+async fn translate_rerun_enables_the_frozen_input_without_changing_current_on_failure() {
+    let database = TestDatabase::new();
+    let foundation = foundation_with_translate(&database, false).await;
+    let job_id = foundation
+        .store
+        .rerun_from_task(
+            &foundation.artifacts,
+            foundation.job_id,
+            &request("translate-after-publish", "translate", None),
+            &foundation.compilation,
+            20,
+        )
+        .await
+        .expect("translate becomes reachable");
+    let inputs: String = sqlx::query_scalar("SELECT inputs_json FROM jobs WHERE id=?")
+        .bind(job_id.to_string())
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("frozen inputs");
+    assert_eq!(inputs, r#"{"translate":true}"#);
+    let states: BTreeMap<String, String> =
+        sqlx::query("SELECT task_key,state FROM tasks WHERE job_id=?")
+            .bind(job_id.to_string())
+            .fetch_all(&foundation.pool)
+            .await
+            .expect("rerun task states")
+            .into_iter()
+            .map(|row| {
+                (
+                    row.try_get("task_key").expect("task key"),
+                    row.try_get("state").expect("task state"),
+                )
+            })
+            .collect();
+    assert_eq!(states["translate"], "ready");
+    assert_eq!(states["join"], "pending");
+    assert_eq!(states["note"], "skipped");
+
+    let runner_id = register_ai_runner(&foundation, "translate-failure-runner").await;
+    let claim = foundation
+        .store
+        .poll_and_claim(runner_id, 21, 80, "https://flori.example")
+        .await
+        .expect("poll")
+        .expect("translate claim");
+    assert_eq!(claim.task_key, "translate");
+    foundation
+        .store
+        .fail_authenticated_attempt(
+            &foundation.artifacts,
+            runner_id,
+            claim.exec_id,
+            &FailAttemptRequest {
+                error_code: ErrorCode::ExecutorFailed,
+                manifest_sha256: None,
+            },
+            22,
+        )
+        .await
+        .expect("translation failure");
+    let current: String = sqlx::query_scalar("SELECT current_job_id FROM sources WHERE id=?")
+        .bind(foundation.source_id.to_string())
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("current job");
+    assert_eq!(current, foundation.job_id.to_string());
+}
+
+#[tokio::test]
 async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_plan() {
     let database = TestDatabase::new();
     let foundation = foundation(&database).await;
@@ -710,7 +823,7 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
         ErrorCode::CorruptState
     );
     let pending = pending_commit(&foundation, "crash-rerun").await;
-    assert_eq!(pending.artifacts.len(), 3);
+    assert_eq!(pending.artifacts.len(), 6);
     assert_eq!(pending.pipeline_revision_id, foundation.revision_id);
     let first = pending_upload(&pending, 0);
     assert!(
@@ -940,7 +1053,7 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
         .fetch_one(&foundation.pool)
         .await
         .expect("copied artifacts");
-    assert_eq!(copied, 3);
+    assert_eq!(copied, 6);
 }
 
 #[tokio::test]
@@ -1030,7 +1143,16 @@ async fn from_task_freezes_current_prompt_and_ai_selection_at_prepare() {
     );
     let pending = pending_commit(&foundation, "selected-translate").await;
     assert_eq!(pending.prompt_snapshot.profile.profile_text, "profile-v2");
-    assert_eq!(pending.prompt_snapshot.prompts[0].content, "prompt-v2");
+    assert_eq!(
+        pending
+            .prompt_snapshot
+            .prompts
+            .iter()
+            .find(|prompt| prompt.key == "document_translate")
+            .expect("translate prompt")
+            .content,
+        "prompt-v2"
+    );
     sqlx::query("UPDATE runners SET config_revision=2 WHERE id=?")
         .bind(runner_id.to_string())
         .execute(&foundation.pool)
