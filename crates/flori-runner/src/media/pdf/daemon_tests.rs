@@ -48,8 +48,6 @@ async fn upload_pdf_uses_authenticated_content_and_streams_output() {
             input: pdf.clone(),
             input_path: format!("/api/v1/source-inputs/{input_id}/content"),
             input_media_type: "application/pdf",
-            output_kind: ArtifactKind::SourceOriginal,
-            output_media_type: "application/pdf",
         },
     );
     let config = config(
@@ -62,7 +60,11 @@ async fn upload_pdf_uses_authenticated_content_and_streams_output() {
         root.script("python", "exit 1"),
     );
     run_until_server_closes(&base, &config).await;
-    assert_eq!(server.join().expect("server"), pdf);
+    let uploads = server.join().expect("server");
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0].name, "original");
+    assert_eq!(uploads[0].bytes, pdf);
+    assert_eq!(uploads[0].chunks, 2);
 }
 
 #[tokio::test]
@@ -94,16 +96,16 @@ async fn extract_pdf_downloads_input_and_uploads_strict_structure() {
             input: pdf,
             input_path: format!("/api/v1/artifacts/{artifact_id}/content"),
             input_media_type: "application/pdf",
-            output_kind: ArtifactKind::DocumentStructure,
-            output_media_type: "application/json",
         },
     );
     let python = root.script(
         "python",
         r#"output="$4"
 id="$5"
+printf '\211PNG\r\n\032\nfigure' > "$output/figures/figure-001.png"
+printf '\211PNG\r\n\032\ntable' > "$output/tables/table-001.png"
 cat > "$output/document.json" <<EOF
-{"schema":"flori.document_structure.v1","source_artifact_id":"$id","language":"en","pages":[{"page":1,"width_pt":100.0,"height_pt":200.0}],"sections":[{"id":"s1","heading":"Intro","blocks":[{"page":1,"bbox":{"x1":1.0,"y1":1.0,"x2":90.0,"y2":20.0},"text":"this-page-has-more-than-thirty-two-visible-characters"}]}],"figures":[],"tables":[]}
+{"schema":"flori.document_structure.v1","source_artifact_id":"$id","language":"en","pages":[{"page":1,"width_pt":100.0,"height_pt":200.0}],"sections":[{"id":"s1","heading":"Intro","blocks":[{"page":1,"bbox":{"x1":1.0,"y1":1.0,"x2":90.0,"y2":20.0},"text":"this-page-has-more-than-thirty-two-visible-characters"}]}],"figures":[{"id":"f1","page":1,"bbox":{"x1":1.0,"y1":30.0,"x2":90.0,"y2":60.0},"caption":"Figure","artifact_name":"figures/figure-001.png"}],"tables":[{"id":"t1","page":1,"bbox":{"x1":1.0,"y1":70.0,"x2":90.0,"y2":100.0},"caption":"Table","text":"plain text","artifact_name":"tables/table-001.png"}]}
 EOF"#,
     );
     let config = config(
@@ -113,10 +115,25 @@ EOF"#,
         python,
     );
     run_until_server_closes(&base, &config).await;
-    let output = server.join().expect("server");
+    let uploads = server.join().expect("server");
+    assert_eq!(uploads.len(), 3);
+    let output = uploads
+        .iter()
+        .find(|upload| upload.name == "structure")
+        .expect("structure");
     let document: flori_core::DocumentStructure =
-        serde_json::from_slice(&output).expect("strict structure");
+        serde_json::from_slice(&output.bytes).expect("strict structure");
     assert_eq!(document.source_artifact_id, artifact_id);
+    assert!(
+        uploads
+            .iter()
+            .any(|upload| upload.name == "figures/figure-001.png")
+    );
+    assert!(
+        uploads
+            .iter()
+            .any(|upload| upload.name == "tables/table-001.png")
+    );
 }
 
 #[tokio::test]

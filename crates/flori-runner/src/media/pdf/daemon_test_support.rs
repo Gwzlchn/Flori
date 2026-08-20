@@ -45,18 +45,21 @@ pub(super) struct SuccessCase {
     pub(super) input: Vec<u8>,
     pub(super) input_path: String,
     pub(super) input_media_type: &'static str,
-    pub(super) output_kind: ArtifactKind,
-    pub(super) output_media_type: &'static str,
+}
+
+pub(super) struct UploadCapture {
+    pub(super) name: String,
+    pub(super) bytes: Vec<u8>,
+    pub(super) chunks: usize,
 }
 
 pub(super) fn success_server(
     listener: TcpListener,
     case: SuccessCase,
-) -> thread::JoinHandle<Vec<u8>> {
+) -> thread::JoinHandle<Vec<UploadCapture>> {
     thread::spawn(move || {
         let mut claim_sent = false;
-        let mut uploaded = Vec::new();
-        let mut upload = None::<(UploadId, ArtifactManifestEntry)>;
+        let mut uploads = Vec::<(UploadId, ArtifactManifestEntry, Vec<u8>, usize)>::new();
         loop {
             let (mut stream, _) = listener.accept().expect("accept");
             let (head, body) = request(&mut stream);
@@ -88,17 +91,18 @@ pub(super) fn success_server(
                 && request_line.contains("/uploads HTTP/1.1")
             {
                 let start: StartUploadRequest = serde_json::from_slice(&body).expect("start");
-                assert_eq!(start.media_type, case.output_media_type);
+                let kind = output_kind(&start.name);
+                assert_eq!(start.media_type, output_media_type(kind));
                 let upload_id = UploadId::generate();
                 let entry = ArtifactManifestEntry {
                     name: start.name,
-                    kind: case.output_kind,
+                    kind,
                     media_type: start.media_type,
                     size_bytes: start.size_bytes,
                     sha256: start.sha256,
                     relative_path: "sources/test/output".into(),
                 };
-                upload = Some((upload_id, entry.clone()));
+                uploads.push((upload_id, entry.clone(), Vec::new(), 0));
                 json(
                     &mut stream,
                     &StartUploadResponse {
@@ -108,6 +112,7 @@ pub(super) fn success_server(
                     },
                 );
             } else if request_line.starts_with("PUT /runner/v1/uploads/") {
+                let (upload_id, _, uploaded, chunks) = uploads.last_mut().expect("upload");
                 let offset = header(&head, "upload-offset")
                     .parse::<usize>()
                     .expect("offset");
@@ -117,18 +122,19 @@ pub(super) fn success_server(
                     digest(&body).as_str()
                 );
                 uploaded.extend_from_slice(&body);
+                *chunks += 1;
                 json(
                     &mut stream,
                     &UploadCursor {
-                        upload_id: upload.as_ref().expect("upload").0,
+                        upload_id: *upload_id,
                         received_bytes: uploaded.len() as u64,
                     },
                 );
             } else if request_line.contains("/verify HTTP/1.1") {
+                let (upload_id, entry, uploaded, _) = uploads.last().expect("upload");
                 let verify: VerifyUploadRequest = serde_json::from_slice(&body).expect("verify");
                 assert_eq!(verify.size_bytes, uploaded.len() as u64);
                 assert_eq!(verify.sha256, digest(&uploaded));
-                let (upload_id, entry) = upload.as_ref().expect("upload");
                 json(
                     &mut stream,
                     &VerifyUploadResponse {
@@ -143,7 +149,7 @@ pub(super) fn success_server(
                     case.claim.job_id,
                     case.claim.task_id,
                     case.claim.exec_id,
-                    vec![upload.as_ref().expect("upload").1.clone()],
+                    uploads.iter().map(|item| item.1.clone()).collect(),
                 )
                 .expect("manifest");
                 assert_eq!(complete.manifest_sha256, expected);
@@ -154,12 +160,42 @@ pub(super) fn success_server(
                         state: AttemptState::Succeeded,
                     },
                 );
-                return uploaded;
+                return uploads
+                    .into_iter()
+                    .map(|(_, entry, bytes, chunks)| UploadCapture {
+                        name: entry.name,
+                        bytes,
+                        chunks,
+                    })
+                    .collect();
             } else {
                 panic!("unexpected request: {request_line}");
             }
         }
     })
+}
+
+fn output_kind(name: &str) -> ArtifactKind {
+    if name == "original" {
+        ArtifactKind::SourceOriginal
+    } else if name == "structure" {
+        ArtifactKind::DocumentStructure
+    } else if name.starts_with("figures/") {
+        ArtifactKind::Figure
+    } else if name.starts_with("tables/") {
+        ArtifactKind::TableRegion
+    } else {
+        panic!("unexpected output name: {name}")
+    }
+}
+
+fn output_media_type(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::SourceOriginal => "application/pdf",
+        ArtifactKind::DocumentStructure => "application/json",
+        ArtifactKind::Figure | ArtifactKind::TableRegion => "image/png",
+        _ => panic!("unexpected PDF output kind"),
+    }
 }
 
 pub(super) fn failure_server(
