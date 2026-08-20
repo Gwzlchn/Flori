@@ -104,6 +104,7 @@ struct Foundation {
     artifacts: NasArtifactStore,
     artifact_root: PathBuf,
     compilation: Compilation,
+    pipeline_id: PipelineId,
     source_id: SourceId,
     job_id: JobId,
     revision_id: PipelineRevisionId,
@@ -142,6 +143,13 @@ async fn foundation(database: &TestDatabase) -> Foundation {
     .execute(&pool)
     .await
     .expect("domain");
+    sqlx::query("INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES(?,?,?,0)")
+        .bind("document_translate")
+        .bind("translate")
+        .bind(digest(b"translate").as_str())
+        .execute(&pool)
+        .await
+        .expect("current prompt");
     let compilation = compile("branch", PIPELINE.as_bytes()).expect("pipeline");
     let pipeline_id = PipelineId::generate();
     let revision_id = PipelineRevisionId::generate();
@@ -335,6 +343,7 @@ async fn foundation(database: &TestDatabase) -> Foundation {
         artifacts,
         artifact_root,
         compilation,
+        pipeline_id,
         source_id,
         job_id,
         revision_id,
@@ -702,6 +711,7 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
     );
     let pending = pending_commit(&foundation, "crash-rerun").await;
     assert_eq!(pending.artifacts.len(), 3);
+    assert_eq!(pending.pipeline_revision_id, foundation.revision_id);
     let first = pending_upload(&pending, 0);
     assert!(
         !foundation
@@ -754,10 +764,35 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
         .await
         .expect("restore commit");
 
-    sqlx::query("UPDATE pipelines SET current_revision_id=NULL")
-        .execute(&foundation.pool)
+    let next_yaml = PIPELINE.replacen("timeout: 1m", "timeout: 2m", 1);
+    let next_compilation = compile("branch", next_yaml.as_bytes()).expect("next pipeline revision");
+    foundation
+        .store
+        .register_pipeline_revision(
+            foundation.pipeline_id,
+            PipelineRevisionId::generate(),
+            &next_compilation,
+            "next",
+            &next_yaml,
+            33,
+        )
         .await
-        .expect("drift revision");
+        .expect("switch current revision");
+    assert_eq!(
+        error(
+            foundation
+                .store
+                .rerun_from_task(
+                    &foundation.artifacts,
+                    foundation.job_id,
+                    &request("new-after-revision-switch", "right", None),
+                    &foundation.compilation,
+                    34,
+                )
+                .await,
+        ),
+        ErrorCode::PipelineInvalid
+    );
     assert_eq!(
         error(
             foundation
@@ -767,17 +802,12 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
                     foundation.job_id,
                     &command,
                     &foundation.compilation,
-                    33,
+                    35,
                 )
                 .await,
         ),
-        ErrorCode::PipelineInvalid
+        ErrorCode::CorruptState
     );
-    sqlx::query("UPDATE pipelines SET current_revision_id=?")
-        .bind(foundation.revision_id.to_string())
-        .execute(&foundation.pool)
-        .await
-        .expect("restore revision");
     sqlx::query("UPDATE sources SET current_job_id=NULL WHERE id=?")
         .bind(foundation.source_id.to_string())
         .execute(&foundation.pool)
@@ -792,7 +822,7 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
                     foundation.job_id,
                     &command,
                     &foundation.compilation,
-                    34,
+                    36,
                 )
                 .await,
         ),
@@ -817,13 +847,45 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
                     foundation.job_id,
                     &command,
                     &foundation.compilation,
-                    35,
+                    37,
                 )
                 .await,
         ),
         ErrorCode::CorruptState
     );
     restore_source_files(&foundation);
+    let request_sha: String =
+        sqlx::query_scalar("SELECT request_sha256 FROM uploads WHERE request_key='crash-rerun'")
+            .fetch_one(&foundation.pool)
+            .await
+            .expect("frozen request digest");
+    sqlx::query("UPDATE uploads SET request_sha256=? WHERE id=?")
+        .bind("0".repeat(64))
+        .bind(pending.artifacts[1].upload_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("tamper non-leader digest");
+    assert_eq!(
+        error(
+            foundation
+                .store
+                .rerun_from_task(
+                    &foundation.artifacts,
+                    foundation.job_id,
+                    &command,
+                    &foundation.compilation,
+                    38,
+                )
+                .await,
+        ),
+        ErrorCode::CorruptState
+    );
+    sqlx::query("UPDATE uploads SET request_sha256=? WHERE id=?")
+        .bind(request_sha)
+        .bind(pending.artifacts[1].upload_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("restore non-leader digest");
 
     let second = pending_upload(&pending, 1);
     let second_bytes = source_bytes(&foundation, &pending, 1);
@@ -862,7 +924,7 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
             foundation.job_id,
             &command,
             &foundation.compilation,
-            36,
+            39,
         )
         .await
         .expect("recover every copy window");
@@ -882,7 +944,7 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
 }
 
 #[tokio::test]
-async fn from_task_freezes_only_a_rerun_ai_task_and_rejects_runner_config_drift() {
+async fn from_task_freezes_current_prompt_and_ai_selection_at_prepare() {
     let database = TestDatabase::new();
     let foundation = foundation(&database).await;
     let runner_id = register_ai_runner(&foundation, "selected-ai-runner").await;
@@ -908,6 +970,45 @@ async fn from_task_freezes_only_a_rerun_ai_task_and_rejects_runner_config_drift(
         ),
         ErrorCode::RerunBoundaryInvalid
     );
+    sqlx::query("UPDATE runners SET config_revision=2 WHERE id=?")
+        .bind(runner_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("drift runner before prepare");
+    assert_eq!(
+        error(
+            foundation
+                .store
+                .rerun_from_task(
+                    &foundation.artifacts,
+                    foundation.job_id,
+                    &request("runner-drift-before", "translate", Some(selection.clone())),
+                    &foundation.compilation,
+                    41,
+                )
+                .await,
+        ),
+        ErrorCode::RunnerUnavailable
+    );
+    sqlx::query("UPDATE runners SET config_revision=1 WHERE id=?")
+        .bind(runner_id.to_string())
+        .execute(&foundation.pool)
+        .await
+        .expect("restore runner before prepare");
+    sqlx::query(
+        "UPDATE domains SET profile_text='profile-v2' \
+         WHERE id=(SELECT domain_id FROM sources WHERE id=?)",
+    )
+    .bind(foundation.source_id.to_string())
+    .execute(&foundation.pool)
+    .await
+    .expect("update current profile");
+    let prompt_v2 = digest(b"prompt-v2");
+    sqlx::query("UPDATE prompts SET content='prompt-v2',sha256=? WHERE key='document_translate'")
+        .bind(prompt_v2.as_str())
+        .execute(&foundation.pool)
+        .await
+        .expect("update current prompt");
     for (path, _) in foundation.source_files.values() {
         fs::remove_file(path).expect("hide source artifact");
     }
@@ -921,38 +1022,34 @@ async fn from_task_freezes_only_a_rerun_ai_task_and_rejects_runner_config_drift(
                     foundation.job_id,
                     &command,
                     &foundation.compilation,
-                    41,
+                    42,
                 )
                 .await,
         ),
         ErrorCode::CorruptState
     );
     let pending = pending_commit(&foundation, "selected-translate").await;
+    assert_eq!(pending.prompt_snapshot.profile.profile_text, "profile-v2");
+    assert_eq!(pending.prompt_snapshot.prompts[0].content, "prompt-v2");
     sqlx::query("UPDATE runners SET config_revision=2 WHERE id=?")
         .bind(runner_id.to_string())
         .execute(&foundation.pool)
         .await
-        .expect("drift runner configuration");
-    assert_eq!(
-        error(
-            foundation
-                .store
-                .rerun_from_task(
-                    &foundation.artifacts,
-                    foundation.job_id,
-                    &command,
-                    &foundation.compilation,
-                    42,
-                )
-                .await,
-        ),
-        ErrorCode::RunnerUnavailable
-    );
-    sqlx::query("UPDATE runners SET config_revision=1 WHERE id=?")
-        .bind(runner_id.to_string())
+        .expect("drift runner after prepare");
+    sqlx::query(
+        "UPDATE domains SET profile_text='profile-v3' \
+         WHERE id=(SELECT domain_id FROM sources WHERE id=?)",
+    )
+    .bind(foundation.source_id.to_string())
+    .execute(&foundation.pool)
+    .await
+    .expect("edit profile after prepare");
+    let prompt_v3 = digest(b"prompt-v3");
+    sqlx::query("UPDATE prompts SET content='prompt-v3',sha256=? WHERE key='document_translate'")
+        .bind(prompt_v3.as_str())
         .execute(&foundation.pool)
         .await
-        .expect("restore runner configuration");
+        .expect("edit prompt after prepare");
     restore_source_files(&foundation);
     let job_id = foundation
         .store
@@ -966,6 +1063,16 @@ async fn from_task_freezes_only_a_rerun_ai_task_and_rejects_runner_config_drift(
         .await
         .expect("finish selected AI rerun");
     assert_eq!(job_id, pending.job_id);
+    let snapshot_json: String =
+        sqlx::query_scalar("SELECT prompt_snapshot_json FROM jobs WHERE id=?")
+            .bind(job_id.to_string())
+            .fetch_one(&foundation.pool)
+            .await
+            .expect("frozen prompt snapshot");
+    assert_eq!(
+        serde_json::from_str::<PromptSnapshot>(&snapshot_json).expect("strict prompt snapshot"),
+        pending.prompt_snapshot
+    );
     let frozen: (String, String, String, i64) = sqlx::query_as(
         "SELECT pinned_runner_id,selected_model,selected_effort,runner_config_revision \
          FROM tasks WHERE job_id=? AND task_key='translate'",

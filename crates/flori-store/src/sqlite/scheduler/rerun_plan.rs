@@ -9,8 +9,12 @@ use flori_pipeline::{Compilation, compile};
 use sqlx::{Row, Sqlite, Transaction};
 
 use super::{
-    super::StoreError, job::freeze_tasks, pipeline::valid_compilation,
-    rerun_artifact::plan_artifacts, snapshot::freeze_prompt_snapshot, wire::executor,
+    super::StoreError,
+    job::freeze_tasks,
+    pipeline::valid_compilation,
+    rerun_artifact::plan_artifacts,
+    snapshot::{current_prompt_snapshot, freeze_prompt_snapshot},
+    wire::executor,
 };
 
 pub(super) async fn build_plan(
@@ -27,8 +31,7 @@ pub(super) async fn build_plan(
         .filter(|_| request.mode == RerunMode::FromTask)
         .ok_or_else(|| StoreError::new(ErrorCode::RerunBoundaryInvalid))?;
     let row = sqlx::query(
-        "SELECT j.source_id,j.pipeline_revision_id,j.state,j.prompt_snapshot_id, \
-         j.prompt_snapshot_sha256,j.prompt_snapshot_json,j.inputs_json,s.kind,s.domain_id, \
+        "SELECT j.source_id,j.pipeline_revision_id,j.state,j.inputs_json,s.kind,s.domain_id, \
          s.current_job_id,p.current_revision_id,p.key,r.yaml_sha256,r.yaml_text \
          FROM jobs j JOIN sources s ON s.id=j.source_id \
          JOIN pipeline_revisions r ON r.id=j.pipeline_revision_id \
@@ -48,10 +51,11 @@ pub(super) async fn build_plan(
     }
     let revision_id = PipelineRevisionId::from_str(row.try_get("pipeline_revision_id")?)
         .map_err(|_| corrupt())?;
-    if row
-        .try_get::<Option<String>, _>("current_revision_id")?
-        .as_deref()
-        != Some(revision_id.to_string().as_str())
+    if reuse.is_none()
+        && row
+            .try_get::<Option<String>, _>("current_revision_id")?
+            .as_deref()
+            != Some(revision_id.to_string().as_str())
         || row.try_get::<String, _>("yaml_sha256")? != compilation.sha256
         || !valid_compilation(compilation)
     {
@@ -78,28 +82,24 @@ pub(super) async fn build_plan(
         .find(|task| task.key == from_key && task.included)
         .ok_or_else(|| StoreError::new(ErrorCode::RerunBoundaryInvalid))?;
     let rerun = successors(&frozen, &target.key);
-    validate_ai_selection(transaction, request.ai_selection.as_ref(), &rerun, &frozen).await?;
+    if reuse.is_none() {
+        validate_ai_selection(transaction, request.ai_selection.as_ref(), &rerun, &frozen).await?;
+    }
     let required_prompts = frozen
         .iter()
         .filter(|task| task.included)
         .filter_map(|task| task.prompt_key.as_deref())
         .collect::<BTreeSet<_>>();
-    let prompt_json: String = row.try_get("prompt_snapshot_json")?;
-    PromptSnapshotId::from_str(row.try_get("prompt_snapshot_id")?).map_err(|_| corrupt())?;
-    let prompt_snapshot: PromptSnapshot =
-        serde_json::from_str(&prompt_json).map_err(|_| corrupt())?;
     let domain_id = row
         .try_get::<String, _>("domain_id")?
         .parse()
         .map_err(|_| corrupt())?;
-    let (canonical_prompt, prompt_sha) =
-        freeze_prompt_snapshot(&prompt_snapshot, domain_id, &required_prompts)
-            .map_err(|_| corrupt())?;
-    if canonical_prompt != prompt_json
-        || prompt_sha.as_str() != row.try_get::<String, _>("prompt_snapshot_sha256")?
-    {
-        return Err(corrupt());
-    }
+    let prompt_snapshot: PromptSnapshot = match reuse {
+        Some(pending) => pending.prompt_snapshot.clone(),
+        None => current_prompt_snapshot(transaction, domain_id, &required_prompts).await?,
+    };
+    freeze_prompt_snapshot(&prompt_snapshot, domain_id, &required_prompts)
+        .map_err(|_| corrupt())?;
     let base_tasks = validate_base_tasks(transaction, base_job_id, &frozen).await?;
     let job_id = reuse.map_or_else(JobId::generate, |pending| pending.job_id);
     let tasks = frozen
@@ -172,8 +172,10 @@ async fn validate_base_tasks(
     frozen: &[super::job::FrozenTask],
 ) -> Result<BTreeMap<String, (TaskId, TaskState, Option<String>)>, StoreError> {
     let rows = sqlx::query(
-        "SELECT id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit, \
-         timeout_ms,current_attempt_id FROM tasks WHERE job_id=? ORDER BY task_key",
+        "SELECT t.id,t.task_key,t.executor,t.spec_json,t.input_bindings_json,t.state, \
+         t.attempt_limit,t.timeout_ms,t.current_attempt_id,a.task_id AS attempt_task_id, \
+         a.state AS attempt_state FROM tasks t LEFT JOIN attempts a ON a.id=t.current_attempt_id \
+         WHERE t.job_id=? ORDER BY t.task_key",
     )
     .bind(base_job_id.to_string())
     .fetch_all(&mut **transaction)
@@ -183,6 +185,7 @@ async fn validate_base_tasks(
     }
     let mut base = BTreeMap::new();
     for row in rows {
+        let id: String = row.try_get("id")?;
         let key: String = row.try_get("task_key")?;
         let task = frozen
             .iter()
@@ -198,15 +201,29 @@ async fn validate_base_tasks(
             return Err(corrupt());
         }
         let state = parse_task_state(row.try_get("state")?)?;
-        if !matches!(state, TaskState::Succeeded | TaskState::Skipped) {
+        let current_attempt: Option<String> = row.try_get("current_attempt_id")?;
+        let attempt_task: Option<String> = row.try_get("attempt_task_id")?;
+        let attempt_state: Option<String> = row.try_get("attempt_state")?;
+        let terminal_is_valid = match state {
+            TaskState::Succeeded => {
+                current_attempt.is_some()
+                    && attempt_task.as_deref() == Some(id.as_str())
+                    && attempt_state.as_deref() == Some("succeeded")
+            }
+            TaskState::Skipped => {
+                current_attempt.is_none() && attempt_task.is_none() && attempt_state.is_none()
+            }
+            _ => false,
+        };
+        if !terminal_is_valid {
             return Err(corrupt());
         }
         base.insert(
             key,
             (
-                TaskId::from_str(row.try_get("id")?).map_err(|_| corrupt())?,
+                TaskId::from_str(&id).map_err(|_| corrupt())?,
                 state,
-                row.try_get("current_attempt_id")?,
+                current_attempt,
             ),
         );
     }

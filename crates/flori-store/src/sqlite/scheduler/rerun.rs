@@ -93,7 +93,14 @@ impl Store {
             planned
         };
 
-        copy_all(self, artifacts, &pending).await?;
+        copy_all(
+            self,
+            artifacts,
+            &pending,
+            &request.request_key,
+            &request_sha,
+        )
+        .await?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let persisted = existing_pending(&mut transaction, &request.request_key, &request_sha)
             .await?
@@ -108,7 +115,14 @@ impl Store {
         )
         .await?;
         reject_active_job(&mut transaction, &validated).await?;
-        verify_ready(&mut transaction, artifacts, &validated).await?;
+        verify_ready(
+            &mut transaction,
+            artifacts,
+            &validated,
+            &request.request_key,
+            &request_sha,
+        )
+        .await?;
         commit_plan(
             &mut transaction,
             &validated,

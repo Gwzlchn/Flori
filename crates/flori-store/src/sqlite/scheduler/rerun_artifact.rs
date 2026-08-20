@@ -1,13 +1,14 @@
-use std::{collections::BTreeMap, path::Path, str::FromStr};
+use std::{collections::BTreeMap, fmt::Write, path::Path, str::FromStr};
 
 use flori_core::{
     ArtifactDeclaration, ArtifactId, ArtifactKind, ArtifactRetention, ArtifactWhen, ErrorCode,
     JobId, PendingMaterializedArtifact, PendingTaskCommit, Sha256Digest, SourceId, TaskId,
-    TaskState, UploadId,
+    TaskState, UploadId, UploadState,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 
-use crate::artifact::task_artifact_path;
+use crate::artifact::{UploadRecord, task_artifact_path};
 
 use super::super::StoreError;
 
@@ -131,7 +132,7 @@ pub(super) async fn plan_artifacts(
     Ok(planned)
 }
 
-fn declaration<'a>(
+pub(super) fn declaration<'a>(
     declarations: &'a [ArtifactDeclaration],
     name: &str,
 ) -> Result<(&'a ArtifactDeclaration, String), StoreError> {
@@ -165,8 +166,69 @@ fn parse_retention(value: &str) -> Result<ArtifactRetention, StoreError> {
     serde_json::from_str(&format!("\"{value}\"")).map_err(|_| corrupt())
 }
 
-fn to_u64(value: i64) -> Result<u64, StoreError> {
+pub(super) fn to_u64(value: i64) -> Result<u64, StoreError> {
     value.try_into().map_err(|_| corrupt())
+}
+
+pub(super) fn source_record(
+    target: &UploadRecord,
+    source_path: &str,
+) -> Result<UploadRecord, StoreError> {
+    let mut source = UploadRecord::new(
+        UploadId::generate(),
+        "source",
+        source_path,
+        target.expected_size_bytes(),
+        target.expected_sha256().clone(),
+        "source",
+        target.expected_size_bytes(),
+    )
+    .map_err(|_| corrupt())?;
+    source
+        .restore_progress(target.expected_size_bytes(), UploadState::Moved)
+        .map_err(|_| corrupt())?;
+    Ok(source)
+}
+
+pub(super) fn source_visible(
+    origin: &str,
+    state: &str,
+    artifact_link: (Option<&str>, Option<&str>, Option<&str>),
+    attempt_link: (&str, Option<&str>, Option<&str>),
+) -> bool {
+    let (attempt, current_attempt, materialized_from) = artifact_link;
+    let (task_id, attempt_task_id, attempt_state) = attempt_link;
+    match origin {
+        "produced" => {
+            state == "succeeded"
+                && attempt.is_some()
+                && attempt == current_attempt
+                && materialized_from.is_none()
+                && attempt_task_id == Some(task_id)
+                && attempt_state == Some("succeeded")
+        }
+        "materialized" => {
+            state == "skipped"
+                && attempt.is_none()
+                && current_attempt.is_none()
+                && materialized_from.is_some()
+                && attempt_task_id.is_none()
+                && attempt_state.is_none()
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
+    let mut value = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Sha256Digest::parse(value).expect("SHA-256 formatter is canonical")
+}
+
+pub(super) fn parse_upload_state(value: &str) -> Result<UploadState, StoreError> {
+    serde_json::from_str(&format!("\"{value}\"")).map_err(|_| corrupt())
 }
 
 fn corrupt() -> StoreError {

@@ -1,15 +1,12 @@
-use std::fmt::Write;
-
-use flori_core::{
-    ArtifactDeclaration, ErrorCode, PendingMaterializeCommit, PendingMaterializedArtifact,
-    Sha256Digest, UploadId, UploadState,
-};
-use sha2::{Digest, Sha256};
+use flori_core::{ErrorCode, PendingMaterializeCommit, PendingMaterializedArtifact, UploadState};
 use sqlx::Row;
 
 use crate::artifact::{NasArtifactStore, RecoveryAction, UploadRecord};
 
 use super::super::{Store, StoreError};
+use super::rerun_artifact::{
+    declaration, digest_bytes, parse_upload_state, source_record, source_visible, to_u64,
+};
 
 const COPY_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -17,9 +14,20 @@ pub(super) async fn copy_all(
     store: &Store,
     artifacts: &NasArtifactStore,
     pending: &PendingMaterializeCommit,
+    request_key: &str,
+    request_sha256: &str,
 ) -> Result<(), StoreError> {
     for artifact in &pending.artifacts {
-        while !advance_one(store, artifacts, pending, artifact).await? {}
+        while !advance_one(
+            store,
+            artifacts,
+            pending,
+            artifact,
+            request_key,
+            request_sha256,
+        )
+        .await?
+        {}
     }
     Ok(())
 }
@@ -28,10 +36,13 @@ pub(super) async fn verify_ready(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     artifacts: &NasArtifactStore,
     pending: &PendingMaterializeCommit,
+    request_key: &str,
+    request_sha256: &str,
 ) -> Result<(), StoreError> {
     validate_owner(transaction, pending).await?;
     for artifact in &pending.artifacts {
-        let (target, source_path) = load_records(transaction, pending, artifact).await?;
+        let (target, source_path) =
+            load_records(transaction, pending, artifact, request_key, request_sha256).await?;
         if target.state() != UploadState::Moved {
             return Err(StoreError::new(ErrorCode::Conflict));
         }
@@ -46,10 +57,19 @@ async fn advance_one(
     artifacts: &NasArtifactStore,
     pending: &PendingMaterializeCommit,
     artifact: &PendingMaterializedArtifact,
+    request_key: &str,
+    request_sha256: &str,
 ) -> Result<bool, StoreError> {
     let mut transaction = store.pool.begin_with("BEGIN IMMEDIATE").await?;
     validate_owner(&mut transaction, pending).await?;
-    let (target, source_path) = load_records(&mut transaction, pending, artifact).await?;
+    let (target, source_path) = load_records(
+        &mut transaction,
+        pending,
+        artifact,
+        request_key,
+        request_sha256,
+    )
+    .await?;
     let state = target.state();
     match state {
         UploadState::Receiving => {
@@ -126,12 +146,21 @@ async fn load_records(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     pending: &PendingMaterializeCommit,
     artifact: &PendingMaterializedArtifact,
+    request_key: &str,
+    request_sha256: &str,
 ) -> Result<(UploadRecord, String), StoreError> {
     let row = sqlx::query(
-        "SELECT u.owner_id,u.commit_json,u.name,u.target_id,u.source_artifact_id,u.staging_path, \
-         u.final_relative_path,u.expected_size_bytes,u.expected_sha256,u.received_bytes,u.state, \
-         a.relative_path AS source_path,a.size_bytes AS source_size,a.sha256 AS source_sha \
-         FROM uploads u JOIN artifacts a ON a.id=u.source_artifact_id \
+        "SELECT u.owner_id,u.request_key,u.request_sha256,u.commit_json,u.name,u.target_id, \
+         u.source_artifact_id,u.staging_path,u.final_relative_path,u.expected_size_bytes, \
+         u.expected_sha256,u.received_bytes,u.state,a.source_id,a.job_id,a.attempt_id,a.origin, \
+         a.materialized_from_artifact_id,a.name AS source_name,a.kind AS source_kind, \
+         a.media_type AS source_media_type,a.file_name AS source_file_name, \
+         a.relative_path AS source_path,a.size_bytes AS source_size,a.sha256 AS source_sha, \
+         a.retention AS source_retention,t.task_key AS source_task_key,t.state AS source_task_state, \
+         t.current_attempt_id AS source_current_attempt,t.id AS source_task_id, \
+         x.task_id AS attempt_task_id,x.state AS attempt_state FROM uploads u \
+         JOIN artifacts a ON a.id=u.source_artifact_id JOIN tasks t ON t.id=a.task_id \
+         LEFT JOIN attempts x ON x.id=a.attempt_id \
          WHERE u.id=? AND u.owner_kind='materialize'",
     )
     .bind(artifact.upload_id.to_string())
@@ -146,8 +175,39 @@ async fn load_records(
         .find(|task| task.task_id == artifact.task_id)
         .map(|task| task.task_key.as_str())
         .ok_or_else(corrupt)?;
+    let attempt: Option<String> = row.try_get("attempt_id")?;
+    let current_attempt: Option<String> = row.try_get("source_current_attempt")?;
+    let materialized_from: Option<String> = row.try_get("materialized_from_artifact_id")?;
+    let visible = source_visible(
+        row.try_get("origin")?,
+        row.try_get("source_task_state")?,
+        (
+            attempt.as_deref(),
+            current_attempt.as_deref(),
+            materialized_from.as_deref(),
+        ),
+        (
+            row.try_get("source_task_id")?,
+            row.try_get::<Option<String>, _>("attempt_task_id")?
+                .as_deref(),
+            row.try_get::<Option<String>, _>("attempt_state")?
+                .as_deref(),
+        ),
+    );
+    let expected_request_key = pending
+        .artifacts
+        .first()
+        .is_some_and(|first| artifact.upload_id == first.upload_id)
+        .then_some(request_key);
+    let expected_kind = serde_json::to_string(&artifact.kind).map_err(|_| corrupt())?;
+    let expected_retention = serde_json::to_string(&artifact.retention).map_err(|_| corrupt())?;
     if decoded != *pending
         || row.try_get::<String, _>("owner_id")? != pending.job_id.to_string()
+        || row.try_get::<Option<String>, _>("request_key")?.as_deref() != expected_request_key
+        || row
+            .try_get::<Option<String>, _>("request_sha256")?
+            .as_deref()
+            != Some(request_sha256)
         || row.try_get::<String, _>("name")? != format!("{task_key}/{}", artifact.name)
         || row.try_get::<String, _>("target_id")? != artifact.artifact_id.to_string()
         || row
@@ -157,12 +217,26 @@ async fn load_records(
         || row.try_get::<String, _>("final_relative_path")? != artifact.final_relative_path
         || to_u64(row.try_get("expected_size_bytes")?)? != artifact.size_bytes
         || row.try_get::<String, _>("expected_sha256")? != artifact.sha256.as_str()
+        || !visible
+        || row.try_get::<String, _>("source_id")? != pending.source_id.to_string()
+        || row.try_get::<String, _>("job_id")? != pending.base_job_id.to_string()
+        || row.try_get::<String, _>("source_task_key")? != task_key
+        || row.try_get::<String, _>("source_name")? != artifact.name
+        || row.try_get::<String, _>("source_kind")? != expected_kind.trim_matches('"')
+        || row.try_get::<String, _>("source_media_type")? != artifact.media_type
+        || row.try_get::<String, _>("source_file_name")? != artifact.file_name
         || to_u64(row.try_get("source_size")?)? != artifact.size_bytes
         || row.try_get::<String, _>("source_sha")? != artifact.sha256.as_str()
+        || row.try_get::<String, _>("source_retention")? != expected_retention.trim_matches('"')
     {
         return Err(corrupt());
     }
-    let declaration = declaration(pending, artifact)?;
+    let task = pending
+        .tasks
+        .iter()
+        .find(|task| task.task_id == artifact.task_id)
+        .ok_or_else(corrupt)?;
+    let (declaration, _) = declaration(&task.spec.artifacts, &artifact.name)?;
     let mut target = UploadRecord::new(
         artifact.upload_id,
         &artifact.name,
@@ -176,7 +250,7 @@ async fn load_records(
     target
         .restore_progress(
             to_u64(row.try_get("received_bytes")?)?,
-            parse_state(row.try_get("state")?)?,
+            parse_upload_state(row.try_get("state")?)?,
         )
         .map_err(|_| corrupt())?;
     if target.staging_relative_path().to_string_lossy()
@@ -187,42 +261,6 @@ async fn load_records(
     Ok((target, row.try_get("source_path")?))
 }
 
-fn source_record(target: &UploadRecord, source_path: &str) -> Result<UploadRecord, StoreError> {
-    let mut source = UploadRecord::new(
-        UploadId::generate(),
-        "source",
-        source_path,
-        target.expected_size_bytes(),
-        target.expected_sha256().clone(),
-        "source",
-        target.expected_size_bytes(),
-    )
-    .map_err(|_| corrupt())?;
-    source
-        .restore_progress(target.expected_size_bytes(), UploadState::Moved)
-        .map_err(|_| corrupt())?;
-    Ok(source)
-}
-
-fn declaration<'a>(
-    pending: &'a PendingMaterializeCommit,
-    artifact: &PendingMaterializedArtifact,
-) -> Result<&'a ArtifactDeclaration, StoreError> {
-    let task = pending
-        .tasks
-        .iter()
-        .find(|task| task.task_id == artifact.task_id)
-        .ok_or_else(corrupt)?;
-    task.spec
-        .artifacts
-        .iter()
-        .find(|item| {
-            artifact.name == item.name
-                || item.max_files.is_some() && artifact.name.starts_with(&format!("{}/", item.name))
-        })
-        .ok_or_else(corrupt)
-}
-
 async fn validate_owner(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     pending: &PendingMaterializeCommit,
@@ -230,12 +268,11 @@ async fn validate_owner(
     let valid: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM sources s JOIN jobs j ON j.id=s.current_job_id \
          JOIN pipeline_revisions r ON r.id=j.pipeline_revision_id \
-         JOIN pipelines p ON p.id=r.pipeline_id WHERE s.id=? AND s.current_job_id=? \
-         AND j.state='succeeded' AND j.pipeline_revision_id=? AND p.current_revision_id=?",
+         WHERE s.id=? AND s.current_job_id=? AND j.state='succeeded' \
+         AND j.pipeline_revision_id=?",
     )
     .bind(pending.source_id.to_string())
     .bind(pending.base_job_id.to_string())
-    .bind(pending.pipeline_revision_id.to_string())
     .bind(pending.pipeline_revision_id.to_string())
     .fetch_one(&mut **transaction)
     .await?;
@@ -261,22 +298,6 @@ fn ensure_one(result: sqlx::sqlite::SqliteQueryResult) -> Result<(), StoreError>
         return Err(StoreError::new(ErrorCode::Conflict));
     }
     Ok(())
-}
-
-fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
-    let mut value = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    Sha256Digest::parse(value).expect("SHA-256 formatter is canonical")
-}
-
-fn parse_state(value: &str) -> Result<UploadState, StoreError> {
-    serde_json::from_str(&format!("\"{value}\"")).map_err(|_| corrupt())
-}
-
-fn to_u64(value: i64) -> Result<u64, StoreError> {
-    value.try_into().map_err(|_| corrupt())
 }
 
 fn corrupt() -> StoreError {
