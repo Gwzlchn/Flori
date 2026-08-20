@@ -12,14 +12,14 @@ use crate::{
     CredentialId, CredentialKind, DocumentFigure, DocumentPage, DocumentSection, DocumentStructure,
     DocumentStructureSchema, DocumentTable, DocumentTextBlock, DomainId, ErrorBody, ErrorCode,
     ErrorResponse, EvidenceEntry, EvidenceId, EvidenceLocator, EvidenceLocatorKind,
-    EvidenceManifest, EvidenceManifestSchema, Executor, FailAttemptRequest, GlossaryTermId,
-    GlossaryTermState, JobEventKind, JobEventScope, JobId, JobInputs, JobState, JobTrigger,
-    LogCursor, LogFrame, PartsManifest, PartsManifestSchema, PdfRect, PipelineId,
+    EvidenceManifest, EvidenceManifestSchema, EvidenceView, Executor, FailAttemptRequest,
+    GlossaryTermId, GlossaryTermState, JobEventKind, JobEventScope, JobId, JobInputs, JobState,
+    JobTrigger, LogCursor, LogFrame, PartsManifest, PartsManifestSchema, PdfRect, PipelineId,
     PipelineRevisionId, PromptSnapshotId, QrSessionId, RegisterRunnerRequest,
     RegisterRunnerResponse, RenewLeaseResponse, RequestId, RerunJobRequest, RerunMode,
     ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource, ResolvedSourceInput,
     ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool, RunnerToolCapability, SearchChunkId,
-    SecretCredential, SecretInputs, Sha256Digest, SourceId, SourceInputId, SourceKind,
+    SearchHit, SecretCredential, SecretInputs, Sha256Digest, SourceId, SourceInputId, SourceKind,
     StartUploadRequest, StartUploadResponse, SubscriptionItem, SubscriptionManifest,
     SubscriptionManifestSchema, SystemHealthStatus, TaskClaim, TaskId, TaskLogEvent, TaskLogLevel,
     TaskLogLine, TaskState, TermEntry, TermsManifest, TermsManifestSchema, TranscriptCue,
@@ -151,6 +151,8 @@ use crate::{
     RerunJobRequest,
     CreatedSource,
     CreatedJob,
+    SearchHit,
+    EvidenceView,
 )))]
 struct ApiDoc;
 

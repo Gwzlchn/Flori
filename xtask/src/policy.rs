@@ -6,6 +6,7 @@ const POLICY_FILES: &str = ".sqlx/query-129b64010ee7cddac8b3c36e19e4a31971abab8f
 const RUST_FORBIDDEN: &str =
     "serde_json::Value\0serde_yaml_ng::Value\0serde(alias\0serde(untagged\0serde(flatten\0Unknown(";
 const CORE_TYPES: &str = "PipelineId\0PipelineRevisionId\0SourceId\0SourceInputId\0JobId\0TaskId\0AttemptId\0ArtifactId\0RunnerId\0PromptSnapshotId\0UploadId\0CredentialId\0AiUsageId\0DomainId\0CollectionId\0GlossaryTermId\0ConceptOccurrenceId\0EvidenceId\0SearchChunkId\0QrSessionId\0RequestId\0SourceKind\0JobTrigger\0JobState\0TaskState\0AttemptState\0RunnerState\0CredentialKind\0AiTool\0UsageOrigin\0ArtifactKind\0UploadOwnerKind\0UploadState\0ArtifactOrigin\0ArtifactRetention\0AiUsageState\0JobEventScope\0CollectionKind\0GlossaryTermState\0EvidenceLocatorKind\0Executor\0RunnerTool\0RerunMode\0ArtifactWhen\0TaskLogLevel\0SystemHealthStatus\0JobEventKind\0ErrorCode\0ArtifactDeclaration\0ArtifactManifestSchema\0ArtifactManifest\0ArtifactManifestEntry\0Sha256Digest\0DocumentStructureSchema\0DocumentPage\0DocumentSection\0DocumentTextBlock\0DocumentFigure\0DocumentTable\0DocumentStructure\0EvidenceManifestSchema\0PdfRect\0EvidenceLocator\0EvidenceEntry\0EvidenceManifest\0VideoKeyframe\0TranscriptSchema\0TranscriptCue\0TranscriptManifest\0PartsManifestSchema\0VideoPart\0PartsManifest\0SubscriptionManifestSchema\0SubscriptionItem\0SubscriptionManifest\0PromptSnapshotPrompt\0PromptSnapshotProfile\0PromptSnapshot\0CompiledTaskSpec\0TaskInputReference\0TaskInputBindings\0JobInputs\0CreateRemoteSource\0CreateJobRequest\0AiRunnerSelection\0RerunJobRequest\0CreatedSource\0CreatedJob\0PendingTaskCommit\0PendingAttemptUpload\0PendingMaterializedArtifact\0PendingMaterializeCommit\0RunnerToolCapability\0AiModelCapability\0RunnerTags\0RunnerTools\0AiModels\0ResolvedArtifact\0ResolvedSourceInput\0ResolvedSource\0ResolvedPrompt\0ResolvedProfile\0ResolvedTaskInputs\0TermsManifestSchema\0TermEntry\0TermsManifest\0AiAuditSchema\0AiAudit\0AiResultSchema\0AiResultEnvelope\0SecretCredential\0SecretInputs\0TaskClaim\0RegisterRunnerRequest\0RegisterRunnerResponse\0CreateRunnerSlot\0CreateRunnerSlotResponse\0RenewLeaseResponse\0LogFrame\0TaskLogLine\0LogCursor\0TaskLogEvent\0UsageUpdate\0UsageAck\0StartUploadRequest\0StartUploadResponse\0UploadCursor\0VerifyUploadRequest\0VerifyUploadResponse\0CompleteAttemptRequest\0FailAttemptRequest\0AttemptAck\0ErrorResponse\0ErrorBody";
+const KNOWLEDGE_TYPES: &str = "SearchHit\0EvidenceView";
 const TS_FORBIDDEN: &str =
     "as unknown as\0@ts-ignore\0@ts-nocheck\0as any\0: any\0any[]\0fetch(\0XMLHttpRequest\0axios";
 const MAX_MODULE_LINES: usize = 300;
@@ -26,7 +27,12 @@ pub(super) fn check(root: &Path) -> Result<(), String> {
         ],
     )?;
     inventory.sort();
-    if inventory.join("\n") != POLICY_FILES {
+    let mut expected = POLICY_FILES
+        .lines()
+        .chain(["crates/flori-core/src/knowledge.rs"])
+        .collect::<Vec<_>>();
+    expected.sort_unstable();
+    if inventory != expected {
         return Err(format!("architecture inventory changed: {inventory:?}"));
     }
     let compose =
@@ -57,11 +63,14 @@ fn scan(root: &Path, directory: &str, patterns: &str) -> Result<(), String> {
         }
         if relative.starts_with("crates/")
             && !relative.starts_with("crates/flori-core/")
-            && CORE_TYPES.split('\0').any(|name| {
-                ["enum", "struct", "type"]
-                    .iter()
-                    .any(|kind| text.contains(&format!("{kind} {name}")))
-            })
+            && CORE_TYPES
+                .split('\0')
+                .chain(KNOWLEDGE_TYPES.split('\0'))
+                .any(|name| {
+                    ["enum", "struct", "type"]
+                        .iter()
+                        .any(|kind| text.contains(&format!("{kind} {name}")))
+                })
         {
             return Err(format!("core type redeclared in {relative}"));
         }
