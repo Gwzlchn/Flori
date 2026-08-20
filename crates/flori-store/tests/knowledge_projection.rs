@@ -252,6 +252,25 @@ async fn valid_publish_builds_current_evidence_and_fts_then_switches_determinist
     let harness = Harness::new().await;
     let first = harness.seed_job("firsttoken", false).await;
     publish(&harness, &first, 10).await.expect("first publish");
+    let hits = harness
+        .store
+        .search_current("firsttoken", 10)
+        .await
+        .expect("current search");
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|hit| hit.job_id == first.job_id));
+    assert!(
+        hits.iter()
+            .all(|hit| hit.evidence_ids == [first.evidence_id])
+    );
+    let evidence = harness
+        .store
+        .get_current_evidence(first.evidence_id)
+        .await
+        .expect("evidence query")
+        .expect("current evidence");
+    assert_eq!(evidence.job_id, first.job_id);
+    assert_eq!(evidence.source_id, harness.source_id);
     let hit: (String, String) = sqlx::query_as(
         "SELECT sc.job_id,sce.evidence_id FROM search_chunks sc JOIN sources s ON s.current_job_id=sc.job_id JOIN search_chunk_evidence sce ON sce.chunk_id=sc.chunk_id WHERE search_chunks MATCH '\"firsttoken\"' LIMIT 1",
     ).fetch_one(&harness.pool).await.expect("current FTS hit");
@@ -285,6 +304,58 @@ async fn valid_publish_builds_current_evidence_and_fts_then_switches_determinist
         .await
         .expect("evidence jobs");
     assert_eq!(evidence_jobs, [second.job_id.to_string()]);
+    assert!(
+        harness
+            .store
+            .search_current("firsttoken", 10)
+            .await
+            .expect("old query")
+            .is_empty()
+    );
+    assert_eq!(
+        harness
+            .store
+            .search_current("se", 10)
+            .await
+            .expect("bounded LIKE")[0]
+            .job_id,
+        second.job_id,
+    );
+    assert!(
+        harness
+            .store
+            .search_current("%", 10)
+            .await
+            .expect("escaped LIKE")
+            .is_empty()
+    );
+    assert!(
+        harness
+            .store
+            .get_current_evidence(first.evidence_id)
+            .await
+            .expect("old evidence")
+            .is_none()
+    );
+    assert_eq!(
+        harness
+            .store
+            .get_current_evidence(second.evidence_id)
+            .await
+            .expect("new evidence")
+            .expect("current")
+            .job_id,
+        second.job_id,
+    );
+    assert_eq!(
+        harness
+            .store
+            .search_current("", 10)
+            .await
+            .expect_err("empty query")
+            .code(),
+        flori_core::ErrorCode::InvalidRequest,
+    );
 }
 
 #[tokio::test]
