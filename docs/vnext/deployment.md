@@ -37,7 +37,7 @@ flori-server serve <listen> <sqlite> <artifact-root> <artifact-download-base> <m
 
 测试不复制五套 runtime 镜像。document extractor、yt-dlp、yutto、FFmpeg 和 Whisper 属于 media Runner 内的短命执行器。
 
-QoderCLI 和 CodexCLI 使用人工锁定版本：
+QoderCLI 和 CodexCLI 使用人工锁定版本。vNext首版固定为 QoderCLI `1.1.26` 和 CodexCLI `0.148.0`：
 
 1. 修改一个版本锁。
 2. 只构建受影响 AI Runner 镜像。
@@ -46,6 +46,10 @@ QoderCLI 和 CodexCLI 使用人工锁定版本：
 5. 发布不可变镜像 digest；失败继续使用上一个 digest。
 
 本地 Docker build 可显式传 PC 代理；GitHub build 不读取、不要求本地代理。BuildKit 缓存按 CLI 版本和依赖层复用，不在每次构建解析 latest。
+
+两个AI镜像必须在构建时以最终非root用户执行无费用版本和帮助探针。Qoder镜像核对精确版本与`--tools`，Codex镜像核对精确版本、`--search`、`exec --json`和`--output-schema`；任一不符直接构建失败。探针不登录、不调用模型。
+
+AI Runner 容器启动后先严格读取Server URL、token、model、effort、spool和登录态目录。缺失或非法配置在poll和CLI前非零退出。Compose不为这些值提供可运行默认值；未激活AI profile时也不因变量插值阻断Server等其它服务。
 
 ## 普通升级
 

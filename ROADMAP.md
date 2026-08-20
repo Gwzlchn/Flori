@@ -14,8 +14,11 @@ vNext 在同一仓库的 `rust-vnext` 分支开发。`main` 在 WP16 前仍是 P
 | WP05-WP07 首批产品实现 | 完成 | SQLite、NAS Artifact 与 Pipeline 编译器已闭环 |
 | WP08 Job 调度 | 完成 | 初次、整条和从 Task 重跑已通过真实 SQLite/NAS 验收 |
 | WP09 Runner 协议 | 完成 | 出站 HTTP、日志、usage、Artifact 和恢复已闭环 |
-| WP10 AI Runner | 开放 | 只接 QoderCLI 与 CodexCLI 执行器 |
-| WP11-WP15 后续产品实现 | 未开放 | 按下方依赖推进 |
+| WP10 AI Runner | 完成 | QoderCLI/CodexCLI锁版、执行和usage已闭环 |
+| WP11 PDF | 开放 | 复用现有Pipeline、Runner和AI契约 |
+| WP12 视频 | 开放 | 与WP11并行，独占媒体执行器 |
+| WP13 知识库 | 开放 | 与WP11/WP12并行，独占发布投影 |
+| WP14-WP15 UI与收口 | 未开放 | WP11-WP13完成后进入 |
 | WP16 冷切换 | 未开放 | 全部验收并获得生产授权 |
 
 ## 依赖
@@ -56,7 +59,9 @@ WP05、WP06、WP07 可并行。WP11、WP12、WP13 在共享核心稳定后可并
 
 WP08 与 WP09 已完成：同一 PDF Pipeline 已通过真实 SQLite、NAS、TCP Server 和 RunnerClient 跑完 DAG，整条重跑会生成全新 ID，从 Task 重跑会物化上游 Artifact，发布事务只轮换 current/previous 指针。旧 previous 的物理 Artifact 回收、delete_source 和长期保留仍属于 WP15，不在调度器增加第二套 GC。
 
-下一步只开放 WP10。它只实现 QoderCLI 与 CodexCLI 的实际执行、版本锁、websearch 探测和 usage 审计；不得在该工作包补公共 CRUD、PDF 内容处理、第三 Provider、fallback 或通用 executor 框架。
+WP10已完成：QoderCLI与CodexCLI按固定版本执行，usage分别记录Qoder credits与Codex实际token，且没有第三Provider、fallback或通用Provider框架。真实账号和WebSearch smoke仍需单独授权，不属于本地完成门。
+
+下一步开放WP11、WP12和WP13并行开发。三者必须沿用现有Pipeline、Runner、Artifact和AI契约，各自独占PDF、媒体或知识库投影边界，不在实现层增加共享影子模型。
 
 ## 工作包
 

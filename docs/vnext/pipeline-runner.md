@@ -293,9 +293,13 @@ Runner 只能通过出站 HTTPS 访问 ECS 公网入口，和 Home Core/NAS 不�
 
 `tools` 只允许带版本的 `pdf_extractor`、`yt_dlp`、`yutto`、`ffmpeg`、`ffprobe`、`whisper_cpp`、`faster_whisper`、`qoder_cli`、`codex_cli`。`ai_models` 是严格的 `{model, efforts[]}` 列表；model 与 effort 是外部 CLI 报告的受限标识符，匹配 `[A-Za-z0-9._-]{1,64}`，Server只允许选择已上报的精确组合。
 
-websearch 不在注册能力中。AI executor实际要求 websearch 时，Runner 在调用前探测 CLI；不可用则本 Attempt 明确失败，不伪造无搜索结果。
+websearch 不在注册能力中。镜像构建时对锁版CLI做无费用帮助探针；AI executor实际启用websearch时使用该版本的固定参数，不可用或输出不合约即让本Attempt明确失败，不伪造无搜索结果。
 
 `ai_audit` 至少记录 tool、model、effort、PromptSnapshot摘要、脱敏参数、websearch是否启用及访问URL、usage invocation keys、退出状态和输出摘要。websearch URL是AI执行审计，不替代 PDF页或视频时间的 canonical evidence。
+
+AI Runner 只实现 QoderCLI 与 CodexCLI 两条显式分支。Task prompt使用冻结的PromptSnapshot、profile和已声明输入组装；prompt只经stdin传入，登录态只读挂载，子进程清空继承环境并限制工作目录、超时和输出大小。QoderCLI只记录其实际返回的credits；CodexCLI只记录其实际返回的累计input/output tokens。任一CLI输出不符合唯一Rust结果schema时Attempt失败，不从正文猜测字段。
+
+QoderCLI锁版输出尚不能稳定提供WebSearch访问URL，空URL列表只表示“未观测到可验证URL”，不表示未启用搜索。CodexCLI仅记录事件中实际出现的open-page/find-in-page URL；只有query的search事件不伪造URL。真实账号下的WebSearch行为必须通过单独授权的smoke确认。
 
 QoderCLI/CodexCLI 的锁版、镜像层缓存、本地 PC 代理和 GitHub 无代理边界见 [deployment.md](deployment.md)。
 
@@ -316,6 +320,7 @@ claim 响应固定包含：
 ```text
 job_id, task_id, task_key, exec_id, attempt_no
 executor, timeout_ms, lease_expires_at_ms
+prompt_snapshot_sha256
 resolved_inputs, output_declarations
 model?, effort?, runner_config_revision
 secret_inputs

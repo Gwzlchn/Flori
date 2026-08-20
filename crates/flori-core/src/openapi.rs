@@ -188,14 +188,9 @@ mod tests {
 
     #[test]
     fn exports_ai_result_schema_from_the_same_rust_types() {
-        let schema: serde_json::Value =
-            serde_json::from_str(&ai_result_schema_json().expect("AI result schema"))
-                .expect("parse AI result schema");
-        assert_eq!(
-            schema["$schema"],
-            "https://json-schema.org/draft/2020-12/schema"
-        );
-        assert!(schema["$defs"]["TermsManifest"].is_object());
-        assert!(!schema.to_string().contains("#/components/schemas/"));
+        let schema = ai_result_schema_json().expect("AI result schema");
+        assert!(schema.contains(r#""$schema":"https://json-schema.org/draft/2020-12/schema""#));
+        assert!(schema.contains(r#""TermsManifest":{"#));
+        assert!(!schema.contains("#/components/schemas/"));
     }
 }

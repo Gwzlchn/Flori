@@ -230,10 +230,12 @@ Rust core 为下列结构定义唯一 Serde 类型；JSON都带精确 `schema=fl
 
 每个 AI executor 为每次真实 CLI 调用生成稳定 `invocation_key`。调用 CLI 前先幂等写入 `state=started`；拿到结果后只允许一次 `started -> final` 并写实际指标。写入必须满足 UNIQUE(`attempt_id`,`invocation_key`)：
 
-- 重复 started 或完全相同的 final 返回已有记录。
+- 首次应用 started/final 时 `UsageAck.applied=true`；完全相同的重复请求返回同一记录且 `applied=false`。
+- Runner 只有拿到 started 的 `applied=true` 才能启动 CLI；`applied=false` 不得再次产生费用，也不得伪造 final。
 - final 指标冲突、final 回退 started 或第二次改变 final 返回 `usage_conflict`，不得累加。
 - Attempt 成功事务必须确认每个 started 调用都已 final；CLI不报告指标时也以 `origin=unavailable` final。
 - Runner 崩溃留下的 started 行保留为“可能已产生费用”的审计，AI Task默认不自动 retry。
+- CodexCLI final 记录实际累计 `input_tokens` 和 `output_tokens`，credits为空；QoderCLI final记录 `credits_micros`，token和cost字段为空。UI分别展示，不换算或猜测缺失指标。
 - UI 按 Runner、`tool`、model、effort 和时间聚合；契约中没有 Provider 字段。
 - 删除 Source 时随 Job cascade 删除详细 ledger，不留下悬空费用记录。
 

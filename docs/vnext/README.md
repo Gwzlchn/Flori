@@ -25,7 +25,7 @@
 
 ## 当前阶段
 
-WP01-WP09 已完成。SQLite、NAS Artifact、Pipeline 编译器、Job 调度和出站 Runner 控制面已有真实 SQLite、NAS 与 TCP 验收；下一步只开放 WP10 QoderCLI/CodexCLI AI Runner。当前 Server 可以启动控制面，但尚无真实 PDF、媒体或 AI executor，也不是生产候选。
+WP01-WP10 已完成。SQLite、NAS Artifact、Pipeline 编译器、Job 调度、出站 Runner 控制面和QoderCLI/CodexCLI AI Runner已有真实 SQLite、NAS、HTTP与fake CLI验收。真实账号smoke仍需单独授权；当前仍无PDF或媒体executor，也不是生产候选。下一步可并行推进WP11 PDF、WP12视频和WP13知识库。
 
 | 工作包 | 目标 | 产品代码 |
 |---|---|---|
@@ -36,8 +36,9 @@ WP01-WP09 已完成。SQLite、NAS Artifact、Pipeline 编译器、Job 调度和
 | WP05-WP07 | SQLite、NAS Artifact 和 Pipeline 编译器 | 已完成 |
 | WP08 | Job 创建、重跑、DAG 推进和发布轮换 | 已完成 |
 | WP09 | Runner 注册、lease、日志、usage、Artifact 和终态协议 | 已完成 |
-| WP10 | QoderCLI/CodexCLI AI Runner | 已开放 |
-| WP11-WP15 | 按依赖实现内容、知识库、UI 和安全收口 | 未开放 |
+| WP10 | QoderCLI/CodexCLI AI Runner | 完成 |
+| WP11-WP13 | PDF、视频和知识库 | 已开放，可并行 |
+| WP14-WP15 | UI和安全收口 | 未开放 |
 | WP16 | 生产冷切换与旧 Python 退役 | 单独授权 |
 
 WP05 之后的业务实现必须以已冻结的 `flori.v1` 契约为边界；发现缺口先修订唯一契约，不在实现层增加兼容字段。
