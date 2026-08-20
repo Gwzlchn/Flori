@@ -1,4 +1,8 @@
-use std::{fs, path::Path};
+use std::{
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
 use flori_core::{ErrorCode, UploadState};
 
@@ -15,6 +19,27 @@ pub enum RecoveryAction {
 }
 
 impl NasArtifactStore {
+    pub(crate) fn read_chunk(
+        &self,
+        relative_path: &str,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ArtifactStoreError> {
+        if max_bytes == 0 {
+            return Err(ArtifactStoreError::with_code(ErrorCode::InvalidRequest));
+        }
+        let path = self.safe_path(Path::new(relative_path), false)?;
+        let mut file = File::open(path)?;
+        if offset > file.metadata()?.len() {
+            return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState));
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = vec![0_u8; max_bytes];
+        let read = file.read(&mut bytes)?;
+        bytes.truncate(read);
+        Ok(bytes)
+    }
+
     pub fn discard(&self, upload: &UploadRecord) -> Result<(), ArtifactStoreError> {
         match self.recovery_action(upload, false)? {
             RecoveryAction::DeleteLedger => Ok(()),

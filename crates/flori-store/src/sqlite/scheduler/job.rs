@@ -15,13 +15,13 @@ use flori_core::{
 use flori_pipeline::{Compilation, RuleCondition};
 use sqlx::Row;
 
-struct FrozenTask {
-    key: String,
-    spec: CompiledTaskSpec,
-    spec_json: String,
-    bindings_json: String,
-    prompt_key: Option<String>,
-    included: bool,
+pub(super) struct FrozenTask {
+    pub key: String,
+    pub spec: CompiledTaskSpec,
+    pub spec_json: String,
+    pub bindings_json: String,
+    pub prompt_key: Option<String>,
+    pub included: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -196,7 +196,7 @@ async fn source_context(
     ))
 }
 
-fn freeze_tasks(
+pub(super) fn freeze_tasks(
     compilation: &Compilation,
     kind: SourceKind,
     translate: bool,

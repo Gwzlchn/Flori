@@ -166,7 +166,9 @@ async fn artifacts(
     let rows = sqlx::query(
         "SELECT a.id,a.name,a.kind,a.media_type,a.size_bytes,a.sha256 FROM tasks t \
          JOIN artifacts a ON a.task_id=t.id WHERE t.job_id=? AND t.task_key=? \
-         AND t.state='succeeded' AND (a.attempt_id=t.current_attempt_id OR a.origin='materialized') \
+         AND ((a.origin='produced' AND t.state='succeeded' \
+               AND a.attempt_id=t.current_attempt_id) \
+              OR (a.origin='materialized' AND t.state='skipped' AND a.attempt_id IS NULL)) \
          AND (a.name=? OR a.name LIKE ?) ORDER BY a.name",
     )
     .bind(job_id)
