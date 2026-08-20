@@ -749,6 +749,62 @@ async fn attempt_upload_recovers_cursor_and_rename_crash_windows() {
 }
 
 #[tokio::test]
+async fn attempt_upload_uses_declared_file_name_and_supports_empty_files() {
+    let database = TestDatabase::new();
+    let foundation = foundation(&database, &["media"]).await;
+    let artifacts =
+        NasArtifactStore::new(database.directory.join("artifacts"), 1024).expect("artifact store");
+    let claim = foundation
+        .store
+        .poll_and_claim(foundation.runner_id, 10, 70, "https://flori.example")
+        .await
+        .expect("poll")
+        .expect("claim");
+    let upload = foundation
+        .store
+        .start_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            claim.exec_id,
+            &StartUploadRequest {
+                name: "original".into(),
+                media_type: "application/pdf".into(),
+                size_bytes: 0,
+                sha256: digest(""),
+            },
+            11,
+        )
+        .await
+        .expect("start empty upload");
+    assert!(upload.artifact.relative_path.ends_with("/source.pdf"));
+    foundation
+        .store
+        .verify_attempt_upload(
+            &artifacts,
+            foundation.runner_id,
+            upload.upload_id,
+            &VerifyUploadRequest {
+                size_bytes: 0,
+                sha256: digest(""),
+            },
+            12,
+        )
+        .await
+        .expect("verify empty upload");
+    let path = database
+        .directory
+        .join("artifacts")
+        .join(&upload.artifact.relative_path);
+    assert_eq!(fs::metadata(path).expect("empty artifact").len(), 0);
+    let state: String = sqlx::query_scalar("SELECT state FROM uploads WHERE id=?")
+        .bind(upload.upload_id.to_string())
+        .fetch_one(&foundation.pool)
+        .await
+        .expect("upload state");
+    assert_eq!(state, "moved");
+}
+
+#[tokio::test]
 async fn attempt_upload_enforces_wildcard_names_counts_sizes_and_fence() {
     let database = TestDatabase::new();
     let foundation = foundation(&database, &["media"]).await;

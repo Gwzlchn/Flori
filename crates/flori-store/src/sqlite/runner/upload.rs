@@ -1,15 +1,15 @@
 use std::str::FromStr;
 
 use flori_core::{
-    ArtifactDeclaration, ArtifactId, ArtifactKind, ArtifactManifestEntry, AttemptId,
-    CompiledTaskSpec, ErrorCode, PendingAttemptUpload, RunnerId, StartUploadRequest,
-    StartUploadResponse, UploadId, UploadState,
+    ArtifactId, ArtifactManifestEntry, AttemptId, CompiledTaskSpec, ErrorCode,
+    PendingAttemptUpload, RunnerId, StartUploadRequest, StartUploadResponse, UploadId, UploadState,
 };
 use sqlx::{Row, Sqlite, Transaction};
 
 use crate::artifact::{NasArtifactStore, UploadRecord, retained_artifact_path, task_artifact_path};
 
 use super::super::{Store, StoreError};
+use super::upload_rule::{declaration, retention};
 
 pub(super) struct ActiveUpload {
     pub record: UploadRecord,
@@ -79,14 +79,14 @@ impl Store {
         let artifact_id = ArtifactId::generate();
         let retention = retention(declaration.kind);
         let final_path = if retention == "source" {
-            retained_artifact_path(active.source_id, artifact_id, basename)
+            retained_artifact_path(active.source_id, artifact_id, &basename)
         } else {
             task_artifact_path(
                 active.source_id,
                 active.job_id,
                 active.task_id,
                 artifact_id,
-                basename,
+                &basename,
             )
         }
         .map_err(|error| StoreError::new(error.code()))?;
@@ -246,38 +246,6 @@ async fn active_attempt(
             .map_err(|_| corrupt())?,
         spec: serde_json::from_str(row.try_get("spec_json")?).map_err(|_| corrupt())?,
     })
-}
-
-fn declaration<'a, 'b>(
-    spec: &'a CompiledTaskSpec,
-    name: &'b str,
-) -> Result<(&'a ArtifactDeclaration, &'b str), StoreError> {
-    for declaration in &spec.artifacts {
-        if name == declaration.name && declaration.max_files.is_none() {
-            return Ok((declaration, name));
-        }
-        if let Some(basename) = name
-            .strip_prefix(&declaration.name)
-            .and_then(|suffix| suffix.strip_prefix('/'))
-            && declaration.max_files.is_some()
-            && safe_basename(basename)
-        {
-            return Ok((declaration, basename));
-        }
-    }
-    Err(StoreError::new(ErrorCode::ArtifactUndeclared))
-}
-
-fn safe_basename(value: &str) -> bool {
-    !value.is_empty() && !value.starts_with('.') && !value.contains(['/', '\\', '\0'])
-}
-
-pub(super) fn retention(kind: ArtifactKind) -> &'static str {
-    match kind {
-        ArtifactKind::SourceOriginal | ArtifactKind::Subtitle | ArtifactKind::Danmaku => "source",
-        ArtifactKind::TaskLog | ArtifactKind::AiAudit => "failed_audit",
-        _ => "published",
-    }
 }
 
 fn parse_state(value: &str) -> Result<UploadState, StoreError> {

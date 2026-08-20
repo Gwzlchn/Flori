@@ -61,41 +61,57 @@ impl Store {
         if now_ms < 0 {
             return Err(invalid());
         }
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let mut loaded = load_upload(&mut transaction, runner_id, upload_id, now_ms).await?;
-        if loaded.record.expected_size_bytes() != request.size_bytes
-            || loaded.record.expected_sha256() != &request.sha256
         {
-            return Err(StoreError::new(ErrorCode::DigestMismatch));
+            let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let loaded = load_upload(&mut transaction, runner_id, upload_id, now_ms).await?;
+            validate_request(&loaded.record, request)?;
+            if loaded.record.state() == UploadState::Moved {
+                require_moved(artifacts, &loaded.record)?;
+                transaction.rollback().await?;
+                return Ok(VerifyUploadResponse {
+                    upload_id,
+                    artifact: loaded.pending.artifact,
+                });
+            }
+            if loaded.record.state() == UploadState::Receiving {
+                artifacts
+                    .verify_staging(&loaded.record)
+                    .map_err(|error| StoreError::new(error.code()))?;
+                let updated = sqlx::query(
+                    "UPDATE uploads SET state='verified',updated_at_ms=? \
+                     WHERE id=? AND state='receiving'",
+                )
+                .bind(now_ms)
+                .bind(upload_id.to_string())
+                .execute(&mut *transaction)
+                .await?;
+                if updated.rows_affected() != 1 {
+                    return Err(StoreError::new(ErrorCode::Conflict));
+                }
+            }
+            transaction.commit().await?;
         }
-        if loaded.record.state() == UploadState::Receiving {
-            artifacts
-                .verify_staging(&loaded.record)
-                .map_err(|error| StoreError::new(error.code()))?;
-            sqlx::query("UPDATE uploads SET state='verified',updated_at_ms=? WHERE id=? AND state='receiving'")
-                .bind(now_ms).bind(upload_id.to_string()).execute(&mut *transaction).await?;
-            loaded
-                .record
-                .restore_progress(request.size_bytes, UploadState::Verified)
-                .map_err(|_| StoreError::new(ErrorCode::CorruptState))?;
-        }
+
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let loaded = load_upload(&mut transaction, runner_id, upload_id, now_ms).await?;
+        validate_request(&loaded.record, request)?;
         if loaded.record.state() == UploadState::Verified {
             artifacts
                 .move_verified(&loaded.record)
                 .map_err(|error| StoreError::new(error.code()))?;
-            sqlx::query(
+            let updated = sqlx::query(
                 "UPDATE uploads SET state='moved',updated_at_ms=? WHERE id=? AND state='verified'",
             )
             .bind(now_ms)
             .bind(upload_id.to_string())
             .execute(&mut *transaction)
             .await?;
-        } else if loaded.record.state() == UploadState::Moved
-            && artifacts
-                .recovery_action(&loaded.record, true)
-                .map_err(|error| StoreError::new(error.code()))?
-                != RecoveryAction::RetryCommit
-        {
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::new(ErrorCode::Conflict));
+            }
+        } else if loaded.record.state() == UploadState::Moved {
+            require_moved(artifacts, &loaded.record)?;
+        } else {
             return Err(StoreError::new(ErrorCode::CorruptState));
         }
         transaction.commit().await?;
@@ -104,6 +120,32 @@ impl Store {
             artifact: loaded.pending.artifact,
         })
     }
+}
+
+fn validate_request(
+    record: &crate::artifact::UploadRecord,
+    request: &VerifyUploadRequest,
+) -> Result<(), StoreError> {
+    if record.expected_size_bytes() != request.size_bytes
+        || record.expected_sha256() != &request.sha256
+    {
+        return Err(StoreError::new(ErrorCode::DigestMismatch));
+    }
+    Ok(())
+}
+
+fn require_moved(
+    artifacts: &NasArtifactStore,
+    record: &crate::artifact::UploadRecord,
+) -> Result<(), StoreError> {
+    if artifacts
+        .recovery_action(record, true)
+        .map_err(|error| StoreError::new(error.code()))?
+        != RecoveryAction::RetryCommit
+    {
+        return Err(StoreError::new(ErrorCode::CorruptState));
+    }
+    Ok(())
 }
 
 fn invalid() -> StoreError {

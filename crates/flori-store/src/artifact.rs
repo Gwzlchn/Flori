@@ -163,6 +163,9 @@ impl NasArtifactStore {
         if upload.received_bytes != upload.expected_size_bytes {
             return Err(ArtifactStoreError::with_code(ErrorCode::DigestMismatch));
         }
+        if upload.expected_size_bytes == 0 {
+            self.append_chunk(upload, 0, &sha256(&[]), &[])?;
+        }
         self.check_exact(&upload.staging_relative_path(), upload)
     }
 

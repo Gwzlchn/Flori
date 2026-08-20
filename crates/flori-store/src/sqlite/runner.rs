@@ -6,4 +6,5 @@ mod registration;
 mod resolve;
 mod upload;
 mod upload_io;
+mod upload_rule;
 mod usage_bridge;
