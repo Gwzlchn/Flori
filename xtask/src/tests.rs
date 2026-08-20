@@ -127,6 +127,21 @@ fn product_module_budget_counts_only_nonempty_lines() {
 }
 
 #[test]
+fn product_and_inline_test_sections_have_independent_budgets() {
+    let production = "code\n".repeat(300);
+    let tests = "test\n".repeat(300);
+    assert!(policy::module_sections_within_budget(&format!(
+        "{production}\n#[cfg(test)]\n{tests}"
+    )));
+    assert!(!policy::module_sections_within_budget(&format!(
+        "{production}code\n#[cfg(test)]\n{tests}"
+    )));
+    assert!(!policy::module_sections_within_budget(&format!(
+        "{production}\n#[cfg(test)]\n{tests}test\n"
+    )));
+}
+
+#[test]
 fn janitor_rejects_symlink_outside_repository() {
     let base = env::temp_dir().join(format!("flori-xtask-{}", std::process::id()));
     let root = base.join("repo");

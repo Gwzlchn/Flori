@@ -36,8 +36,10 @@ pub(super) fn check(root: &Path) -> Result<(), String> {
 fn scan(root: &Path, directory: &str, patterns: &str) -> Result<(), String> {
     for relative in repository_files(root, &[directory])? {
         let text = fs::read_to_string(root.join(&relative)).map_err(|error| error.to_string())?;
-        if is_product_module(&relative) && nonempty_lines(&text) > MAX_MODULE_LINES {
-            return Err(format!("product module exceeds 300 lines: {relative}"));
+        if is_product_module(&relative) && !module_sections_within_budget(&text) {
+            return Err(format!(
+                "product or inline test module exceeds 300 lines: {relative}"
+            ));
         }
         if let Some(pattern) = patterns.split('\0').find(|pattern| text.contains(pattern)) {
             return Err(format!("forbidden pattern {pattern:?} in {relative}"));
@@ -67,4 +69,9 @@ fn is_product_module(relative: &str) -> bool {
 
 pub(super) fn nonempty_lines(text: &str) -> usize {
     text.lines().filter(|line| !line.trim().is_empty()).count()
+}
+
+pub(super) fn module_sections_within_budget(text: &str) -> bool {
+    text.split("\n#[cfg(test)]")
+        .all(|section| nonempty_lines(section) <= MAX_MODULE_LINES)
 }
