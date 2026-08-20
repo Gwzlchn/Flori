@@ -170,7 +170,7 @@ pub(super) fn to_u64(value: i64) -> Result<u64, StoreError> {
     value.try_into().map_err(|_| corrupt())
 }
 
-pub(super) fn source_record(
+pub(in crate::sqlite) fn source_record(
     target: &UploadRecord,
     source_path: &str,
 ) -> Result<UploadRecord, StoreError> {

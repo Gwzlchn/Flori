@@ -99,9 +99,9 @@ impl NasArtifactStore {
             }
             (UploadState::Receiving, true, false) => {
                 let length = self.file_len(&staging)?;
-                if length != Some(upload.received_bytes)
-                    || length.is_some_and(|length| length > upload.expected_size_bytes)
-                {
+                if length.is_some_and(|length| {
+                    length < upload.received_bytes || length > upload.expected_size_bytes
+                }) {
                     return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState));
                 }
                 RecoveryAction::ResumeReceiving

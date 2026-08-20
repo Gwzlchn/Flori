@@ -142,7 +142,7 @@ async fn advance_one(
     }
 }
 
-async fn load_records(
+pub(in crate::sqlite) async fn load_records(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     pending: &PendingMaterializeCommit,
     artifact: &PendingMaterializedArtifact,
@@ -261,7 +261,7 @@ async fn load_records(
     Ok((target, row.try_get("source_path")?))
 }
 
-async fn validate_owner(
+pub(in crate::sqlite) async fn validate_owner(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     pending: &PendingMaterializeCommit,
 ) -> Result<(), StoreError> {

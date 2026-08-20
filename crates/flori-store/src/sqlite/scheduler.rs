@@ -15,4 +15,6 @@ mod wire;
 
 pub(crate) use attempt::{finish_failure, finish_success};
 pub use job::CreateJob;
+pub(in crate::sqlite) use rerun_artifact::source_record;
+pub(in crate::sqlite) use rerun_copy::{load_records, validate_owner};
 pub use source::CreateSource;
