@@ -126,6 +126,15 @@ async fn poll(
     require_empty(&body)?;
     let now_ms = now_ms()?;
     let runner_id = authenticate(&state, &token, now_ms).await?;
+    for _ in 0..16 {
+        if !state
+            .store
+            .drive_core_once(&state.artifacts, now_ms)
+            .await?
+        {
+            break;
+        }
+    }
     let lease_expires_at_ms = lease_expiry(now_ms, state.lease_ms)?;
     match state
         .store

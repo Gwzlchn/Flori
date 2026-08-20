@@ -1,5 +1,6 @@
 mod attempt;
 mod core;
+mod drive;
 mod expire;
 mod job;
 mod pipeline;
