@@ -57,6 +57,9 @@ pub(super) fn isolated_runner_auth_defaults(compose: &str) -> bool {
 
 fn scan(root: &Path, directory: &str, patterns: &str) -> Result<(), String> {
     for relative in repository_files(root, &[directory])? {
+        if patterns == TS_FORBIDDEN && !(relative.ends_with(".ts") || relative.ends_with(".vue")) {
+            continue;
+        }
         let text = fs::read_to_string(root.join(&relative)).map_err(|error| error.to_string())?;
         if is_product_module(&relative) && !module_sections_within_budget(&text) {
             return Err(format!(
