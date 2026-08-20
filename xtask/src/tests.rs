@@ -142,6 +142,15 @@ fn product_and_inline_test_sections_have_independent_budgets() {
 }
 
 #[test]
+fn runner_auth_defaults_cannot_share_the_server_data_root() {
+    let safe = "${FLORI_QODER_AUTH_DIR:-./runner-auth/qoder}\n${FLORI_CODEX_AUTH_FILE:-./runner-auth/codex/auth.json}";
+    assert!(policy::isolated_runner_auth_defaults(safe));
+    assert!(!policy::isolated_runner_auth_defaults(
+        &safe.replace("./runner-auth/qoder", "./data/runner-auth/qoder")
+    ));
+}
+
+#[test]
 fn janitor_rejects_symlink_outside_repository() {
     let base = env::temp_dir().join(format!("flori-xtask-{}", std::process::id()));
     let root = base.join("repo");

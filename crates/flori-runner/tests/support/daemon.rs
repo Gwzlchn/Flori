@@ -6,7 +6,7 @@ use std::{
     net::TcpStream,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use flori_core::{
@@ -31,7 +31,7 @@ pub(crate) fn claim(
         attempt_no: 1,
         executor,
         timeout_ms,
-        lease_expires_at_ms: i64::MAX,
+        lease_expires_at_ms: now_ms() + 60_000,
         prompt_snapshot_sha256: digest(b"snapshot"),
         resolved_inputs,
         output_declarations,
@@ -40,6 +40,15 @@ pub(crate) fn claim(
         runner_config_revision: 1,
         secret_inputs: SecretInputs::default(),
     }
+}
+
+pub(crate) fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_millis()
+        .try_into()
+        .expect("timestamp")
 }
 
 pub(crate) fn artifact(base_url: &str, bytes: &[u8]) -> ResolvedArtifact {

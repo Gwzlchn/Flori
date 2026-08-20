@@ -29,8 +29,19 @@ pub(super) fn check(root: &Path) -> Result<(), String> {
     if inventory.join("\n") != POLICY_FILES {
         return Err(format!("architecture inventory changed: {inventory:?}"));
     }
+    let compose =
+        fs::read_to_string(root.join("compose.prod.yml")).map_err(|error| error.to_string())?;
+    if !isolated_runner_auth_defaults(&compose) {
+        return Err("AI Runner auth defaults overlap the Server data root".into());
+    }
     scan(root, "crates", RUST_FORBIDDEN)?;
     scan(root, "frontend/src", TS_FORBIDDEN)
+}
+
+pub(super) fn isolated_runner_auth_defaults(compose: &str) -> bool {
+    compose.contains("${FLORI_QODER_AUTH_DIR:-./runner-auth/qoder}")
+        && compose.contains("${FLORI_CODEX_AUTH_FILE:-./runner-auth/codex/auth.json}")
+        && !compose.contains("./data/runner-auth")
 }
 
 fn scan(root: &Path, directory: &str, patterns: &str) -> Result<(), String> {

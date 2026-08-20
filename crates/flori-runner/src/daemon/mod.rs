@@ -3,7 +3,10 @@ mod invoke;
 mod log;
 mod output;
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use flori_core::{AiTool, ErrorCode, Executor, TaskClaim, UsageUpdate};
 use tokio::{fs, sync::watch};
@@ -55,6 +58,7 @@ async fn supervise(
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), ErrorCode> {
     let exec_id = claim.exec_id;
+    let mut lease_deadline = deadline(claim.lease_expires_at_ms)?;
     let (stop, receiver) = watch::channel(false);
     let mut execution = Box::pin(execute(client, config, claim, receiver));
     loop {
@@ -64,11 +68,26 @@ async fn supervise(
                 tokio::time::sleep(config.renew_interval).await;
                 client.renew(exec_id).await
             } => {
-                if let Err(error) = result {
-                    let _ = stop.send(true);
-                    let _ = execution.await;
-                    return Err(error.code());
+                match result {
+                    Ok(renewed) => match deadline(renewed.lease_expires_at_ms) {
+                        Ok(renewed_deadline) => lease_deadline = renewed_deadline,
+                        Err(code) => {
+                            let _ = stop.send(true);
+                            let _ = execution.await;
+                            return Err(code);
+                        }
+                    },
+                    Err(error) => {
+                        let _ = stop.send(true);
+                        let _ = execution.await;
+                        return Err(error.code());
+                    }
                 }
+            }
+            () = tokio::time::sleep_until(lease_deadline) => {
+                let _ = stop.send(true);
+                let _ = execution.await;
+                return Err(ErrorCode::LeaseExpired);
             }
             () = canceled(cancel) => {
                 let _ = stop.send(true);
@@ -77,6 +96,22 @@ async fn supervise(
             }
         }
     }
+}
+
+fn deadline(expires_at_ms: i64) -> Result<tokio::time::Instant, ErrorCode> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ErrorCode::Internal)?
+        .as_millis();
+    let expires = u128::try_from(expires_at_ms).map_err(|_| ErrorCode::CorruptState)?;
+    let remaining = expires
+        .checked_sub(now_ms)
+        .filter(|remaining| *remaining > 0)
+        .ok_or(ErrorCode::LeaseExpired)?;
+    let millis = u64::try_from(remaining).map_err(|_| ErrorCode::CorruptState)?;
+    tokio::time::Instant::now()
+        .checked_add(Duration::from_millis(millis))
+        .ok_or(ErrorCode::CorruptState)
 }
 
 async fn execute(

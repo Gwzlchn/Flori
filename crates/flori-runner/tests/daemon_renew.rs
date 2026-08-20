@@ -13,7 +13,7 @@ use flori_runner::{DaemonConfig, RunnerClient, run_ai_daemon};
 use support::*;
 
 #[tokio::test]
-async fn rejected_renewal_kills_the_cli_and_never_completes() {
+async fn local_lease_deadline_kills_cli_while_renew_is_stalled() {
     let root = temp_root("renew");
     let finished = root.join("finished");
     let executable = script(
@@ -28,7 +28,7 @@ async fn rejected_renewal_kills_the_cli_and_never_completes() {
     let exec_id = AttemptId::generate();
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let base_url = format!("http://{}", listener.local_addr().expect("address"));
-    let claim = claim(
+    let mut claim = claim(
         exec_id,
         Executor::AiDocumentTranslate,
         ResolvedTaskInputs::AiDocumentTranslate {
@@ -43,6 +43,7 @@ async fn rejected_renewal_kills_the_cli_and_never_completes() {
         )],
         10_000,
     );
+    claim.lease_expires_at_ms = now_ms() + 500;
     let client = RunnerClient::new(&base_url, "token").expect("client");
     let config = config(&root, executable, Duration::from_millis(30));
     let (_keep, mut cancel) = watch::channel(false);
@@ -80,7 +81,7 @@ fn server(
                 ),
                 3 => {
                     assert!(head.contains(&format!("/attempts/{exec_id}/renew")));
-                    error_response(&mut stream, ErrorCode::LeaseExpired);
+                    thread::sleep(Duration::from_millis(800));
                 }
                 _ => unreachable!(),
             }

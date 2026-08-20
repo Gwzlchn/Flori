@@ -44,7 +44,7 @@ services:
       FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
     volumes:
       - type: bind
-        source: ${FLORI_QODER_AUTH_DIR:-./data/runner-auth/qoder}
+        source: ${FLORI_QODER_AUTH_DIR:-./runner-auth/qoder}
         target: /home/flori/.qoder/.auth
         read_only: true
         bind:
@@ -66,7 +66,7 @@ services:
       FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
     volumes:
       - type: bind
-        source: ${FLORI_CODEX_AUTH_FILE:-./data/runner-auth/codex/auth.json}
+        source: ${FLORI_CODEX_AUTH_FILE:-./runner-auth/codex/auth.json}
         target: /home/flori/.codex/auth.json
         read_only: true
         bind:
