@@ -26,8 +26,11 @@ services:
       dockerfile: docker/runner.Dockerfile
       target: runner-media
     environment:
-      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-http://edge}
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_MEDIA:-}
+      FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
+    volumes:
+      - runner-media-spool:/var/lib/flori-runner
     profiles: [media]
 
   runner-ai-qoder:
@@ -75,5 +78,6 @@ services:
     profiles: [ai-codex]
 
 volumes:
+  runner-media-spool:
   runner-ai-qoder-spool:
   runner-ai-codex-spool:

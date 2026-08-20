@@ -23,7 +23,26 @@ USER 65532:65532
 ENTRYPOINT ["flori-runner"]
 
 FROM runner-base AS runner-media
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg=7:5.1.9-0+deb12u1 \
+      poppler-utils=22.12.0-2+deb12u3 \
+      python3=3.11.2-1+b1 \
+      python3-pip=23.0.1+dfsg-1 && \
+    python3 -m pip install --break-system-packages --no-cache-dir PyMuPDF==1.27.2.3 && \
+    python3 -m pip uninstall --break-system-packages --yes pip setuptools wheel && \
+    apt-get purge -y --auto-remove python3-pip && \
+    rm -rf /var/lib/apt/lists/* /root/.cache
 LABEL org.flori.runner.kind="media"
+LABEL org.flori.runner.tool.pdf_extractor="1.27.2.3"
+LABEL org.flori.runner.tool.ffmpeg="5.1.9"
+USER 65532:65532
+RUN test "$(python3 -I -c 'import fitz; print(fitz.VersionBind)')" = "1.27.2.3" && \
+    pdfinfo -v 2>&1 | grep -F 'version 22.12.0' && \
+    pdftotext -v 2>&1 | grep -F 'version 22.12.0' && \
+    ffmpeg -version | head -1 | grep -F 'ffmpeg version 5.1.9' && \
+    ffprobe -version | head -1 | grep -F 'ffprobe version 5.1.9'
+CMD ["run", "media"]
 
 FROM node:22.23.2-bookworm-slim AS runner-ai-base
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
