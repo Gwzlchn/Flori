@@ -134,7 +134,7 @@ pub(super) fn success_server(
                 let (upload_id, entry, uploaded, _) = uploads.last().expect("upload");
                 let verify: VerifyUploadRequest = serde_json::from_slice(&body).expect("verify");
                 assert_eq!(verify.size_bytes, uploaded.len() as u64);
-                assert_eq!(verify.sha256, digest(&uploaded));
+                assert_eq!(verify.sha256, digest(uploaded));
                 json(
                     &mut stream,
                     &VerifyUploadResponse {
