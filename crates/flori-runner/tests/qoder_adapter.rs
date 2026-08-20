@@ -160,6 +160,8 @@ fn result_decodes_the_strict_envelope_and_only_reports_credits() {
             "\"origin\":\"headless\",\"uuid\":\"fake-uuid\"",
         );
     parse_note(with_origin.as_bytes()).expect("locked optional origin");
+    let fenced = format!("```json\n{DOCUMENT_NOTE}\n```");
+    parse_note(&result_output(&fenced, "1")).expect("single Qoder JSON fence");
 
     let decimal_locator = format!(
         r#"{{"executor":"ai.document_note","schema":"flori.ai_result.v1","smart_note_markdown":"note","summary_markdown":"summary","terms":{}}}"#,
@@ -218,6 +220,17 @@ fn credits_are_rounded_to_micros_and_never_fabricated() {
 
 #[test]
 fn malformed_duplicate_unknown_and_oversize_outputs_fail_closed() {
+    for wrapped in [
+        format!("before\n```json\n{DOCUMENT_NOTE}\n```"),
+        format!("```json\n{DOCUMENT_NOTE}\n```\nafter"),
+        format!("```JSON\n{DOCUMENT_NOTE}\n```"),
+        format!("```json\n```json\n{DOCUMENT_NOTE}\n```\n```"),
+    ] {
+        assert_eq!(
+            parse_note(&result_output(&wrapped, "1")).err(),
+            Some(QoderError::InvalidOutput)
+        );
+    }
     let unknown_inner = format!(
         "{},\"extra\":true}}",
         DOCUMENT_NOTE.strip_suffix('}').expect("object fixture")

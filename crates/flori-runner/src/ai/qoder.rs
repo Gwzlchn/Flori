@@ -179,8 +179,13 @@ pub fn parse_result(
 ) -> Result<QoderResult, QoderError> {
     let result = parse_outer(exit_code, stdout, max_output_bytes)?;
     let usage = usage(&result, invocation_key)?;
+    let envelope_json = result
+        .result
+        .strip_prefix("```json\n")
+        .and_then(|value| value.strip_suffix("\n```"))
+        .unwrap_or(&result.result);
     let envelope: AiResultEnvelope =
-        serde_json::from_str(&result.result).map_err(|_| QoderError::InvalidOutput)?;
+        serde_json::from_str(envelope_json).map_err(|_| QoderError::InvalidOutput)?;
     if envelope_executor(&envelope) != executor {
         return Err(QoderError::InvalidOutput);
     }
