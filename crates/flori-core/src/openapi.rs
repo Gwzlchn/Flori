@@ -15,8 +15,8 @@ use crate::{
     ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool, RunnerToolCapability, SearchChunkId,
     SecretCredential, SecretInputs, Sha256Digest, SourceId, SourceInputId, SourceKind,
     StartUploadRequest, StartUploadResponse, SystemHealthStatus, TaskClaim, TaskId, TaskLogEvent,
-    TaskLogLevel, TaskState, UploadCursor, UploadId, UploadOwnerKind, UploadState, UsageAck,
-    UsageOrigin, UsageUpdate, VerifyUploadRequest, VerifyUploadResponse,
+    TaskLogLevel, TaskLogLine, TaskState, UploadCursor, UploadId, UploadOwnerKind, UploadState,
+    UsageAck, UsageOrigin, UsageUpdate, VerifyUploadRequest, VerifyUploadResponse,
 };
 
 #[derive(OpenApi)]
@@ -91,6 +91,7 @@ use crate::{
     CreateRunnerSlotResponse,
     RenewLeaseResponse,
     LogFrame,
+    TaskLogLine,
     LogCursor,
     TaskLogEvent,
     UsageUpdate,

@@ -3,7 +3,8 @@ use utoipa::ToSchema;
 
 use crate::{
     AiModels, AiTool, AiUsageId, AiUsageState, ArtifactManifestEntry, AttemptId, AttemptState,
-    ErrorCode, RequestId, RunnerId, RunnerTags, RunnerTools, Sha256Digest, UploadId, UsageOrigin,
+    ErrorCode, RequestId, RunnerId, RunnerTags, RunnerTools, Sha256Digest, TaskLogLevel, UploadId,
+    UsageOrigin,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -49,6 +50,14 @@ pub struct LogFrame {
     pub sequence: u64,
     pub sha256: Sha256Digest,
     pub line: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TaskLogLine {
+    pub timestamp_ms: u64,
+    pub level: TaskLogLevel,
+    pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -174,6 +183,15 @@ mod tests {
         let update: UsageUpdate = serde_json::from_str(json).expect("strict update");
         assert_eq!(serde_json::to_string(&update).expect("wire JSON"), json);
         serde_json::from_str::<UsageUpdate>(&json.replace('}', ",\"extra\":1}"))
+            .expect_err("unknown field");
+    }
+
+    #[test]
+    fn task_log_line_is_strict_and_closed() {
+        let json = r#"{"timestamp_ms":1,"level":"warn","message":"retry"}"#;
+        let line: TaskLogLine = serde_json::from_str(json).expect("strict task log line");
+        assert_eq!(serde_json::to_string(&line).expect("wire JSON"), json);
+        serde_json::from_str::<TaskLogLine>(&json.replace('}', ",\"extra\":1}"))
             .expect_err("unknown field");
     }
 }
