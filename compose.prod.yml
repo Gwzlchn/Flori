@@ -37,8 +37,19 @@ services:
       dockerfile: docker/runner.Dockerfile
       target: runner-ai-qoder
     environment:
-      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-http://edge}
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:?set FLORI_SERVER_URL to the public HTTPS endpoint}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_QODER:-}
+      FLORI_RUNNER_MODEL: ${FLORI_RUNNER_QODER_MODEL:-}
+      FLORI_RUNNER_EFFORT: ${FLORI_RUNNER_QODER_EFFORT:-}
+      FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
+    volumes:
+      - type: bind
+        source: ${FLORI_QODER_AUTH_DIR:-./data/runner-auth/qoder}
+        target: /home/flori/.qoder/.auth
+        read_only: true
+        bind:
+          create_host_path: false
+      - runner-ai-qoder-spool:/var/lib/flori-runner
     profiles: [ai-qoder]
 
   runner-ai-codex:
@@ -48,6 +59,21 @@ services:
       dockerfile: docker/runner.Dockerfile
       target: runner-ai-codex
     environment:
-      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-http://edge}
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:?set FLORI_SERVER_URL to the public HTTPS endpoint}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_CODEX:-}
+      FLORI_RUNNER_MODEL: ${FLORI_RUNNER_CODEX_MODEL:-}
+      FLORI_RUNNER_EFFORT: ${FLORI_RUNNER_CODEX_EFFORT:-}
+      FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
+    volumes:
+      - type: bind
+        source: ${FLORI_CODEX_AUTH_FILE:-./data/runner-auth/codex/auth.json}
+        target: /home/flori/.codex/auth.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - runner-ai-codex-spool:/var/lib/flori-runner
     profiles: [ai-codex]
+
+volumes:
+  runner-ai-qoder-spool:
+  runner-ai-codex-spool:
