@@ -15,9 +15,9 @@ vNext 在同一仓库的 `rust-vnext` 分支开发。`main` 在 WP16 前仍是 P
 | WP08 Job 调度 | 完成 | 初次、整条和从 Task 重跑已通过真实 SQLite/NAS 验收 |
 | WP09 Runner 协议 | 完成 | 出站 HTTP、日志、usage、Artifact 和恢复已闭环 |
 | WP10 AI Runner | 完成 | QoderCLI/CodexCLI锁版、执行和usage已闭环 |
-| WP11 PDF | 开放 | 复用现有Pipeline、Runner和AI契约 |
-| WP12 视频 | 开放 | 与WP11并行，独占媒体执行器 |
-| WP13 知识库 | 开放 | 与WP11/WP12并行，独占发布投影 |
+| WP11 PDF | 完成 | 三入口、解析、AI笔记、evidence、重跑和发布已闭环 |
+| WP12 视频 | 开放 | 已有离线黄金基线；完整视频产品链待实现 |
+| WP13 知识库 | 开放 | current投影已完成；MCP和管理面待实现 |
 | WP14-WP15 UI与收口 | 未开放 | WP11-WP13完成后进入 |
 | WP16 冷切换 | 未开放 | 全部验收并获得生产授权 |
 
@@ -61,7 +61,9 @@ WP08 与 WP09 已完成：同一 PDF Pipeline 已通过真实 SQLite、NAS、TCP
 
 WP10已完成：QoderCLI与CodexCLI按固定版本执行，usage分别记录Qoder credits与Codex实际token，且没有第三Provider、fallback或通用Provider框架。真实账号和WebSearch smoke仍需单独授权，不属于本地完成门。
 
-下一步开放WP11、WP12和WP13并行开发。三者必须沿用现有Pipeline、Runner、Artifact和AI契约，各自独占PDF、媒体或知识库投影边界，不在实现层增加共享影子模型。
+WP11已完成：本地上传、直接PDF URL与arXiv共用同一Pipeline；扫描PDF在解析和AI前拒绝；digital PDF可形成Figure/Table区域、智能笔记、canonical evidence、FTS和current发布成果；整条重跑、翻译重跑与指定AI Runner重跑均生成新Job并维持current/previous边界。
+
+下一步继续WP12和WP13。WP12当前只有三秒本地视频离线黄金基线，不代表视频产品链完成。WP13当前只有current evidence、FTS和Artifact读取投影；MCP及Domain、Collection、Profile、Glossary、Concept管理面仍待实现。两者必须沿用现有Pipeline、Runner、Artifact和AI契约，不在实现层增加共享影子模型。
 
 ## 工作包
 

@@ -49,7 +49,10 @@ jobs:
         env:
           BASE: ${{ steps.diff-base.outputs.base }}
         run: |
-          if git show "$BASE:ROADMAP.md" | grep -Eq '^\| WP10 AI Runner \| 开放 \|' && \
+          if git show "$BASE:ROADMAP.md" | grep -Eq '^\| WP11 PDF \| 开放 \|' && \
+             grep -Eq '^\| WP11 PDF \| 完成 \|' ROADMAP.md; then
+            FLORI_DIFF_MAX_LINES=13500 FLORI_DIFF_MAX_FILES=125 cargo xtask diff-budget "$BASE"
+          elif git show "$BASE:ROADMAP.md" | grep -Eq '^\| WP10 AI Runner \| 开放 \|' && \
              grep -Eq '^\| WP10 AI Runner \| 完成 \|' ROADMAP.md; then
             FLORI_DIFF_MAX_LINES=8000 FLORI_DIFF_MAX_FILES=70 cargo xtask diff-budget "$BASE"
           elif git show "$BASE:ROADMAP.md" | grep -Eq '^\| WP08 Job 调度 \| 开放 \|' && \
