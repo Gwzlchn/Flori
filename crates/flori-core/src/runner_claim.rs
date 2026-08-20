@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 use crate::{
     ArtifactDeclaration, ArtifactId, ArtifactKind, AttemptId, CredentialKind, DomainId, Executor,
-    JobId, RunnerTool, Sha256Digest, SourceId, SourceKind, TaskId,
+    JobId, RunnerTool, Sha256Digest, SourceId, SourceInputId, SourceKind, TaskId,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -20,6 +20,10 @@ pub struct AiModelCapability {
     pub efforts: Vec<String>,
 }
 
+pub type RunnerTags = Vec<String>;
+pub type RunnerTools = Vec<RunnerToolCapability>;
+pub type AiModels = Vec<AiModelCapability>;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedArtifact {
@@ -34,11 +38,22 @@ pub struct ResolvedArtifact {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ResolvedSourceInput {
+    pub source_input_id: SourceInputId,
+    pub name: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub sha256: Sha256Digest,
+    pub download_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResolvedSource {
     pub source_id: SourceId,
     pub kind: SourceKind,
     pub canonical_ref: String,
-    pub input: Option<ResolvedArtifact>,
+    pub input: Option<ResolvedSourceInput>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

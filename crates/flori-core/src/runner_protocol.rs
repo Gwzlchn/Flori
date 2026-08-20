@@ -2,23 +2,39 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    AiModelCapability, AiTool, AiUsageId, AiUsageState, ArtifactManifestEntry, AttemptId,
-    AttemptState, ErrorCode, RequestId, RunnerId, RunnerToolCapability, Sha256Digest, UploadId,
-    UsageOrigin,
+    AiModels, AiTool, AiUsageId, AiUsageState, ArtifactManifestEntry, AttemptId, AttemptState,
+    ErrorCode, RequestId, RunnerId, RunnerTags, RunnerTools, Sha256Digest, UploadId, UsageOrigin,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegisterRunnerRequest {
-    pub tools: Vec<RunnerToolCapability>,
-    pub ai_models: Vec<AiModelCapability>,
+    pub tools: RunnerTools,
+    pub ai_models: AiModels,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegisterRunnerResponse {
     pub runner_id: RunnerId,
     pub token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRunnerSlot {
+    pub name: String,
+    pub tags: RunnerTags,
+    pub max_concurrency: u16,
+    pub default_model: Option<String>,
+    pub default_effort: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRunnerSlotResponse {
+    pub runner_id: RunnerId,
+    pub registration_token: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -39,6 +55,13 @@ pub struct LogFrame {
 #[serde(deny_unknown_fields)]
 pub struct LogCursor {
     pub last_sequence: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TaskLogEvent {
+    pub exec_id: AttemptId,
+    pub frame: LogFrame,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

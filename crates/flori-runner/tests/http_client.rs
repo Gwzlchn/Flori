@@ -104,7 +104,7 @@ async fn register_and_poll_use_protocol_and_bearer_headers() {
     )
     .await
     .expect("register");
-    assert_eq!(registered, response);
+    assert!(registered == response);
     let wire = request.join().expect("mock request");
     let lower = wire.to_ascii_lowercase();
     assert!(wire.starts_with("POST /runner/v1/register HTTP/1.1\r\n"));
