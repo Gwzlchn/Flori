@@ -4,9 +4,11 @@ mod support;
 use std::{fs, net::TcpListener, thread, time::Duration};
 
 use flori_core::{
-    AiAudit, AiUsageId, AiUsageState, ArtifactKind, ArtifactManifestEntry, ArtifactWhen,
-    AttemptAck, AttemptId, AttemptState, Executor, ResolvedTaskInputs, StartUploadRequest,
-    StartUploadResponse, TaskClaim, UploadCursor, UploadId, UsageAck, VerifyUploadResponse,
+    AiAudit, AiUsageId, AiUsageState, ArtifactId, ArtifactKind, ArtifactManifestEntry,
+    ArtifactWhen, AttemptAck, AttemptId, AttemptState, DocumentPage, DocumentSection,
+    DocumentStructure, DocumentStructureSchema, DocumentTextBlock, Executor, PdfRect,
+    ResolvedTaskInputs, StartUploadRequest, StartUploadResponse, TaskClaim, UploadCursor, UploadId,
+    UsageAck, VerifyUploadResponse,
 };
 use flori_runner::{DaemonConfig, RunnerClient, run_ai_daemon};
 use tokio::sync::watch;
@@ -22,7 +24,34 @@ async fn replayed_usage_never_spawns_and_daemon_continues_after_failure() {
         "fake-qoder",
         &format!("touch '{}'\n", marker.display()),
     );
-    let document = br#"{"schema":"document"}"#.to_vec();
+    let document_id = ArtifactId::generate();
+    let document = serde_json::to_vec(&DocumentStructure {
+        schema: DocumentStructureSchema::V1,
+        source_artifact_id: document_id,
+        language: "en".into(),
+        pages: vec![DocumentPage {
+            page: 1,
+            width_pt: 100.0,
+            height_pt: 100.0,
+        }],
+        sections: vec![DocumentSection {
+            id: "section-1".into(),
+            heading: "Source".into(),
+            blocks: vec![DocumentTextBlock {
+                page: 1,
+                bbox: PdfRect {
+                    x1: 0.0,
+                    y1: 0.0,
+                    x2: 100.0,
+                    y2: 20.0,
+                },
+                text: "source fact".into(),
+            }],
+        }],
+        figures: vec![],
+        tables: vec![],
+    })
+    .expect("document");
     let exec_id = AttemptId::generate();
     let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
     let base_url = format!("http://{}", listener.local_addr().expect("address"));
@@ -30,7 +59,7 @@ async fn replayed_usage_never_spawns_and_daemon_continues_after_failure() {
         exec_id,
         Executor::AiDocumentNote,
         ResolvedTaskInputs::AiDocumentNote {
-            document: artifact(&base_url, &document),
+            document: artifact_with_id(&base_url, &document, document_id),
             prompt: prompt("write a note"),
             profile: None,
         },
@@ -58,7 +87,7 @@ async fn replayed_usage_never_spawns_and_daemon_continues_after_failure() {
         Err(flori_core::ErrorCode::NetworkTemporary)
     );
     let audit = server.join().expect("server");
-    assert_eq!(audit.usage_invocation_keys, ["primary"]);
+    assert!(audit.usage_invocation_keys.is_empty());
     assert!(audit.redacted_arguments.is_empty());
     assert!(!marker.exists(), "idempotent replay must not spawn CLI");
     fs::remove_dir_all(root).expect("cleanup");

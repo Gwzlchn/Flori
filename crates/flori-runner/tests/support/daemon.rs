@@ -52,7 +52,14 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 pub(crate) fn artifact(base_url: &str, bytes: &[u8]) -> ResolvedArtifact {
-    let artifact_id = ArtifactId::generate();
+    artifact_with_id(base_url, bytes, ArtifactId::generate())
+}
+
+pub(crate) fn artifact_with_id(
+    base_url: &str,
+    bytes: &[u8],
+    artifact_id: ArtifactId,
+) -> ResolvedArtifact {
     ResolvedArtifact {
         artifact_id,
         name: "structure".into(),

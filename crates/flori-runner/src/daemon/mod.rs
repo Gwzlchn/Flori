@@ -1,4 +1,5 @@
 mod input;
+mod invocation_flow;
 mod invoke;
 mod log;
 mod output;
@@ -8,12 +9,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use flori_core::{AiTool, ErrorCode, Executor, TaskClaim, UsageUpdate};
+use flori_core::{AiTool, ErrorCode, Executor, TaskClaim};
 use tokio::{fs, sync::watch};
 
 use crate::RunnerClient;
-
-const INVOCATION_KEY: &str = "primary";
 
 pub struct DaemonConfig {
     pub tool: AiTool,
@@ -151,107 +150,11 @@ async fn execute_inner(
         Ok(prepared) => prepared,
         Err(error) => {
             let outcome = invoke::not_invoked(error)?;
-            output::failure(
-                client,
-                claim,
-                config.tool,
-                INVOCATION_KEY,
-                false,
-                &outcome,
-                error,
-            )
-            .await?;
+            output::failure(client, claim, config.tool, &[], &outcome, error).await?;
             return Ok(());
         }
     };
-    let model = claim.model.as_deref().ok_or(ErrorCode::CorruptState)?;
-    let effort = claim.effort.as_deref().ok_or(ErrorCode::CorruptState)?;
-    let started = UsageUpdate::Started {
-        invocation_key: INVOCATION_KEY.to_owned(),
-        tool: config.tool,
-        model: model.to_owned(),
-        effort: effort.to_owned(),
-    };
-    let ack = client
-        .update_usage(claim.exec_id, &started)
-        .await
-        .map_err(|error| error.code())?;
-    if !ack.applied {
-        let outcome = invoke::not_invoked(ErrorCode::UsageConflict)?;
-        output::failure(
-            client,
-            claim,
-            config.tool,
-            INVOCATION_KEY,
-            true,
-            &outcome,
-            ErrorCode::UsageConflict,
-        )
-        .await?;
-        return Ok(());
-    }
-    let outcome = match invoke::run(
-        config,
-        claim,
-        INVOCATION_KEY,
-        prepared.prompt,
-        &prepared.workspace,
-        cancel,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => invoke::not_invoked(error)?,
-    };
-    if let Some(usage) = &outcome.usage
-        && let Err(error) = client.update_usage(claim.exec_id, usage).await
-    {
-        let code = error.code();
-        output::failure(
-            client,
-            claim,
-            config.tool,
-            INVOCATION_KEY,
-            true,
-            &outcome,
-            code,
-        )
-        .await?;
-        return Ok(());
-    }
-    match outcome.result {
-        Ok(_) => {
-            match output::success(client, claim, config.tool, INVOCATION_KEY, &outcome).await {
-                Ok(()) => Ok(()),
-                Err(error) => {
-                    output::failure(
-                        client,
-                        claim,
-                        config.tool,
-                        INVOCATION_KEY,
-                        true,
-                        &outcome,
-                        error,
-                    )
-                    .await?;
-                    Ok(())
-                }
-            }
-        }
-        Err(error) => {
-            output::failure(
-                client,
-                claim,
-                config.tool,
-                INVOCATION_KEY,
-                true,
-                &outcome,
-                error,
-            )
-            .await?;
-            Ok(())
-        }
-    }
+    invocation_flow::run(client, config, claim, prepared, cancel).await
 }
 
 fn validate(config: &DaemonConfig) -> Result<(), ErrorCode> {

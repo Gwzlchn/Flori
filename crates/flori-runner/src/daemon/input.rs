@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use flori_core::{
-    ErrorCode, Executor, ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedTaskInputs,
-    Sha256Digest,
+    DocumentStructure, ErrorCode, Executor, ResolvedArtifact, ResolvedProfile, ResolvedPrompt,
+    ResolvedTaskInputs, Sha256Digest,
 };
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -12,6 +12,7 @@ use crate::RunnerClient;
 pub(super) struct PreparedInput {
     pub prompt: String,
     pub workspace: PathBuf,
+    pub document: Option<DocumentStructure>,
 }
 
 pub(super) async fn prepare(
@@ -29,7 +30,7 @@ pub(super) async fn prepare(
         .await
         .map_err(|_| ErrorCode::StorageUnavailable)?;
 
-    let prompt = match (executor, inputs) {
+    let (prompt, document) = match (executor, inputs) {
         (
             Executor::AiDocumentTranslate,
             ResolvedTaskInputs::AiDocumentTranslate {
@@ -37,8 +38,22 @@ pub(super) async fn prepare(
                 prompt,
                 profile,
             },
-        )
-        | (
+        ) => {
+            let document_text =
+                download_text(client, document, &input_dir.join("document.json")).await?;
+            (
+                compose(
+                    executor,
+                    prompt_snapshot_sha256,
+                    prompt,
+                    profile.as_ref(),
+                    document,
+                    &document_text,
+                )?,
+                None,
+            )
+        }
+        (
             Executor::AiDocumentNote,
             ResolvedTaskInputs::AiDocumentNote {
                 document,
@@ -48,21 +63,33 @@ pub(super) async fn prepare(
         ) => {
             let document_text =
                 download_text(client, document, &input_dir.join("document.json")).await?;
-            compose(
-                executor,
-                prompt_snapshot_sha256,
-                prompt,
-                profile.as_ref(),
-                document,
-                &document_text,
-            )?
+            let structure = serde_json::from_str::<DocumentStructure>(&document_text)
+                .map_err(|_| ErrorCode::EvidenceInvalid)?;
+            structure
+                .validate()
+                .map_err(|_| ErrorCode::EvidenceInvalid)?;
+            (
+                compose(
+                    executor,
+                    prompt_snapshot_sha256,
+                    prompt,
+                    profile.as_ref(),
+                    document,
+                    &document_text,
+                )?,
+                Some(structure),
+            )
         }
         (Executor::AiVideoNote, ResolvedTaskInputs::AiVideoNote { .. }) => {
             return Err(ErrorCode::ExecutorFailed);
         }
         _ => return Err(ErrorCode::CorruptState),
     };
-    Ok(PreparedInput { prompt, workspace })
+    Ok(PreparedInput {
+        prompt,
+        workspace,
+        document,
+    })
 }
 
 async fn download_text(

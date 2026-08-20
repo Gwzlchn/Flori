@@ -20,12 +20,12 @@ pub(super) async fn success(
     client: &RunnerClient,
     claim: &TaskClaim,
     tool: AiTool,
-    invocation_key: &str,
+    invocation_keys: &[String],
     outcome: &InvocationOutcome,
 ) -> Result<(), ErrorCode> {
     let result = outcome.result.as_ref().map_err(|code| *code)?;
     let mut outputs = business_outputs(claim, result)?;
-    outputs.push(audit_output(claim, tool, invocation_key, true, outcome)?);
+    outputs.push(audit_output(claim, tool, invocation_keys, outcome)?);
     let entries = upload_all(client, claim, outputs).await?;
     let manifest = manifest_sha256(claim.job_id, claim.task_id, claim.exec_id, entries)
         .map_err(|error| error.code())?;
@@ -40,12 +40,11 @@ pub(super) async fn failure(
     client: &RunnerClient,
     claim: &TaskClaim,
     tool: AiTool,
-    invocation_key: &str,
-    usage_started: bool,
+    invocation_keys: &[String],
     outcome: &InvocationOutcome,
     error_code: ErrorCode,
 ) -> Result<(), ErrorCode> {
-    let audit = audit_output(claim, tool, invocation_key, usage_started, outcome)?;
+    let audit = audit_output(claim, tool, invocation_keys, outcome)?;
     let manifest = match upload_all(client, claim, vec![audit]).await {
         Ok(entries) => Some(
             manifest_sha256(claim.job_id, claim.task_id, claim.exec_id, entries)
@@ -126,8 +125,7 @@ fn business_outputs(
 fn audit_output(
     claim: &TaskClaim,
     tool: AiTool,
-    invocation_key: &str,
-    usage_started: bool,
+    invocation_keys: &[String],
     outcome: &InvocationOutcome,
 ) -> Result<Output, ErrorCode> {
     let declaration = unique(claim, ArtifactKind::AiAudit)?;
@@ -140,11 +138,7 @@ fn audit_output(
         redacted_arguments: outcome.redacted_arguments.clone(),
         websearch_enabled: claim.executor != flori_core::Executor::AiDocumentTranslate,
         websearch_urls: outcome.websearch_urls.clone(),
-        usage_invocation_keys: if usage_started {
-            vec![invocation_key.to_owned()]
-        } else {
-            Vec::new()
-        },
+        usage_invocation_keys: invocation_keys.to_vec(),
         exit_code: outcome.exit_code,
         timed_out: outcome.timed_out,
         output_sha256: outcome.output_sha256.clone(),
