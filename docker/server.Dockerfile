@@ -2,7 +2,9 @@
 
 FROM rust:1.95-bookworm AS build
 WORKDIR /src
+ENV SQLX_OFFLINE=true
 COPY Cargo.toml Cargo.lock ./
+COPY .sqlx ./.sqlx
 COPY crates ./crates
 COPY xtask ./xtask
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
