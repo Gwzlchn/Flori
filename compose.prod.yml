@@ -7,6 +7,8 @@ services:
       target: edge
     ports:
       - "${FLORI_EDGE_PORT:-8080}:80"
+    environment:
+      FLORI_API_UPSTREAM: ${FLORI_API_UPSTREAM:-server:8000}
     restart: unless-stopped
 
   server:
@@ -14,10 +16,17 @@ services:
     build:
       context: .
       dockerfile: docker/server.Dockerfile
-    environment:
-      FLORI_DATA_ROOT: /data
+    command:
+      - serve
+      - 0.0.0.0:8000
+      - /data/flori.sqlite
+      - /data/artifacts
+      - ${FLORI_SERVER_URL:-}
+      - ${FLORI_MAX_ARTIFACT_BYTES:-134217728}
+      - ${FLORI_LEASE_MS:-60000}
     volumes:
       - ${FLORI_DATA_DIR:-./data}:/data
+    restart: unless-stopped
 
   runner-media:
     image: ${FLORI_RUNNER_MEDIA_IMAGE:-flori-runner-media:local}

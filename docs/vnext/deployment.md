@@ -15,7 +15,7 @@ WP04 只提供三个 Compose 入口：
 | `compose.test.yml` | Rust、前端和基础契约检查 |
 | `compose.prod.yml` | 五个冻结镜像的部署拓扑骨架 |
 
-WP04 的 prod 入口只校验镜像和拓扑，不代表业务服务已可部署。Server、Runner、SQLite、网络隧道和健康检查分别在后续业务 WP 闭环。
+`compose.prod.yml` 现在可启动 Edge、Home Core 和按 profile 选择的三个 Runner，但仍不是生产发布方案。公网隧道、Runner 注册令牌、健康检查和生产切换继续留在 WP15-WP16。
 
 WP09 后 Server 控制面可用显式命令启动：
 
@@ -23,7 +23,7 @@ WP09 后 Server 控制面可用显式命令启动：
 flori-server serve <listen> <sqlite> <artifact-root> <artifact-download-base> <max-artifact-bytes> <lease-ms>
 ```
 
-进程先严格打开当前SQLite schema和NAS根，再按upload ledger完成恢复；只有恢复成功才绑定 `listen`。参数缺失、旧schema、损坏ledger、非法下载base或NAS错误都会直接退出。Compose prod仍是拓扑骨架，WP15前不把这条命令描述为生产部署方案；真实AI/PDF/媒体执行器分别由WP10-WP12交付。
+进程先严格打开当前SQLite schema和NAS根，再按upload ledger完成恢复；只有恢复成功才绑定 `listen`。参数缺失、旧schema、损坏ledger、非法下载base或NAS错误都会直接退出。Compose把该命令固定到`/data/flori.sqlite`和`/data/artifacts`，并要求`FLORI_SERVER_URL`与Runner实际访问的无尾斜杠HTTPS地址一致。Edge只负责静态页面和`/api`反向代理；WP15前不把这套配置描述为生产部署方案。
 
 ## 镜像
 
