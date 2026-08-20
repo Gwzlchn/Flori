@@ -15,5 +15,8 @@ serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+flori-runner = { path = "../flori-runner", version = "=0.0.0" }
+
 [lints]
 workspace = true

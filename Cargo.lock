@@ -435,6 +435,7 @@ dependencies = [
  "axum",
  "flori-core",
  "flori-pipeline",
+ "flori-runner",
  "flori-store",
  "serde",
  "serde_json",
