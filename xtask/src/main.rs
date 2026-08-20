@@ -239,7 +239,10 @@ fn diff_budget(root: &Path, base: &str) -> Result<(), String> {
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().into());
     }
-    let (added, deleted, files) = parse_numstat(&String::from_utf8_lossy(&output.stdout));
+    let (mut added, deleted, mut files) = parse_numstat(&String::from_utf8_lossy(&output.stdout));
+    let (untracked_lines, untracked_files) = untracked_numstat(root)?;
+    added = added.saturating_add(untracked_lines);
+    files = files.saturating_add(untracked_files);
     let lines = added.saturating_sub(deleted);
     let max_lines = env_limit("FLORI_DIFF_MAX_LINES", 300)?;
     let max_files = env_limit("FLORI_DIFF_MAX_FILES", 10)?;
@@ -247,6 +250,34 @@ fn diff_budget(root: &Path, base: &str) -> Result<(), String> {
     (lines <= max_lines && files <= max_files)
         .then_some(())
         .ok_or_else(|| "handwritten diff exceeds the approved budget".into())
+}
+
+fn untracked_numstat(root: &Path) -> Result<(usize, usize), String> {
+    let output = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+        .current_dir(root)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .try_fold((0usize, 0usize), |(lines, files), raw| {
+            let relative = std::str::from_utf8(raw).map_err(|_| "non-UTF-8 path")?;
+            if excluded(relative) {
+                return Ok((lines, files));
+            }
+            let bytes = fs::read(root.join(relative)).map_err(|error| error.to_string())?;
+            if bytes.contains(&0) {
+                return Ok((lines, files));
+            }
+            let count = bytes.iter().filter(|byte| **byte == b'\n').count()
+                + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));
+            Ok((lines.saturating_add(count), files + 1))
+        })
 }
 
 fn repository_files(root: &Path, paths: &[&str]) -> Result<Vec<String>, String> {

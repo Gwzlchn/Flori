@@ -88,6 +88,25 @@ fn numstat_excludes_generated_lock_and_binary_files() {
 }
 
 #[test]
+fn numstat_counts_untracked_handwritten_files() {
+    let base = env::temp_dir().join(format!("flori-xtask-untracked-{}", std::process::id()));
+    fs::create_dir_all(base.join("src")).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&base)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(base.join("src/new.rs"), "one\ntwo").unwrap();
+    fs::write(base.join("Cargo.lock"), "ignored\n").unwrap();
+    fs::write(base.join("fixture.bin"), [0, 1, 2]).unwrap();
+    assert_eq!(untracked_numstat(&base).unwrap(), (2, 1));
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
 fn janitor_rejects_symlink_outside_repository() {
     let base = env::temp_dir().join(format!("flori-xtask-{}", std::process::id()));
     let root = base.join("repo");
