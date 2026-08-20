@@ -289,6 +289,8 @@ Runner 只能通过出站 HTTPS 访问 ECS 公网入口，和 Home Core/NAS 不�
 3. Server 校验 slot 中的 name、tags、并发和默认 model/effort，返回 `runner_id` 与长期 bearer token各一次，清除注册 token并启用 Runner。
 4. 每次重新注册或管理端整体更新配置，`config_revision` 加一。
 
+注册 token 使用 `Authorization: Bearer <registration-token>`，不进入 JSON body。注册 body 只有严格的 `tools` 与 `ai_models`；成功响应只返回 `runner_id` 和长期 `token`。工具项固定为 `{tool,version}`，model项固定为 `{model,efforts[]}`；version、model和effort均使用下文同一受限标识符并在Server端去重、排序。
+
 `tools` 只允许带版本的 `pdf_extractor`、`yt_dlp`、`yutto`、`ffmpeg`、`ffprobe`、`whisper_cpp`、`faster_whisper`、`qoder_cli`、`codex_cli`。`ai_models` 是严格的 `{model, efforts[]}` 列表；model 与 effort 是外部 CLI 报告的受限标识符，匹配 `[A-Za-z0-9._-]{1,64}`，Server只允许选择已上报的精确组合。
 
 websearch 不在注册能力中。AI executor实际要求 websearch 时，Runner 在调用前探测 CLI；不可用则本 Attempt 明确失败，不伪造无搜索结果。
@@ -339,6 +341,16 @@ secret_inputs
 | `POST /runner/v1/uploads/{upload_id}/verify` | 校验 size/SHA，标记 verified |
 | `POST /runner/v1/attempts/{exec_id}/complete` | 提交 manifest 摘要；原子完成 Task并推进 DAG |
 | `POST /runner/v1/attempts/{exec_id}/fail` | 提交封闭错误码和已验证的 `when=always` 输出 |
+
+HTTP wire 细节固定如下：
+
+- `poll` 和 `renew` 没有 request body；没有Task时 `poll` 返回 `204`。
+- `logs` 使用 `application/x-ndjson`，每行一个严格 `LogFrame`；响应 `{last_sequence}`。
+- `uploads` 返回 `upload_id`、当前 `received_bytes` 和Server生成的完整 manifest entry。Runner不能修改该entry。
+- `PUT /uploads/{upload_id}` body是原始字节，必须带十进制 `Upload-Offset` 和小写十六进制 `X-Flori-Chunk-SHA256`；响应当前cursor。
+- `verify` body重复提交声明的 `{size_bytes,sha256}`，响应同一个Server manifest entry。
+- Runner把全部已验证entry按name排序构造 `flori.artifact.v1` manifest并提交其规范JSON SHA-256；Server从ledger独立构造同一manifest并比较摘要。
+- `fail` 只提交封闭 `error_code` 和可选manifest摘要，不接收Runner自定义message；所有非2xx响应使用统一 `ErrorResponse`。
 
 相同请求的幂等边界：
 

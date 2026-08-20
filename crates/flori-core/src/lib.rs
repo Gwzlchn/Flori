@@ -7,12 +7,14 @@ mod enums;
 mod ids;
 mod openapi;
 mod runner_claim;
+mod runner_protocol;
 
 pub use artifact::*;
 pub use enums::*;
 pub use ids::*;
 pub use openapi::openapi_json;
 pub use runner_claim::*;
+pub use runner_protocol::*;
 
 pub const CONTRACT_REVISION: &str = "flori.v1";
 pub const PIPELINE_COMPILER_VERSION: u8 = 1;
