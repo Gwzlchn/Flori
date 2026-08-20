@@ -8,7 +8,7 @@ use axum::{
 };
 use flori_core::{
     CreateJobRequest, CreateRemoteSource, CreatedJob, CreatedSource, ErrorCode, JobId, JobView,
-    RerunJobRequest, Sha256Digest, SourceId, SourceKind, SourceView,
+    PdfSetupView, RerunJobRequest, Sha256Digest, SourceId, SourceKind, SourceView,
 };
 use flori_store::CreateSource;
 use sha2::{Digest, Sha256};
@@ -21,11 +21,21 @@ use crate::{
 
 pub(super) fn routes() -> Router<HttpState> {
     Router::new()
+        .route("/api/v1/pdf/setup", get(pdf_setup))
         .route("/api/v1/sources", post(create_source))
         .route("/api/v1/sources/{source_id}", get(get_source))
         .route("/api/v1/sources/{source_id}/jobs", post(create_job))
         .route("/api/v1/jobs/{job_id}", get(get_job))
         .route("/api/v1/jobs/{job_id}/rerun", post(rerun_job))
+}
+
+async fn pdf_setup(State(state): State<HttpState>) -> Result<Json<PdfSetupView>, HttpError> {
+    state
+        .store
+        .pdf_setup()
+        .await?
+        .map(Json)
+        .ok_or_else(|| HttpError::new(ErrorCode::NotFound))
 }
 
 async fn get_source(

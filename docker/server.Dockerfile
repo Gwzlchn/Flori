@@ -6,6 +6,8 @@ ENV SQLX_OFFLINE=true
 COPY Cargo.toml Cargo.lock ./
 COPY .sqlx ./.sqlx
 COPY crates ./crates
+COPY pipelines ./pipelines
+COPY prompts ./prompts
 COPY xtask ./xtask
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \

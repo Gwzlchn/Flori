@@ -65,6 +65,15 @@ async fn serve(
     let store = Arc::new(Store::open(sqlite).await?);
     let artifacts = Arc::new(NasArtifactStore::new(artifact_root, max_artifact_bytes)?);
     store.reconcile_uploads(&artifacts, now_ms()?).await?;
+    store
+        .bootstrap_pdf(
+            include_str!("../../../pipelines/pdf.yml"),
+            include_str!("../../../prompts/document_note.md"),
+            include_str!("../../../prompts/document_translate.md"),
+            "embedded-rust-vnext",
+            now_ms()?,
+        )
+        .await?;
     let app = flori_server::app(store, artifacts, artifact_download_base, lease_ms)
         .map_err(|code| io::Error::new(io::ErrorKind::InvalidInput, format!("{code:?}")))?;
     let listener = TcpListener::bind(listen).await?;
