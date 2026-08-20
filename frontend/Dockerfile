@@ -20,3 +20,4 @@ RUN npm run build
 
 FROM caddy:2.10-alpine AS edge
 COPY --from=build /app/dist /usr/share/caddy
+COPY Caddyfile /etc/caddy/Caddyfile

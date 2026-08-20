@@ -3,4 +3,9 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [vue()],
+  server: {
+    proxy: {
+      "/api": "http://host.docker.internal:8000",
+    },
+  },
 });

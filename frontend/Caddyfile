@@ -1,0 +1,11 @@
+:80 {
+  handle /api/* {
+    reverse_proxy {$FLORI_API_UPSTREAM:server:8000}
+  }
+
+  handle {
+    root * /usr/share/caddy
+    try_files {path} /index.html
+    file_server
+  }
+}
