@@ -23,8 +23,7 @@ services:
     image: ${FLORI_RUNNER_MEDIA_IMAGE:-flori-runner-media:local}
     build:
       context: .
-      dockerfile: docker/runner.Dockerfile
-      target: runner-media
+      dockerfile: docker/runner-media.Dockerfile
     environment:
       FLORI_SERVER_URL: ${FLORI_SERVER_URL:-}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_MEDIA:-}
@@ -37,15 +36,17 @@ services:
     image: ${FLORI_RUNNER_QODER_IMAGE:-flori-runner-ai-qoder:local}
     build:
       context: .
-      dockerfile: docker/runner.Dockerfile
-      target: runner-ai-qoder
+      dockerfile: docker/runner-ai-qoder.Dockerfile
+      args:
+        HTTP_PROXY: ${FLORI_QODER_BUILD_PROXY:-}
+        HTTPS_PROXY: ${FLORI_QODER_BUILD_PROXY:-}
     environment:
       FLORI_SERVER_URL: ${FLORI_SERVER_URL:-}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_QODER:-}
       FLORI_RUNNER_MODEL: ${FLORI_RUNNER_QODER_MODEL:-}
       FLORI_RUNNER_EFFORT: ${FLORI_RUNNER_QODER_EFFORT:-}
       FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
-      FLORI_AI_PROXY_URL: ${FLORI_AI_PROXY_URL:-}
+      FLORI_QODER_PROXY_URL: ${FLORI_QODER_PROXY_URL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -63,14 +64,19 @@ services:
     image: ${FLORI_RUNNER_CODEX_IMAGE:-flori-runner-ai-codex:local}
     build:
       context: .
-      dockerfile: docker/runner.Dockerfile
-      target: runner-ai-codex
+      dockerfile: docker/runner-ai-codex.Dockerfile
+      args:
+        HTTP_PROXY: ${FLORI_CODEX_BUILD_PROXY:-}
+        HTTPS_PROXY: ${FLORI_CODEX_BUILD_PROXY:-}
     environment:
       FLORI_SERVER_URL: ${FLORI_SERVER_URL:-}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_CODEX:-}
       FLORI_RUNNER_MODEL: ${FLORI_RUNNER_CODEX_MODEL:-}
       FLORI_RUNNER_EFFORT: ${FLORI_RUNNER_CODEX_EFFORT:-}
       FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
+      FLORI_CODEX_PROXY_URL: ${FLORI_CODEX_PROXY_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - type: bind
         source: ${FLORI_CODEX_AUTH_FILE:-./runner-auth/codex/auth.json}

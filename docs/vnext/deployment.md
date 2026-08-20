@@ -45,13 +45,15 @@ QoderCLI 和 CodexCLI 使用人工锁定版本。vNext首版固定为 QoderCLI `
 4. 用真实 Runner 凭据做一次 websearch 探测。
 5. 发布不可变镜像 digest；失败继续使用上一个 digest。
 
-本地 Docker build 可显式传 PC 代理；GitHub build 不读取、不要求本地代理。BuildKit 缓存按 CLI 版本和依赖层复用，不在每次构建解析 latest。
+media、Qoder 和 Codex Runner 使用三个独立二进制与 Dockerfile，分别裁剪未使用的 media/Qoder/Codex 代码。任一 Runner 的工具层或代理变化不共用另一个 Runner 的构建图，镜像名仍固定为上面的五个。
+
+本地 Qoder 和 Codex build 分别只读取 `FLORI_QODER_BUILD_PROXY` 与 `FLORI_CODEX_BUILD_PROXY`，不设共享 fallback；media build 不读取这两个变量。GitHub build 不读取、不要求本地代理。BuildKit 缓存按镜像、CLI版本和依赖层复用，不在每次构建解析 latest。CI并行构建五个镜像，并在缓存填充后对每个 warm rebuild 执行120秒硬门；冷构建时间必须单独报告，不能冒充两分钟验收。
 
 两个AI镜像必须在构建时以最终非root用户执行无费用版本和帮助探针。Qoder镜像核对精确版本与`--tools`，Codex镜像核对精确版本、`--search`、`exec --json`和`--output-schema`；任一不符直接构建失败。探针不登录、不调用模型。
 
 AI Runner 容器启动后先严格读取Server URL、token、model、effort、spool和登录态目录。缺失或非法配置在poll和CLI前非零退出。Compose不为这些值提供可运行默认值；未激活AI profile时也不因变量插值阻断Server等其它服务。
 
-Qoder Runner 还必须显式提供裸 `http://host[:port]` 形式的 `FLORI_AI_PROXY_URL`。该值只注入单次 Qoder 子进程，不进入 Codex、Job、日志或 Artifact。容器内必须使用自身可达的代理地址；SSH tunnel、私网路由和代理服务由部署环境负责，Flori 不创建或守护网络隧道。
+Qoder 与 Codex Runner 分别必须显式提供裸 `http://host[:port]` 形式的 `FLORI_QODER_PROXY_URL` 和 `FLORI_CODEX_PROXY_URL`。每个值只注入对应的单次 CLI 子进程，不进入另一 Provider、Job、日志或 Artifact；任一缺失或非法都在poll前失败，不读取宿主代理，也不跨Provider fallback。容器内必须使用自身可达的代理地址；SSH tunnel、私网路由和代理服务由部署环境负责，Flori 不创建或守护网络隧道。
 
 ## 普通升级
 
