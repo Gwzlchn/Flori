@@ -1,6 +1,9 @@
 use super::*;
 use std::collections::BTreeSet;
 
+mod validate;
+use validate::validate_core_input;
+
 pub(super) fn validate_references(
     tasks: &BTreeMap<String, CompiledTask>,
 ) -> Result<(), CompileError> {
@@ -24,6 +27,12 @@ fn validate_reference(
     field: &str,
     reference: &Reference,
 ) -> Result<(), CompileError> {
+    if task.executor == Executor::CoreValidate
+        && matches!(field, "source" | "notes")
+        && !matches!(reference, Reference::Need(_))
+    {
+        return Err(invalid());
+    }
     let (producer_key, artifact_name) = match reference {
         Reference::Source
             if field == "source"
@@ -38,7 +47,12 @@ fn validate_reference(
         }
         Reference::DomainProfile if field == "profile" && is_ai(task.executor) => return Ok(()),
         Reference::Prompt(_) if field == "prompt" && is_ai(task.executor) => return Ok(()),
-        Reference::Need(producer) if field == "notes" => (producer, None),
+        Reference::Need(producer)
+            if field == "notes"
+                || (task.executor == Executor::CoreValidate && field == "source") =>
+        {
+            (producer, None)
+        }
         Reference::NeedArtifact {
             task: producer,
             artifact,
@@ -49,6 +63,9 @@ fn validate_reference(
         return Err(invalid());
     }
     let producer = tasks.get(producer_key).ok_or_else(invalid)?;
+    if task.executor == Executor::CoreValidate {
+        validate_core_input(field, producer)?;
+    }
     if !producer.rules.is_empty() && producer.rules != task.rules {
         return Err(invalid());
     }
@@ -58,7 +75,7 @@ fn validate_reference(
             .iter()
             .find(|artifact| artifact.name == *name)
             .ok_or_else(invalid)?;
-        if !input_kind_allowed(task.executor, field, output.kind) {
+        if !input_kind_allowed(field, output.kind) {
             return Err(invalid());
         }
     }

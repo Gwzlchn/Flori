@@ -154,13 +154,13 @@ fn rejects_missing_executor_inputs() {
             1,
         ),
         PDF.replacen(
-            "    source: $needs.extract.structure\n    notes: $needs.note",
+            "    source: $needs.extract\n    notes: $needs.note",
             "    notes: $needs.note",
             1,
         ),
         PDF.replacen(
-            "    source: $needs.extract.structure\n    notes: $needs.note",
-            "    source: $needs.extract.structure",
+            "    source: $needs.extract\n    notes: $needs.note",
+            "    source: $needs.extract",
             1,
         ),
         PDF.replacen(
@@ -193,6 +193,18 @@ fn rejects_wrong_input_shapes_and_duplicate_keys() {
             1,
         ),
         PDF.replacen("notes: $needs.note", "notes: $needs.note.smart_note", 1),
+        PDF.replacen("source: $needs.extract", "source: $needs.acquire", 1),
+        PDF.replacen("notes: $needs.note", "notes: $needs.extract", 1),
+        PDF.replacen(
+            "name: structure, kind: document_structure, path: output/document.json, required: true",
+            "name: structure, kind: document_structure, path: output/document.json, required: false",
+            1,
+        ),
+        PDF.replacen(
+            "    - { name: terms, kind: terms, path: output/terms.json, required: true, when: on_success, max_bytes: 10485760 }\n",
+            "",
+            1,
+        ),
         PDF.replacen(
             "    pdf: $needs.acquire.original",
             "    pdf: $needs.acquire.original\n    pdf: $needs.acquire.original",

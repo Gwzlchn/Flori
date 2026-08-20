@@ -26,22 +26,20 @@ pub(super) fn input_reference<'a>(
             Executor::DocumentAcquire | Executor::VideoAcquire | Executor::VideoSubscription,
             "source",
             Reference::Source
-        ) | (
-            Executor::CoreValidate,
-            "source",
-            Reference::NeedArtifact { .. }
-        ) | (
-            _,
-            "pdf"
-                | "video"
-                | "document"
-                | "subtitle"
-                | "transcript"
-                | "frames"
-                | "mechanical_note"
-                | "validated",
-            Reference::NeedArtifact { .. }
-        ) | (_, "notes", Reference::Need(_))
+        ) | (Executor::CoreValidate, "source", Reference::Need(_))
+            | (
+                _,
+                "pdf"
+                    | "video"
+                    | "document"
+                    | "subtitle"
+                    | "transcript"
+                    | "frames"
+                    | "mechanical_note"
+                    | "validated",
+                Reference::NeedArtifact { .. }
+            )
+            | (_, "notes", Reference::Need(_))
             | (_, "prompt", Reference::Prompt(_))
             | (_, "profile", Reference::DomainProfile)
     )

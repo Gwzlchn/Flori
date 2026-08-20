@@ -170,7 +170,9 @@ impl TaskInputBindings {
                     && matches!(prompt, Prompt(_))
                     && profile(domain)
             }
-            Self::CoreValidate { source, notes } => artifact(source) && matches!(notes, Need(_)),
+            Self::CoreValidate { source, notes } => {
+                matches!(source, Need(_)) && matches!(notes, Need(_))
+            }
             Self::CorePublish { validated } => artifact(validated),
         }
     }

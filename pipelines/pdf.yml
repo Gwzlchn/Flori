@@ -56,7 +56,7 @@ note:
 validate:
   executor: core.validate
   with:
-    source: $needs.extract.structure
+    source: $needs.extract
     notes: $needs.note
   needs: [extract, note]
   timeout: 2m

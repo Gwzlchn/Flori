@@ -237,7 +237,7 @@ fn is_ai(executor: Executor) -> bool {
     )
 }
 
-fn input_kind_allowed(executor: Executor, field: &str, kind: ArtifactKind) -> bool {
+fn input_kind_allowed(field: &str, kind: ArtifactKind) -> bool {
     match field {
         "pdf" | "video" => kind == ArtifactKind::SourceOriginal,
         "document" => kind == ArtifactKind::DocumentStructure,
@@ -246,12 +246,6 @@ fn input_kind_allowed(executor: Executor, field: &str, kind: ArtifactKind) -> bo
         "frames" => kind == ArtifactKind::Keyframe,
         "mechanical_note" => kind == ArtifactKind::MechanicalNote,
         "validated" => kind == ArtifactKind::Evidence,
-        "source" if executor == Executor::CoreValidate => {
-            matches!(
-                kind,
-                ArtifactKind::DocumentStructure | ArtifactKind::Transcript
-            )
-        }
         _ => true,
     }
 }
