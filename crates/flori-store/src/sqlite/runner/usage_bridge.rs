@@ -108,6 +108,7 @@ impl Store {
             } else {
                 AiUsageState::Started
             },
+            applied: record.applied,
         })
     }
 }

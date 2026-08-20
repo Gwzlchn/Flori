@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS 'id!',state AS 'state!',origin,created_at_ms AS 'created_at_ms!',\n                    input_tokens,output_tokens,cost_micros,credits_micros\n             FROM ai_usage WHERE attempt_id=? AND invocation_key=?",
+  "query": "SELECT id AS 'id!',state AS 'state!',tool AS 'tool!',origin,\n                    created_at_ms AS 'created_at_ms!',\n                    input_tokens,output_tokens,cost_micros,credits_micros\n             FROM ai_usage WHERE attempt_id=? AND invocation_key=?",
   "describe": {
     "columns": [
       {
@@ -26,8 +26,19 @@
         }
       },
       {
-        "name": "origin",
+        "name": "tool!",
         "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ai_usage",
+            "name": "tool"
+          }
+        }
+      },
+      {
+        "name": "origin",
+        "ordinal": 3,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -38,7 +49,7 @@
       },
       {
         "name": "created_at_ms!",
-        "ordinal": 3,
+        "ordinal": 4,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -49,7 +60,7 @@
       },
       {
         "name": "input_tokens",
-        "ordinal": 4,
+        "ordinal": 5,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -60,7 +71,7 @@
       },
       {
         "name": "output_tokens",
-        "ordinal": 5,
+        "ordinal": 6,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -71,7 +82,7 @@
       },
       {
         "name": "cost_micros",
-        "ordinal": 6,
+        "ordinal": 7,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -82,7 +93,7 @@
       },
       {
         "name": "credits_micros",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -98,6 +109,7 @@
     "nullable": [
       true,
       false,
+      false,
       true,
       false,
       true,
@@ -106,5 +118,5 @@
       true
     ]
   },
-  "hash": "d071e3b0fd0367e9cd965a48ef4460302c4d5edf8d2fc98aa5db62b6d2dc7278"
+  "hash": "ce416528782adb45ebaaa34e448b0588615ae6afa683e8bc7285af1b1504718d"
 }

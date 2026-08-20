@@ -36,6 +36,7 @@ impl Store {
                 return Ok(UsageRecord {
                     id: parse_usage_id(&row.id)?,
                     is_final: false,
+                    applied: false,
                 });
             }
             return Err(StoreError::new(ErrorCode::UsageConflict));
@@ -73,6 +74,7 @@ impl Store {
         Ok(UsageRecord {
             id: usage.id,
             is_final: false,
+            applied: true,
         })
     }
 
@@ -99,7 +101,8 @@ impl Store {
         let origin = usage_origin(usage.origin);
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query!(
-            r#"SELECT id AS 'id!',state AS 'state!',origin,created_at_ms AS 'created_at_ms!',
+            r#"SELECT id AS 'id!',state AS 'state!',tool AS 'tool!',origin,
+                    created_at_ms AS 'created_at_ms!',
                     input_tokens,output_tokens,cost_micros,credits_micros
              FROM ai_usage WHERE attempt_id=? AND invocation_key=?"#,
             attempt_id,
@@ -111,6 +114,14 @@ impl Store {
             transaction.rollback().await?;
             return Err(StoreError::new(ErrorCode::UsageConflict));
         };
+        valid_metrics(
+            &row.tool,
+            usage.origin,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cost_micros,
+            usage.credits_micros,
+        )?;
         if row.state == "final" {
             let matches = row.origin.as_deref() == Some(origin)
                 && row.input_tokens == usage.input_tokens
@@ -122,6 +133,7 @@ impl Store {
                 return Ok(UsageRecord {
                     id: parse_usage_id(&row.id)?,
                     is_final: true,
+                    applied: false,
                 });
             }
             return Err(StoreError::new(ErrorCode::UsageConflict));
@@ -158,6 +170,7 @@ impl Store {
         Ok(UsageRecord {
             id: parse_usage_id(&row.id)?,
             is_final: true,
+            applied: true,
         })
     }
 }
@@ -179,4 +192,33 @@ const fn usage_origin(origin: UsageOrigin) -> &'static str {
 
 fn parse_usage_id(value: &str) -> Result<AiUsageId, StoreError> {
     AiUsageId::from_str(value).map_err(|_| StoreError::new(ErrorCode::CorruptState))
+}
+
+fn valid_metrics(
+    tool: &str,
+    origin: UsageOrigin,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cost_micros: Option<i64>,
+    credits_micros: Option<i64>,
+) -> Result<(), StoreError> {
+    let observed = origin == UsageOrigin::Observed;
+    let valid = match tool {
+        "qoder_cli" => {
+            input_tokens.is_none()
+                && output_tokens.is_none()
+                && cost_micros.is_none()
+                && (!observed || credits_micros.is_some())
+        }
+        "codex_cli" => {
+            credits_micros.is_none()
+                && (!observed || input_tokens.is_some() && output_tokens.is_some())
+        }
+        _ => return Err(StoreError::new(ErrorCode::CorruptState)),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::new(ErrorCode::UsageConflict))
+    }
 }

@@ -96,6 +96,7 @@ pub struct FinalAiUsage<'a> {
 pub struct UsageRecord {
     pub id: AiUsageId,
     pub is_final: bool,
+    pub applied: bool,
 }
 
 pub struct Store {

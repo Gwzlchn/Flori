@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use flori_core::{
-    AttemptId, CompiledTaskSpec, ErrorCode, Executor, JobId, RunnerId, SourceKind, TaskClaim,
-    TaskId, TaskInputBindings,
+    AttemptId, CompiledTaskSpec, ErrorCode, Executor, JobId, RunnerId, Sha256Digest, SourceKind,
+    TaskClaim, TaskId, TaskInputBindings,
 };
 use sqlx::Row;
 
@@ -53,7 +53,8 @@ impl Store {
              t.attempt_limit,t.timeout_ms,t.pinned_runner_id,t.selected_model,t.selected_effort, \
              t.runner_config_revision, \
              (SELECT count(*) FROM attempts a WHERE a.task_id=t.id) AS attempt_count, \
-             s.id AS source_id,s.kind AS source_kind FROM tasks t JOIN jobs j ON j.id=t.job_id \
+             s.id AS source_id,s.kind AS source_kind,j.prompt_snapshot_sha256 \
+             FROM tasks t JOIN jobs j ON j.id=t.job_id \
              JOIN sources s ON s.id=j.source_id \
              WHERE t.state='ready' AND j.state IN ('queued','running') \
              AND (t.ready_at_ms IS NULL OR t.ready_at_ms<=?) \
@@ -140,6 +141,10 @@ impl Store {
                 executor: task_executor,
                 timeout_ms: spec.timeout_ms,
                 lease_expires_at_ms,
+                prompt_snapshot_sha256: Sha256Digest::parse(
+                    row.try_get::<String, _>("prompt_snapshot_sha256")?,
+                )
+                .map_err(|_| corrupt())?,
                 resolved_inputs: resolved,
                 output_declarations: spec.artifacts,
                 model: selection.model,

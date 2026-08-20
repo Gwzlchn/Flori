@@ -1794,7 +1794,9 @@ async fn usage_bridge_is_idempotent_and_only_existing_usage_can_finish_late() {
         .apply_usage_update(foundation.runner_id, exec_id, &started, 12)
         .await
         .expect("repeat usage");
-    assert_eq!(first, repeated);
+    assert!(first.applied);
+    assert!(!repeated.applied);
+    assert_eq!(first.usage_id, repeated.usage_id);
     assert_eq!(first.state, AiUsageState::Started);
     sqlx::query("UPDATE attempts SET state='failed',finished_at_ms=13 WHERE id=?")
         .bind(exec_id.to_string())
@@ -1811,11 +1813,28 @@ async fn usage_bridge_is_idempotent_and_only_existing_usage_can_finish_late() {
         .execute(&foundation.pool)
         .await
         .expect("fail job");
-    let final_update = UsageUpdate::Final {
+    let wrong_metrics = UsageUpdate::Final {
         invocation_key: "note-1".into(),
         origin: UsageOrigin::Observed,
         input_tokens: Some(10),
         output_tokens: Some(20),
+        cost_micros: None,
+        credits_micros: Some(30),
+    };
+    assert_eq!(
+        foundation
+            .store
+            .apply_usage_update(foundation.runner_id, exec_id, &wrong_metrics, 14)
+            .await
+            .expect_err("Qoder must not report token metrics")
+            .code(),
+        ErrorCode::UsageConflict
+    );
+    let final_update = UsageUpdate::Final {
+        invocation_key: "note-1".into(),
+        origin: UsageOrigin::Observed,
+        input_tokens: None,
+        output_tokens: None,
         cost_micros: None,
         credits_micros: Some(30),
     };
@@ -1825,6 +1844,13 @@ async fn usage_bridge_is_idempotent_and_only_existing_usage_can_finish_late() {
         .await
         .expect("existing usage final may arrive late");
     assert_eq!(finalized.state, AiUsageState::Final);
+    assert!(finalized.applied);
+    let replayed = foundation
+        .store
+        .apply_usage_update(foundation.runner_id, exec_id, &final_update, 15)
+        .await
+        .expect("same final usage is idempotent");
+    assert!(!replayed.applied);
     assert_eq!(
         foundation
             .store
@@ -1837,7 +1863,7 @@ async fn usage_bridge_is_idempotent_and_only_existing_usage_can_finish_late() {
                     model: "gpt-5.6".into(),
                     effort: "high".into(),
                 },
-                15,
+                16,
             )
             .await
             .expect_err("new usage cannot start late")
@@ -1847,7 +1873,7 @@ async fn usage_bridge_is_idempotent_and_only_existing_usage_can_finish_late() {
     assert_eq!(
         foundation
             .store
-            .apply_usage_update(RunnerId::generate(), exec_id, &final_update, 16)
+            .apply_usage_update(RunnerId::generate(), exec_id, &final_update, 17)
             .await
             .expect_err("wrong runner cannot finalize")
             .code(),

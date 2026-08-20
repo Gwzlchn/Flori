@@ -330,6 +330,7 @@ async fn usage_is_idempotent_conflict_safe_and_survives_restart() {
         .await
         .expect("write started usage");
     assert_eq!(started.id, usage_id);
+    assert!(started.applied);
     let duplicate = store
         .start_ai_usage(
             StartAiUsage {
@@ -341,6 +342,7 @@ async fn usage_is_idempotent_conflict_safe_and_survives_restart() {
         .await
         .expect("same start returns original row");
     assert_eq!(duplicate.id, usage_id);
+    assert!(!duplicate.applied);
 
     sqlx::query("UPDATE attempts SET state='expired',finished_at_ms=201 WHERE id=?")
         .bind(attempt_id.to_string())
@@ -400,6 +402,7 @@ async fn usage_is_idempotent_conflict_safe_and_survives_restart() {
         .await
         .expect("same final metrics are idempotent after restart");
     assert_eq!(duplicate_final.id, usage_id);
+    assert!(!duplicate_final.applied);
     let conflict = reopened
         .finalize_ai_usage(FinalAiUsage {
             cost_micros: Some(31),

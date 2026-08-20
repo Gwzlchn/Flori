@@ -250,6 +250,7 @@ async fn lease_usage_and_terminal_commands_use_core_dtos() {
         body: serde_json::to_string(&UsageAck {
             usage_id,
             state: AiUsageState::Started,
+            applied: true,
         })
         .expect("usage JSON"),
     });
