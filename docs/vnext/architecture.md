@@ -64,7 +64,7 @@ SSE、Prometheus、Dozzle、隧道统计和 Runner 本地文件都不是业务�
 
 ## 核心边界
 
-- `Source` 是一个稳定内容来源或订阅 lineage。
+- `Source` 是一个稳定内容或频道来源；订阅开关、fanout 和成员关系属于 `Collection`。
 - `Job` 是一次 Pipeline 执行；初次投递和每次重跑都有新 ID。
 - `Task` 是 Job DAG 中的一个节点。
 - `Attempt` 是一次 Task 执行，Attempt ID 同时作为 `exec_id` 和 lease fence。
