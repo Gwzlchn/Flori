@@ -7,25 +7,25 @@ use crate::{
     AiTool, AiUsageId, AiUsageState, ArtifactDeclaration, ArtifactId, ArtifactKind,
     ArtifactManifest, ArtifactManifestEntry, ArtifactManifestSchema, ArtifactOrigin,
     ArtifactRetention, ArtifactView, ArtifactWhen, AttemptAck, AttemptId, AttemptState,
-    CollectionId, CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId, CreateJobRequest,
-    CreateRemoteSource, CreateRunnerSlot, CreateRunnerSlotResponse, CreateUploadSource, CreatedJob,
-    CreatedSource, CredentialId, CredentialKind, DocumentFigure, DocumentPage, DocumentSection,
-    DocumentStructure, DocumentStructureSchema, DocumentTable, DocumentTextBlock, DomainId,
-    ErrorBody, ErrorCode, ErrorResponse, EvidenceEntry, EvidenceId, EvidenceLocator,
-    EvidenceLocatorKind, EvidenceManifest, EvidenceManifestSchema, EvidenceView, Executor,
-    FailAttemptRequest, GlossaryTermId, GlossaryTermState, JobEventKind, JobEventScope, JobId,
-    JobInputs, JobState, JobTrigger, LogCursor, LogFrame, PartsManifest, PartsManifestSchema,
-    PdfRect, PendingSourceCommit, PipelineId, PipelineRevisionId, PromptSnapshotId, QrSessionId,
-    RegisterRunnerRequest, RegisterRunnerResponse, RenewLeaseResponse, RequestId, RerunJobRequest,
-    RerunMode, ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource,
-    ResolvedSourceInput, ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool,
-    RunnerToolCapability, SearchChunkId, SearchHit, SecretCredential, SecretInputs, Sha256Digest,
-    SourceId, SourceInputId, SourceKind, StartUploadRequest, StartUploadResponse, SubscriptionItem,
-    SubscriptionManifest, SubscriptionManifestSchema, SystemHealthStatus, TaskClaim, TaskId,
-    TaskLogEvent, TaskLogLevel, TaskLogLine, TaskState, TermEntry, TermsManifest,
-    TermsManifestSchema, TranscriptCue, TranscriptManifest, TranscriptSchema, UploadCursor,
-    UploadId, UploadOwnerKind, UploadState, UsageAck, UsageOrigin, UsageUpdate,
-    VerifyUploadRequest, VerifyUploadResponse, VideoKeyframe, VideoPart,
+    AttemptView, CollectionId, CollectionKind, CompleteAttemptRequest, ConceptOccurrenceId,
+    CreateJobRequest, CreateRemoteSource, CreateRunnerSlot, CreateRunnerSlotResponse,
+    CreateUploadSource, CreatedJob, CreatedSource, CredentialId, CredentialKind, DocumentFigure,
+    DocumentPage, DocumentSection, DocumentStructure, DocumentStructureSchema, DocumentTable,
+    DocumentTextBlock, DomainId, ErrorBody, ErrorCode, ErrorResponse, EvidenceEntry, EvidenceId,
+    EvidenceLocator, EvidenceLocatorKind, EvidenceManifest, EvidenceManifestSchema, EvidenceView,
+    Executor, FailAttemptRequest, GlossaryTermId, GlossaryTermState, JobEventKind, JobEventScope,
+    JobId, JobInputs, JobState, JobTrigger, JobView, LogCursor, LogFrame, PartsManifest,
+    PartsManifestSchema, PdfRect, PendingSourceCommit, PipelineId, PipelineRevisionId,
+    PromptSnapshotId, QrSessionId, RegisterRunnerRequest, RegisterRunnerResponse,
+    RenewLeaseResponse, RequestId, RerunJobRequest, RerunMode, ResolvedArtifact, ResolvedProfile,
+    ResolvedPrompt, ResolvedSource, ResolvedSourceInput, ResolvedTaskInputs, RunnerId, RunnerState,
+    RunnerTool, RunnerToolCapability, SearchChunkId, SearchHit, SecretCredential, SecretInputs,
+    Sha256Digest, SourceId, SourceInputId, SourceKind, SourceView, StartUploadRequest,
+    StartUploadResponse, SubscriptionItem, SubscriptionManifest, SubscriptionManifestSchema,
+    SystemHealthStatus, TaskClaim, TaskId, TaskLogEvent, TaskLogLevel, TaskLogLine, TaskState,
+    TaskView, TermEntry, TermsManifest, TermsManifestSchema, TranscriptCue, TranscriptManifest,
+    TranscriptSchema, UploadCursor, UploadId, UploadOwnerKind, UploadState, UsageAck, UsageOrigin,
+    UsageUpdate, VerifyUploadRequest, VerifyUploadResponse, VideoKeyframe, VideoPart,
 };
 
 #[derive(OpenApi)]
@@ -153,6 +153,10 @@ use crate::{
     CreatedJob,
     CreateUploadSource,
     PendingSourceCommit,
+    SourceView,
+    JobView,
+    TaskView,
+    AttemptView,
     ArtifactView,
     SearchHit,
     EvidenceView,
@@ -208,6 +212,10 @@ mod tests {
         assert!(schemas.contains_key("ArtifactManifestSchema"));
         assert!(schemas.contains_key("ArtifactManifest"));
         assert!(schemas.contains_key("ArtifactManifestEntry"));
+        assert!(schemas.contains_key("SourceView"));
+        assert!(schemas.contains_key("JobView"));
+        assert!(schemas.contains_key("TaskView"));
+        assert!(schemas.contains_key("AttemptView"));
         assert!(schemas.contains_key("EvidenceLocator"));
         assert!(schemas.contains_key("Sha256Digest"));
         assert!(schemas.contains_key("TaskClaim"));
