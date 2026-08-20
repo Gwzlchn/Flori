@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use flori_core::{ErrorCode, RegisterRunnerRequest, RunnerId, Sha256Digest};
+use flori_core::{CreateRunnerSlot, ErrorCode, RegisterRunnerRequest, RunnerId, Sha256Digest};
 use sqlx::Row;
 
 use super::{
@@ -9,33 +9,31 @@ use super::{
 };
 
 impl Store {
-    #[allow(clippy::too_many_arguments)]
     pub async fn create_runner_slot(
         &self,
-        name: &str,
-        tags: &[String],
-        max_concurrency: u16,
-        default_model: Option<&str>,
-        default_effort: Option<&str>,
+        slot: &CreateRunnerSlot,
         registration_token_digest: &Sha256Digest,
         registration_expires_at_ms: i64,
         now_ms: i64,
     ) -> Result<RunnerId, StoreError> {
-        if !identifier(name)
-            || max_concurrency == 0
+        if !identifier(&slot.name)
+            || slot.max_concurrency == 0
             || now_ms < 0
             || registration_expires_at_ms <= now_ms
-            || !valid_default(default_model, default_effort)
+            || !valid_default(
+                slot.default_model.as_deref(),
+                slot.default_effort.as_deref(),
+            )
         {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
         }
-        let tags_json = tags_json(tags)?;
+        let tags_json = tags_json(&slot.tags)?;
         let runner_id = RunnerId::generate();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let duplicate: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM runners WHERE name=? OR registration_token_digest=?",
         )
-        .bind(name)
+        .bind(&slot.name)
         .bind(registration_token_digest.as_str())
         .fetch_one(&mut *transaction)
         .await?;
@@ -50,13 +48,13 @@ impl Store {
              VALUES(?,?,'disabled',?,?,0,?,?,'[]','[]',?,?,?,?)",
         )
         .bind(runner_id.to_string())
-        .bind(name)
+        .bind(&slot.name)
         .bind(registration_token_digest.as_str())
         .bind(registration_expires_at_ms)
-        .bind(i64::from(max_concurrency))
+        .bind(i64::from(slot.max_concurrency))
         .bind(tags_json)
-        .bind(default_model)
-        .bind(default_effort)
+        .bind(&slot.default_model)
+        .bind(&slot.default_effort)
         .bind(now_ms)
         .bind(now_ms)
         .execute(&mut *transaction)
@@ -98,14 +96,21 @@ impl Store {
         }
         let default_model: Option<String> = row.try_get("default_model")?;
         let default_effort: Option<String> = row.try_get("default_effort")?;
-        if let (Some(model), Some(effort)) = (&default_model, &default_effort)
-            && !normalized
-                .ai_models
-                .iter()
-                .any(|entry| entry.model == *model && entry.efforts.contains(effort))
-        {
-            transaction.rollback().await?;
-            return Err(StoreError::new(ErrorCode::CapabilityMismatch));
+        match (&default_model, &default_effort) {
+            (None, None) => {}
+            (Some(model), Some(effort))
+                if normalized
+                    .ai_models
+                    .iter()
+                    .any(|entry| entry.model == *model && entry.efforts.contains(effort)) => {}
+            (Some(_), Some(_)) => {
+                transaction.rollback().await?;
+                return Err(StoreError::new(ErrorCode::CapabilityMismatch));
+            }
+            _ => {
+                transaction.rollback().await?;
+                return Err(StoreError::new(ErrorCode::CorruptState));
+            }
         }
         let runner_id: String = row.try_get("id")?;
         let updated = sqlx::query(

@@ -95,6 +95,12 @@ pub(super) fn valid_compilation(compilation: &Compilation) -> bool {
     {
         return false;
     }
+    let Ok(canonical_json) = serde_json::to_string(&compilation.pipeline) else {
+        return false;
+    };
+    if canonical_json != compilation.canonical_json {
+        return false;
+    }
     let mut digest = String::with_capacity(64);
     for byte in Sha256::digest(compilation.canonical_json.as_bytes()) {
         write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");

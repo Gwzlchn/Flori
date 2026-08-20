@@ -1,8 +1,8 @@
 use std::{fmt::Write, fs, path::PathBuf};
 
 use flori_core::{
-    AiModelCapability, ErrorCode, JobId, RegisterRunnerRequest, RunnerTool, RunnerToolCapability,
-    Sha256Digest,
+    AiModelCapability, CreateRunnerSlot, ErrorCode, JobId, RegisterRunnerRequest, RunnerTool,
+    RunnerToolCapability, Sha256Digest,
 };
 use flori_store::Store;
 use sha2::{Digest, Sha256};
@@ -66,6 +66,21 @@ fn capabilities() -> RegisterRunnerRequest {
     }
 }
 
+fn slot(
+    name: &str,
+    tags: &[&str],
+    max_concurrency: u16,
+    default: Option<(&str, &str)>,
+) -> CreateRunnerSlot {
+    CreateRunnerSlot {
+        name: name.into(),
+        tags: tags.iter().map(|value| (*value).into()).collect(),
+        max_concurrency,
+        default_model: default.map(|value| value.0.into()),
+        default_effort: default.map(|value| value.1.into()),
+    }
+}
+
 #[tokio::test]
 async fn registration_is_single_use_expiring_and_authenticates_only_the_long_digest() {
     let database = TestDatabase::new();
@@ -74,11 +89,7 @@ async fn registration_is_single_use_expiring_and_authenticates_only_the_long_dig
     let expired_digest = digest("expired-registration");
     let expired = store
         .create_runner_slot(
-            "expired-runner",
-            &["media".into()],
-            1,
-            None,
-            None,
+            &slot("expired-runner", &["media"], 1, None),
             &expired_digest,
             10,
             1,
@@ -103,11 +114,7 @@ async fn registration_is_single_use_expiring_and_authenticates_only_the_long_dig
     let long_digest = digest("long-token");
     let runner_id = store
         .create_runner_slot(
-            "runner-one",
-            &["media".into(), "ai".into()],
-            2,
-            Some("gpt-5.6"),
-            Some("high"),
+            &slot("runner-one", &["media", "ai"], 2, Some(("gpt-5.6", "high"))),
             &registration_digest,
             100,
             1,
@@ -205,11 +212,7 @@ async fn registration_rejects_default_capability_and_duplicate_inventory_drift()
     let registration_digest = digest("capability-registration");
     store
         .create_runner_slot(
-            "runner-two",
-            &["ai".into()],
-            1,
-            Some("missing-model"),
-            Some("high"),
+            &slot("runner-two", &["ai"], 1, Some(("missing-model", "high"))),
             &registration_digest,
             100,
             1,
