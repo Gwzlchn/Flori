@@ -51,6 +51,8 @@ QoderCLI 和 CodexCLI 使用人工锁定版本。vNext首版固定为 QoderCLI `
 
 AI Runner 容器启动后先严格读取Server URL、token、model、effort、spool和登录态目录。缺失或非法配置在poll和CLI前非零退出。Compose不为这些值提供可运行默认值；未激活AI profile时也不因变量插值阻断Server等其它服务。
 
+Qoder Runner 还必须显式提供裸 `http://host[:port]` 形式的 `FLORI_AI_PROXY_URL`。该值只注入单次 Qoder 子进程，不进入 Codex、Job、日志或 Artifact。容器内必须使用自身可达的代理地址；SSH tunnel、私网路由和代理服务由部署环境负责，Flori 不创建或守护网络隧道。
+
 ## 普通升级
 
 - 代码或镜像变化但 schema 未变：停止相关容器并启动新镜像，不备份 SQLite。

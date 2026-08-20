@@ -25,7 +25,9 @@
 
 ## 当前阶段
 
-WP01-WP10 已完成。SQLite、NAS Artifact、Pipeline 编译器、Job 调度、出站 Runner 控制面和QoderCLI/CodexCLI AI Runner已有真实 SQLite、NAS、HTTP与fake CLI验收。真实账号smoke仍需单独授权；当前仍无PDF或媒体executor，也不是生产候选。下一步可并行推进WP11 PDF、WP12视频和WP13知识库。
+WP01-WP11 已完成。PDF 上传、直接 URL 和 arXiv 使用同一 Pipeline；digital PDF 可经 media Runner 生成结构、Figure、Table 区域和严格 evidence，再由 QoderCLI 或 CodexCLI 生成并发布 current 成果。扫描 PDF 在 extractor 和 AI 前拒绝。真实 Qoder 验收已在单独授权下完成；它不构成生产部署授权。
+
+WP12-A 只完成本地三秒视频的离线黄金基线，包括锁版 FFmpeg 探测、字幕规范化、关键帧和机械笔记；尚无视频 Pipeline 或 product daemon。WP13-A 已完成 current-only evidence、FTS 和 Artifact 读取投影；MCP 与其余知识库管理面仍待后续切片。当前仍不是生产候选。
 
 | 工作包 | 目标 | 产品代码 |
 |---|---|---|
@@ -37,7 +39,11 @@ WP01-WP10 已完成。SQLite、NAS Artifact、Pipeline 编译器、Job 调度、
 | WP08 | Job 创建、重跑、DAG 推进和发布轮换 | 已完成 |
 | WP09 | Runner 注册、lease、日志、usage、Artifact 和终态协议 | 已完成 |
 | WP10 | QoderCLI/CodexCLI AI Runner | 完成 |
-| WP11-WP13 | PDF、视频和知识库 | 已开放，可并行 |
+| WP11 | PDF 三入口、解析、AI 笔记、evidence、发布和读取 | 已完成 |
+| WP12-A | 本地视频离线黄金样本与共享类型验证 | 已完成；不等于完整 WP12 |
+| WP12 | 视频 Pipeline、平台下载、转写和发布 | 待后续切片 |
+| WP13-A | current evidence、FTS 和 Artifact 读取 | 已完成 |
+| WP13 | MCP 和其余知识库管理面 | 待后续切片 |
 | WP14-WP15 | UI和安全收口 | 未开放 |
 | WP16 | 生产冷切换与旧 Python 退役 | 单独授权 |
 
