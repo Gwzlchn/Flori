@@ -1,0 +1,43 @@
+{
+  "name": "flori-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "generate": "openapi-typescript .generated/openapi.json -o .generated/api.d.ts",
+    "typecheck": "vue-tsc --noEmit",
+    "lint": "eslint .",
+    "knip": "knip --no-config-hints",
+    "check": "npm run generate && npm run typecheck && npm run lint && npm run knip",
+    "build": "npm run generate && vue-tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.15.0",
+    "vue": "3.5.28"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@vitejs/plugin-vue": "6.0.4",
+    "eslint": "9.39.4",
+    "eslint-plugin-vue": "10.8.0",
+    "knip": "5.85.0",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.56.1",
+    "vite": "7.3.6",
+    "vue-eslint-parser": "10.4.0",
+    "vue-tsc": "3.2.6"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
+  },
+  "knip": {
+    "ignore": [
+      "dist/**"
+    ]
+  }
+}

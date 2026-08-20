@@ -7,11 +7,12 @@ vNext 在同一仓库的 `rust-vnext` 分支开发。`main` 在 WP16 前仍是 P
 | 工作包 | 状态 | 开放条件 |
 |---|---|---|
 | WP00 当前 main 收口 | 完成 | `bbaa06c`，CI 通过 |
-| WP01 vNext 流程与权威文档 | 进行中 | 用户已批准 |
-| WP02 黄金样本与验收基线 | 计划 | 可与 WP01 并行 |
-| WP03 契约冻结与独立终审 | 计划 | WP01、WP02 完成 |
-| WP04 Rust 工程与 CI 骨架 | 未开放 | WP03 无 P0/P1 |
-| WP05-WP15 产品实现 | 未开放 | 按下方依赖推进 |
+| WP01 vNext 流程与权威文档 | 完成 | 已进入 `rust-vnext` |
+| WP02 黄金样本与验收基线 | 完成 | 离线 fixture 已冻结 |
+| WP03 契约冻结与独立终审 | 完成 | `flori.v1`，P0/P1 为 0 |
+| WP04 Rust 工程与 CI 骨架 | 完成 | 统一命令和类型链可运行 |
+| WP05-WP07 首批产品实现 | 开放 | 按下方所有权并行 |
+| WP08-WP15 后续产品实现 | 未开放 | 按下方依赖推进 |
 | WP16 冷切换 | 未开放 | 全部验收并获得生产授权 |
 
 ## 依赖
@@ -39,6 +40,16 @@ WP02 样本 ─┘                 |
 ```
 
 WP05、WP06、WP07 可并行。WP11、WP12、WP13 在共享核心稳定后可并行。共享 schema、Artifact manifest、Pipeline schema、Runner OpenAPI、前端生成类型和 CI 各有一个 owner。
+
+## 下一并行批次
+
+| 工作包 | 独占热点 | 不得修改 |
+|---|---|---|
+| WP05 SQLite 业务与队列核心 | SQLite schema、migration、`.sqlx`、`flori-store` | Artifact manifest、Pipeline schema、Runner OpenAPI |
+| WP06 NAS Artifact 核心 | Artifact manifest、NAS 路径与 staging 实现 | SQLite schema、Pipeline schema、Runner OpenAPI |
+| WP07 Pipeline 编译器 | Pipeline YAML schema、示例与 `flori-pipeline` | SQLite schema、Artifact manifest、Runner OpenAPI |
+
+主 Agent 独占 Cargo.lock、workspace 根、CI、Compose、最终集成和 `rust-vnext`。三个子任务都不得新增 `flori.v1` 之外的表、状态、endpoint、DSL 字段、Artifact kind、crate、Provider、兼容或 fallback。
 
 ## 工作包
 

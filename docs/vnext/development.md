@@ -81,8 +81,10 @@ CI 额外拒绝：
 
 - contract 目录中的动态 Value、兼容 alias、untagged/flatten 兜底和影子 DTO。
 - 前端 cast/ignore/any 逃逸和统一 client 外直接访问 Flori API。
-- OpenAPI、`.sqlx` 或生成类型漂移。
+- OpenAPI 无法生成，或生成类型不能通过前端检查。WP05 接入 SQLx 时在同一工作包增加 `.sqlx` 离线漂移检查。
 - Knip 新死代码、cargo-deny 拒绝项和未申报架构原语。
+
+`xtask/policy.sha256` 固定依赖、核心枚举与 OpenAPI、Compose 服务、Docker target、CI 和语言逃逸规则。已批准任务必须在同一提交显式更新该清单；只改实现而未更新清单会直接失败，清单变化本身是终审热点。
 
 机械检查不能识别所有改名后的同义模型。CI 绿灯不能替代复杂度预算和 deletion pass。
 
@@ -108,7 +110,9 @@ cargo xtask diff-budget <base>
 cargo xtask janitor --dry-run|--apply
 ```
 
-在 WP04 之前，这些命令只是冻结接口，不得临时创建另一套脚本。
+`check` 依次验证 Rust 格式、Clippy、OpenAPI 导出和容器内前端检查。`test` 可省略目标运行整个 workspace，也可指定一个已声明 crate。`integration` 首版只有 `foundation`，`image` 只接受五个冻结镜像名。不得临时创建第二套脚本入口。
+
+前端生成文件只写入 `frontend/.generated`，不进入 Git。Node 检查通过 `compose.test.yml` 在容器内执行；宿主只需要锁定的 Rust 工具链和 Docker。
 
 ## 分支、worktree 与子 Agent
 

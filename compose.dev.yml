@@ -1,0 +1,26 @@
+services:
+  rust-check:
+    image: rust:1.95-bookworm
+    working_dir: /workspace
+    command: cargo check --locked --workspace
+    environment:
+      CARGO_TARGET_DIR: /workspace/target/dev
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+
+  frontend:
+    image: node:24-alpine
+    working_dir: /workspace/frontend
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/workspace/frontend
+      - frontend-node-modules:/workspace/frontend/node_modules
+      - npm-cache:/root/.npm
+
+volumes:
+  cargo-registry:
+  frontend-node-modules:
+  npm-cache:

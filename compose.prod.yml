@@ -1,0 +1,53 @@
+services:
+  edge:
+    image: ${FLORI_EDGE_IMAGE:-flori-edge:local}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: edge
+    ports:
+      - "${FLORI_EDGE_PORT:-8080}:80"
+    restart: unless-stopped
+
+  server:
+    image: ${FLORI_SERVER_IMAGE:-flori-server:local}
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    environment:
+      FLORI_DATA_ROOT: /data
+    volumes:
+      - ${FLORI_DATA_DIR:-./data}:/data
+
+  runner-media:
+    image: ${FLORI_RUNNER_MEDIA_IMAGE:-flori-runner-media:local}
+    build:
+      context: .
+      dockerfile: docker/runner.Dockerfile
+      target: runner-media
+    environment:
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-http://edge}
+      FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_MEDIA:-}
+    profiles: [media]
+
+  runner-ai-qoder:
+    image: ${FLORI_RUNNER_QODER_IMAGE:-flori-runner-ai-qoder:local}
+    build:
+      context: .
+      dockerfile: docker/runner.Dockerfile
+      target: runner-ai-qoder
+    environment:
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-http://edge}
+      FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_QODER:-}
+    profiles: [ai-qoder]
+
+  runner-ai-codex:
+    image: ${FLORI_RUNNER_CODEX_IMAGE:-flori-runner-ai-codex:local}
+    build:
+      context: .
+      dockerfile: docker/runner.Dockerfile
+      target: runner-ai-codex
+    environment:
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-http://edge}
+      FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_CODEX:-}
+    profiles: [ai-codex]

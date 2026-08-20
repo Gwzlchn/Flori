@@ -1,0 +1,33 @@
+services:
+  rust-test:
+    image: rust:1.95-bookworm
+    working_dir: /workspace
+    command: cargo test --locked --workspace
+    environment:
+      CARGO_TARGET_DIR: /workspace/target/test
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+
+  frontend-check:
+    image: node:24-alpine
+    working_dir: /workspace/frontend
+    command: sh -c "npm ci && npm run check"
+    volumes:
+      - ./frontend:/workspace/frontend
+      - frontend-node-modules:/workspace/frontend/node_modules
+      - npm-cache:/root/.npm
+
+  integration-foundation:
+    image: node:24-alpine
+    working_dir: /workspace/frontend
+    command: sh -c "npm ci && npm run check && test -s .generated/openapi.json"
+    volumes:
+      - ./frontend:/workspace/frontend
+      - frontend-node-modules:/workspace/frontend/node_modules
+      - npm-cache:/root/.npm
+
+volumes:
+  cargo-registry:
+  frontend-node-modules:
+  npm-cache:

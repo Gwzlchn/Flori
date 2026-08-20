@@ -7,13 +7,15 @@
 - 生产只以 Docker 镜像部署，不直接运行宿主二进制。
 - 每个 worktree 使用独立 Cargo target 和测试临时根；共享 registry/git 下载缓存。
 
-WP04 最终只提供三个 Compose 入口：
+WP04 只提供三个 Compose 入口：
 
-| 入口 | 用途 |
+| 文件 | 用途 |
 |---|---|
-| dev | 本地 Server、Runner 和前端开发 |
-| test | SQLite/HTTP/侧车 integration |
-| prod | ECS Edge、Home Core 和 Runner 部署 |
+| `compose.dev.yml` | 宿主 Cargo 与容器前端的开发循环 |
+| `compose.test.yml` | Rust、前端和基础契约检查 |
+| `compose.prod.yml` | 五个冻结镜像的部署拓扑骨架 |
+
+WP04 的 prod 入口只校验镜像和拓扑，不代表业务服务已可部署。Server、Runner、SQLite、网络隧道和健康检查分别在后续业务 WP 闭环。
 
 ## 镜像
 

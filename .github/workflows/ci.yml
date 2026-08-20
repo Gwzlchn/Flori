@@ -1,0 +1,97 @@
+name: vNext CI
+
+on:
+  push:
+    branches: [rust-vnext]
+  pull_request:
+    branches: [rust-vnext]
+  workflow_dispatch:
+
+concurrency:
+  group: vnext-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Resolve diff base
+        id: diff-base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE"
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            base="$BEFORE"
+          else
+            base="$(git rev-parse HEAD^)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - name: Check complexity budget
+        env:
+          BASE: ${{ steps.diff-base.outputs.base }}
+        run: |
+          if git show "$BASE:ROADMAP.md" | grep -Eq '^\| WP04 .*完成'; then
+            cargo xtask diff-budget "$BASE"
+          else
+            FLORI_DIFF_MAX_LINES=5000 FLORI_DIFF_MAX_FILES=100 cargo xtask diff-budget "$BASE"
+          fi
+      - run: cargo xtask check
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask test
+
+  integration:
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask integration foundation
+
+  image:
+    needs: [check, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          cargo xtask image server
+          cargo xtask image runner-media
+          cargo xtask image runner-ai-qoder
+          cargo xtask image runner-ai-codex
+          cargo xtask image edge

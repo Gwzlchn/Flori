@@ -1,0 +1,12 @@
+[package]
+name = "flori-server"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+flori-core.workspace = true
+
+[lints]
+workspace = true

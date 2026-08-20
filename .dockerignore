@@ -1,0 +1,15 @@
+.git
+.github
+.local
+target
+**/target
+frontend/node_modules
+frontend/dist
+frontend/.generated
+data
+artifacts
+inbox
+output
+backups
+cookies
+.env

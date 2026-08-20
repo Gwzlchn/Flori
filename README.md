@@ -6,7 +6,7 @@ Flori 是自托管的个人知识库，把 PDF、arXiv、Bilibili、YouTube 和�
 
 ## 当前阶段
 
-WP01-WP03 只建立流程、黄金样本和冻结契约。WP03 独立设计终审通过前没有 Rust 产品实现；请勿把当前分支当成可部署版本。
+WP01-WP03 已冻结流程、黄金样本和首版契约。WP04 提供 Rust/TypeScript 工程骨架、统一开发命令和 CI 硬门；WP05-WP07 才开始 SQLite、Artifact 和 Pipeline 业务实现。当前分支仍不是可部署产品。
 
 进度见 [ROADMAP.md](ROADMAP.md)，设计从 [docs/vnext/README.md](docs/vnext/README.md) 开始。
 
