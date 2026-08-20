@@ -17,6 +17,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 flori-runner = { path = "../flori-runner", version = "=0.0.0" }
+sqlx.workspace = true
 
 [lints]
 workspace = true
