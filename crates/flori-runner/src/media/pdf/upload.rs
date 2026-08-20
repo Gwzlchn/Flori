@@ -28,7 +28,10 @@ pub(super) async fn file(
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
         return Err(ErrorCode::ArtifactInvalidPath);
     }
-    if metadata.len() > declaration.max_bytes || !declaration.kind.accepts_media_type(media_type) {
+    if !declaration.kind.accepts_media_type(media_type) {
+        return Err(ErrorCode::CorruptState);
+    }
+    if metadata.len() > declaration.max_bytes {
         return Err(ErrorCode::ArtifactTooLarge);
     }
     let sha256 = digest(path).await?;

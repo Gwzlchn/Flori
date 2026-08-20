@@ -4,8 +4,8 @@ use std::{
 };
 
 use flori_core::{
-    ArtifactKind, ArtifactManifestEntry, ErrorCode, FailAttemptRequest, ResolvedTaskInputs,
-    TaskClaim,
+    ArtifactKind, ArtifactManifestEntry, AttemptState, ErrorCode, FailAttemptRequest,
+    ResolvedTaskInputs, TaskClaim,
 };
 use tokio::{fs, sync::watch};
 
@@ -111,10 +111,12 @@ async fn execute_inner(
     if let Err(code) = claim::validate(claim) {
         return fail(client, claim, code).await;
     }
-    fs::create_dir(workspace)
-        .await
-        .map_err(|_| ErrorCode::StorageUnavailable)?;
-    log::started(client, claim).await?;
+    if fs::create_dir(workspace).await.is_err() {
+        return fail(client, claim, ErrorCode::StorageUnavailable).await;
+    }
+    if let Err(code) = log::started(client, claim).await {
+        return fail(client, claim, code).await;
+    }
     let timeout = tokio::time::sleep(Duration::from_millis(claim.timeout_ms));
     tokio::pin!(timeout);
     let work = run_task(client, config, claim, workspace);
@@ -128,10 +130,13 @@ async fn execute_inner(
         Ok(entries) => {
             let digest = manifest_sha256(claim.job_id, claim.task_id, claim.exec_id, entries)
                 .map_err(|error| error.code())?;
-            client
+            let ack = client
                 .complete(claim.exec_id, digest)
                 .await
                 .map_err(|error| error.code())?;
+            if ack.exec_id != claim.exec_id || ack.state != AttemptState::Succeeded {
+                return Err(ErrorCode::CorruptState);
+            }
             Ok(())
         }
         Err(code) => fail(client, claim, code).await,
@@ -218,7 +223,7 @@ async fn fail(
     claim: &TaskClaim,
     error_code: ErrorCode,
 ) -> Result<(), ErrorCode> {
-    client
+    let ack = client
         .fail(
             claim.exec_id,
             &FailAttemptRequest {
@@ -228,6 +233,9 @@ async fn fail(
         )
         .await
         .map_err(|error| error.code())?;
+    if ack.exec_id != claim.exec_id || ack.state != AttemptState::Failed {
+        return Err(ErrorCode::CorruptState);
+    }
     Ok(())
 }
 
