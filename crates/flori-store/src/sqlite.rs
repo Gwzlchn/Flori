@@ -14,6 +14,8 @@ mod lease;
 mod scheduler;
 mod usage;
 
+pub use scheduler::{CreateJob, CreateSource};
+
 #[derive(Debug)]
 pub struct StoreError {
     code: ErrorCode,

@@ -1,4 +1,4 @@
-use flori_core::ErrorCode;
+use flori_core::{ErrorCode, Executor, JobTrigger, SourceKind};
 
 pub(super) const fn transient(code: ErrorCode) -> bool {
     matches!(
@@ -50,5 +50,44 @@ pub(super) const fn error_code(code: ErrorCode) -> &'static str {
         ErrorCode::CorruptState => "corrupt_state",
         ErrorCode::SchemaMismatch => "schema_mismatch",
         ErrorCode::Internal => "internal",
+    }
+}
+
+pub(super) const fn executor(value: Executor) -> &'static str {
+    match value {
+        Executor::DocumentAcquire => "document.acquire",
+        Executor::DocumentExtract => "document.extract",
+        Executor::AiDocumentTranslate => "ai.document_translate",
+        Executor::AiDocumentNote => "ai.document_note",
+        Executor::VideoAcquire => "video.acquire",
+        Executor::VideoSubscription => "video.subscription",
+        Executor::VideoTranscribe => "video.transcribe",
+        Executor::VideoFrames => "video.frames",
+        Executor::VideoMechanicalNote => "video.mechanical_note",
+        Executor::AiVideoNote => "ai.video_note",
+        Executor::CoreValidate => "core.validate",
+        Executor::CorePublish => "core.publish",
+    }
+}
+
+pub(super) const fn job_trigger(value: JobTrigger) -> &'static str {
+    match value {
+        JobTrigger::Initial => "initial",
+        JobTrigger::PipelineRerun => "pipeline_rerun",
+        JobTrigger::TaskRerun => "task_rerun",
+        JobTrigger::Subscription => "subscription",
+    }
+}
+
+pub(super) const fn source_kind(value: SourceKind) -> &'static str {
+    match value {
+        SourceKind::Arxiv => "arxiv",
+        SourceKind::PdfUrl => "pdf_url",
+        SourceKind::PdfUpload => "pdf_upload",
+        SourceKind::BilibiliVideo => "bilibili_video",
+        SourceKind::BilibiliChannel => "bilibili_channel",
+        SourceKind::YoutubeVideo => "youtube_video",
+        SourceKind::YoutubeChannel => "youtube_channel",
+        SourceKind::LocalVideo => "local_video",
     }
 }

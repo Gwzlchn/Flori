@@ -5,4 +5,6 @@
 pub mod artifact;
 mod sqlite;
 
-pub use sqlite::{FinalAiUsage, Lease, StartAiUsage, Store, StoreError, UsageRecord};
+pub use sqlite::{
+    CreateJob, CreateSource, FinalAiUsage, Lease, StartAiUsage, Store, StoreError, UsageRecord,
+};

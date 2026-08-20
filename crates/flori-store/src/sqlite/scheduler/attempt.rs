@@ -197,7 +197,7 @@ impl Store {
     }
 }
 
-async fn promote_ready(
+pub(super) async fn promote_ready(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     job_id: &str,
     now_ms: i64,

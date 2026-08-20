@@ -1,10 +1,11 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    AttemptId, DomainId, ErrorCode, JobId, PipelineId, PipelineRevisionId, RunnerId, SourceId,
-    TaskId, TaskState,
+    AttemptId, DomainId, ErrorCode, JobId, JobTrigger, PipelineId, PipelineRevisionId,
+    PromptSnapshotId, RunnerId, SourceId, SourceKind, TaskId, TaskState,
 };
-use flori_store::Store;
+use flori_pipeline::compile;
+use flori_store::{CreateJob, CreateSource, Store};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 
 struct TestDatabase {
@@ -46,6 +47,7 @@ struct Foundation {
 struct JobTasks {
     job_id: JobId,
     work_id: TaskId,
+    validate_id: TaskId,
     publish_id: TaskId,
 }
 
@@ -84,6 +86,7 @@ async fn seed_foundation(pool: &SqlitePool) -> Foundation {
 async fn insert_job(pool: &SqlitePool, foundation: &Foundation, ordinal: u8) -> JobTasks {
     let job_id = JobId::generate();
     let work_id = TaskId::generate();
+    let validate_id = TaskId::generate();
     let publish_id = TaskId::generate();
     sqlx::query("INSERT INTO jobs(id,source_id,pipeline_revision_id,trigger,state,prompt_snapshot_id,prompt_snapshot_sha256,prompt_snapshot_json,request_key,request_sha256,created_at_ms) VALUES(?,?,?,'pipeline_rerun','queued',?,?,'{}',?,?,?)")
         .bind(job_id.to_string()).bind(foundation.source_id.to_string()).bind(foundation.revision_id.to_string())
@@ -93,12 +96,16 @@ async fn insert_job(pool: &SqlitePool, foundation: &Foundation, ordinal: u8) -> 
     sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms,ready_at_ms) VALUES(?,?,'work','document.acquire',?,'{}','ready',2,1000,0)")
         .bind(work_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":[]}"#)
         .execute(pool).await.expect("work task");
+    sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms) VALUES(?,?,'validate','core.validate',?,'{}','pending',1,1000)")
+        .bind(validate_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":["work"]}"#)
+        .execute(pool).await.expect("validate task");
     sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms) VALUES(?,?,'publish','core.publish',?,'{}','pending',1,1000)")
-        .bind(publish_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":["work"]}"#)
+        .bind(publish_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":["validate"]}"#)
         .execute(pool).await.expect("publish task");
     JobTasks {
         job_id,
         work_id,
+        validate_id,
         publish_id,
     }
 }
@@ -134,12 +141,24 @@ async fn execute_and_publish(
             .expect("idempotent completion"),
         TaskState::Succeeded
     );
+    assert_eq!(
+        store
+            .complete_core_task(
+                tasks.job_id,
+                tasks.validate_id,
+                AttemptId::generate(),
+                now_ms + 2,
+            )
+            .await
+            .expect("complete core validation"),
+        TaskState::Succeeded
+    );
     store
         .publish_job(
             tasks.job_id,
             tasks.publish_id,
             AttemptId::generate(),
-            now_ms + 2,
+            now_ms + 3,
         )
         .await
         .expect("publish job");
@@ -254,4 +273,175 @@ async fn concurrent_claim_has_exactly_one_winner() {
         ),
     );
     assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+}
+
+#[tokio::test]
+async fn expired_attempt_retries_once_then_fails_the_job() {
+    let database = TestDatabase::new();
+    let store = Store::open(&database.path).await.expect("store");
+    let pool = database.pool().await;
+    let foundation = seed_foundation(&pool).await;
+    let tasks = insert_job(&pool, &foundation, 1).await;
+    let first = AttemptId::generate();
+    store
+        .lease_task(tasks.work_id, first, foundation.runner_id, 10, 20)
+        .await
+        .expect("first lease");
+    assert_eq!(
+        store
+            .expire_attempt(first, ErrorCode::RunnerLost, 20)
+            .await
+            .expect("retry expired attempt"),
+        TaskState::Ready
+    );
+    let second = AttemptId::generate();
+    store
+        .lease_task(tasks.work_id, second, foundation.runner_id, 21, 30)
+        .await
+        .expect("second lease");
+    assert_eq!(
+        store
+            .expire_attempt(second, ErrorCode::AttemptTimeout, 30)
+            .await
+            .expect("attempt budget exhausted"),
+        TaskState::Failed
+    );
+    let attempt_states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM attempts WHERE task_id=? ORDER BY attempt_no")
+            .bind(tasks.work_id.to_string())
+            .fetch_all(&pool)
+            .await
+            .expect("attempt states");
+    assert_eq!(attempt_states, ["expired", "expired"]);
+}
+
+#[tokio::test]
+async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
+    let database = TestDatabase::new();
+    let store = Store::open(&database.path).await.expect("store");
+    let pool = database.pool().await;
+    let domain_id = DomainId::generate();
+    sqlx::query("INSERT INTO domains(id,slug,name,profile_text,created_at_ms,updated_at_ms) VALUES(?,?,?,'profile',0,0)")
+        .bind(domain_id.to_string()).bind("papers").bind("Papers")
+        .execute(&pool).await.expect("domain");
+    let yaml = include_bytes!("../../../pipelines/pdf.yml");
+    let compilation = compile("pdf", yaml).expect("compile frozen PDF pipeline");
+    let pipeline_id = PipelineId::generate();
+    let revision_id = PipelineRevisionId::generate();
+    let registered = store
+        .register_pipeline_revision(
+            pipeline_id,
+            revision_id,
+            &compilation,
+            "deadbeef",
+            std::str::from_utf8(yaml).expect("UTF-8"),
+            1,
+        )
+        .await
+        .expect("register pipeline");
+    assert_eq!(registered, revision_id);
+    assert_eq!(
+        store
+            .register_pipeline_revision(
+                pipeline_id,
+                PipelineRevisionId::generate(),
+                &compilation,
+                "deadbeef",
+                std::str::from_utf8(yaml).expect("UTF-8"),
+                2,
+            )
+            .await
+            .expect("same digest reuses revision"),
+        revision_id,
+    );
+
+    let source_request = CreateSource {
+        kind: SourceKind::PdfUrl,
+        canonical_ref: "https://example.test/paper.pdf",
+        title: Some("Paper"),
+        domain_id,
+        request_key: "source-request",
+        request_sha256: &"1".repeat(64),
+        created_at_ms: 3,
+    };
+    let source_id = store.create_source(source_request).await.expect("source");
+    assert_eq!(
+        store
+            .create_source(source_request)
+            .await
+            .expect("idempotent source"),
+        source_id
+    );
+    let initial = CreateJob {
+        source_id,
+        pipeline_revision_id: revision_id,
+        trigger: JobTrigger::Initial,
+        rerun_of_job_id: None,
+        prompt_snapshot_id: PromptSnapshotId::generate(),
+        prompt_snapshot_sha256: &"2".repeat(64),
+        prompt_snapshot_json: r#"{"domain":{"profile":"profile"},"prompts":[]}"#,
+        request_key: "job-initial",
+        request_sha256: &"3".repeat(64),
+        translate: false,
+        created_at_ms: 4,
+    };
+    let first_job = store
+        .create_job(initial, &compilation)
+        .await
+        .expect("initial job");
+    assert_eq!(
+        store
+            .create_job(initial, &compilation)
+            .await
+            .expect("idempotent job"),
+        first_job
+    );
+    let states: Vec<(String, String)> =
+        sqlx::query_as("SELECT task_key,state FROM tasks WHERE job_id=? ORDER BY task_key")
+            .bind(first_job.to_string())
+            .fetch_all(&pool)
+            .await
+            .expect("materialized tasks");
+    assert_eq!(states.len(), compilation.pipeline.tasks.len());
+    assert!(states.contains(&("acquire".into(), "ready".into())));
+    assert!(states.contains(&("translate".into(), "skipped".into())));
+
+    let busy = CreateJob {
+        request_key: "job-busy",
+        request_sha256: &"4".repeat(64),
+        ..initial
+    };
+    assert_eq!(
+        store
+            .create_job(busy, &compilation)
+            .await
+            .expect_err("one active job per source")
+            .code(),
+        ErrorCode::SourceBusy
+    );
+    sqlx::query("UPDATE jobs SET state='failed',finished_at_ms=5 WHERE id=?")
+        .bind(first_job.to_string())
+        .execute(&pool)
+        .await
+        .expect("finish first job");
+    sqlx::query("UPDATE tasks SET state='canceled',finished_at_ms=5 WHERE job_id=? AND state IN ('pending','ready')")
+        .bind(first_job.to_string()).execute(&pool).await.expect("finish first tasks");
+    let rerun = CreateJob {
+        trigger: JobTrigger::PipelineRerun,
+        rerun_of_job_id: Some(first_job),
+        prompt_snapshot_id: PromptSnapshotId::generate(),
+        request_key: "job-rerun",
+        request_sha256: &"5".repeat(64),
+        created_at_ms: 6,
+        ..initial
+    };
+    let rerun_job = store
+        .create_job(rerun, &compilation)
+        .await
+        .expect("pipeline rerun");
+    assert_ne!(rerun_job, first_job);
+    let shared_ids: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tasks old JOIN tasks new ON old.id=new.id WHERE old.job_id=? AND new.job_id=?",
+    ).bind(first_job.to_string()).bind(rerun_job.to_string()).fetch_one(&pool).await.expect("new task IDs");
+    assert_eq!(shared_ids, 0);
 }
