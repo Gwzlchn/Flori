@@ -6,5 +6,6 @@ pub mod artifact;
 mod sqlite;
 
 pub use sqlite::{
-    CreateJob, CreateSource, FinalAiUsage, Lease, StartAiUsage, Store, StoreError, UsageRecord,
+    CreateJob, CreateSource, FinalAiUsage, Lease, PreparedSourceUpload, StartAiUsage,
+    StartSourceUpload, Store, StoreError, UsageRecord,
 };

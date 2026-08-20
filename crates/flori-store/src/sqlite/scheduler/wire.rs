@@ -79,7 +79,7 @@ pub(super) const fn job_trigger(value: JobTrigger) -> &'static str {
     }
 }
 
-pub(super) const fn source_kind(value: SourceKind) -> &'static str {
+pub(crate) const fn source_kind(value: SourceKind) -> &'static str {
     match value {
         SourceKind::Arxiv => "arxiv",
         SourceKind::PdfUrl => "pdf_url",

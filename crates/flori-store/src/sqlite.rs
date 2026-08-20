@@ -14,9 +14,11 @@ mod lease;
 mod reconcile;
 mod runner;
 mod scheduler;
+mod source_upload;
 mod usage;
 
 pub use scheduler::{CreateJob, CreateSource};
+pub use source_upload::{PreparedSourceUpload, StartSourceUpload};
 
 #[derive(Debug)]
 pub struct StoreError {

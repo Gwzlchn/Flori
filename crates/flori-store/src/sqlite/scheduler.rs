@@ -19,3 +19,4 @@ pub use job::CreateJob;
 pub(in crate::sqlite) use rerun_artifact::source_record;
 pub(in crate::sqlite) use rerun_copy::{load_records, validate_owner};
 pub use source::CreateSource;
+pub(crate) use wire::source_kind;
