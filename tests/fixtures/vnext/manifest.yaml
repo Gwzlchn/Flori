@@ -38,9 +38,10 @@ offline:
     invariant: three ordered non-overlapping cues cover 0 through 3000 ms
   keyframe:
     path: keyframe-1000ms.jpg
-    sha256: dea5b2fcf0d6801fe58cf77f3594e547aa88aa0bf04b32f1d43d97afbc0d9f3f
+    sha256: 832349f8d3b430e9bce462807f9b3d9fe5be64f895abb8c090fb1508f56a7baa
     media_type: image/jpeg
     artifact_name: frames/0000000001000.jpg
+    generator: "ffmpeg 5.1.9 -ss 1.000 -i local-video.mp4 -frames:v 1 -f image2pipe -vcodec mjpeg pipe:1"
     invariant: evidence timestamp is 1000 ms and matches the frozen Artifact logical name
 
 expected_outputs:

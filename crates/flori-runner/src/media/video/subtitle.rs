@@ -92,11 +92,17 @@ fn parse_srt_time(value: &str) -> Result<u64, VideoMediaError> {
 
 fn display_time(timestamp_ms: u64) -> String {
     let total_seconds = timestamp_ms / 1_000;
-    format!(
-        "{:02}:{:02}:{:02}.{:03}",
-        total_seconds / 3_600,
-        total_seconds / 60 % 60,
-        total_seconds % 60,
-        timestamp_ms % 1_000
-    )
+    let hours = total_seconds / 3_600;
+    let minutes = total_seconds / 60 % 60;
+    let seconds = total_seconds % 60;
+    let millis = timestamp_ms % 1_000;
+    let mut display = if hours == 0 {
+        format!("{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    };
+    if millis != 0 {
+        display.push_str(&format!(".{millis:03}"));
+    }
+    display
 }

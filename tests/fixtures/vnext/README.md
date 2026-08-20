@@ -31,10 +31,11 @@
 ## 当前可执行的基线检查
 
 ```text
-sha256sum -c tests/fixtures/vnext/SHA256SUMS
+(cd tests/fixtures/vnext && sha256sum -c SHA256SUMS)
 pdftotext tests/fixtures/vnext/digital-paper.pdf -
 pdftotext tests/fixtures/vnext/scanned-paper.pdf -
 ffprobe tests/fixtures/vnext/local-video.mp4
+FLORI_RUNNER_MEDIA_IMAGE=flori-runner-media:local cargo test -p flori-runner --test video_image -- --nocapture
 ```
 
 第二个 `pdftotext` 去掉空白和换页符后必须为 0 字节。WP04 把这些检查收进 `cargo xtask`，此前不增加临时测试脚本。

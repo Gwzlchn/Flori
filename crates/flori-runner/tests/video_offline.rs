@@ -13,6 +13,8 @@ use video::{VideoMediaError, extract_keyframes, mechanical_note, normalize_srt, 
 
 const SUBTITLE: &str = include_str!("../../../tests/fixtures/vnext/local-video.srt");
 const TRANSCRIPT: &str = include_str!("../../../tests/fixtures/vnext/expected/transcript.json");
+const MECHANICAL_NOTE: &str =
+    include_str!("../../../tests/fixtures/vnext/expected/mechanical-note.md");
 
 #[test]
 fn normalizes_golden_subtitle_and_keeps_mechanical_note_faithful() {
@@ -27,17 +29,7 @@ fn normalizes_golden_subtitle_and_keeps_mechanical_note_faithful() {
     assert_eq!(actual, expected);
 
     let note = mechanical_note(&actual).expect("mechanical note");
-    let mut previous = 0;
-    for cue in &actual.cues {
-        let position = note[previous..]
-            .find(&cue.text)
-            .map(|offset| offset + previous)
-            .expect("every subtitle fact is present");
-        previous = position + cue.text.len();
-    }
-    assert!(note.starts_with("# 机械笔记\n"));
-    assert!(note.contains("00:00:01.000-00:00:02.000"));
-    assert!(!note.contains("AI 分析"));
+    assert_eq!(note, MECHANICAL_NOTE);
 }
 
 #[test]
