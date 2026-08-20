@@ -1,16 +1,27 @@
-use std::{fs, path::PathBuf, sync::Arc};
+use std::{fmt::Write, fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    AttemptId, DomainId, ErrorCode, JobId, JobTrigger, PipelineId, PipelineRevisionId,
-    PromptSnapshotId, RunnerId, SourceId, SourceKind, TaskId, TaskState,
+    AttemptId, CompiledTaskSpec, DomainId, ErrorCode, JobId, JobTrigger, PipelineId,
+    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
+    PromptSnapshotPrompt, RunnerId, Sha256Digest, SourceId, SourceKind, TaskId, TaskInputBindings,
+    TaskState,
 };
 use flori_pipeline::compile;
 use flori_store::{CreateJob, CreateSource, Store};
+use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 
 struct TestDatabase {
     directory: PathBuf,
     path: PathBuf,
+}
+
+fn digest(value: &str) -> Sha256Digest {
+    let mut output = String::with_capacity(64);
+    for byte in Sha256::digest(value.as_bytes()) {
+        write!(&mut output, "{byte:02x}").expect("write digest");
+    }
+    Sha256Digest::parse(output).expect("digest")
 }
 
 impl TestDatabase {
@@ -97,10 +108,10 @@ async fn insert_job(pool: &SqlitePool, foundation: &Foundation, ordinal: u8) -> 
         .bind(work_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":[]}"#)
         .execute(pool).await.expect("work task");
     sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms) VALUES(?,?,'validate','core.validate',?,'{}','pending',1,1000)")
-        .bind(validate_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":["work"]}"#)
+        .bind(validate_id.to_string()).bind(job_id.to_string()).bind(r#"{"executor":"core.validate","needs":["work"],"tags":[],"retry":0,"timeout_ms":1000,"artifacts":[]}"#)
         .execute(pool).await.expect("validate task");
     sqlx::query("INSERT INTO tasks(id,job_id,task_key,executor,spec_json,input_bindings_json,state,attempt_limit,timeout_ms) VALUES(?,?,'publish','core.publish',?,'{}','pending',1,1000)")
-        .bind(publish_id.to_string()).bind(job_id.to_string()).bind(r#"{"needs":["validate"]}"#)
+        .bind(publish_id.to_string()).bind(job_id.to_string()).bind(r#"{"executor":"core.publish","needs":["validate"],"tags":[],"retry":0,"timeout_ms":1000,"artifacts":[]}"#)
         .execute(pool).await.expect("publish task");
     JobTasks {
         job_id,
@@ -372,14 +383,25 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
             .expect("idempotent source"),
         source_id
     );
+    let prompt_snapshot = PromptSnapshot {
+        profile: PromptSnapshotProfile {
+            domain_id,
+            profile_text: "profile".into(),
+            sha256: digest("profile"),
+        },
+        prompts: vec![PromptSnapshotPrompt {
+            key: "document_note".into(),
+            content: "write a note".into(),
+            sha256: digest("write a note"),
+        }],
+    };
     let initial = CreateJob {
         source_id,
         pipeline_revision_id: revision_id,
         trigger: JobTrigger::Initial,
         rerun_of_job_id: None,
         prompt_snapshot_id: PromptSnapshotId::generate(),
-        prompt_snapshot_sha256: &"2".repeat(64),
-        prompt_snapshot_json: r#"{"domain":{"profile":"profile"},"prompts":[]}"#,
+        prompt_snapshot: &prompt_snapshot,
         request_key: "job-initial",
         request_sha256: &"3".repeat(64),
         translate: false,
@@ -405,6 +427,90 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
     assert_eq!(states.len(), compilation.pipeline.tasks.len());
     assert!(states.contains(&("acquire".into(), "ready".into())));
     assert!(states.contains(&("translate".into(), "skipped".into())));
+    let stored_snapshot: (String, String) =
+        sqlx::query_as("SELECT prompt_snapshot_json,prompt_snapshot_sha256 FROM jobs WHERE id=?")
+            .bind(first_job.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("stored prompt snapshot");
+    assert_eq!(
+        serde_json::from_str::<PromptSnapshot>(&stored_snapshot.0).expect("strict prompt snapshot"),
+        prompt_snapshot
+    );
+    assert_eq!(stored_snapshot.1, digest(&stored_snapshot.0).as_str());
+    let frozen_tasks: Vec<(String, String)> = sqlx::query_as(
+        "SELECT spec_json,input_bindings_json FROM tasks WHERE job_id=? ORDER BY task_key",
+    )
+    .bind(first_job.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("frozen task types");
+    for (spec_json, bindings_json) in frozen_tasks {
+        let spec = serde_json::from_str::<CompiledTaskSpec>(&spec_json).expect("strict task spec");
+        let bindings = serde_json::from_str::<TaskInputBindings>(&bindings_json)
+            .expect("strict input bindings");
+        assert!(bindings.is_valid());
+        assert_eq!(spec.executor, bindings.executor());
+    }
+
+    let mut invalid_profile = prompt_snapshot.clone();
+    invalid_profile.profile.sha256 = digest("wrong profile");
+    let invalid = CreateJob {
+        prompt_snapshot: &invalid_profile,
+        request_key: "job-invalid-profile",
+        request_sha256: &"4".repeat(64),
+        ..initial
+    };
+    assert_eq!(
+        store
+            .create_job(invalid, &compilation)
+            .await
+            .expect_err("profile digest must match")
+            .code(),
+        ErrorCode::InvalidRequest
+    );
+    let mut invalid_content = prompt_snapshot.clone();
+    invalid_content.prompts[0].sha256 = digest("wrong content");
+    let invalid = CreateJob {
+        prompt_snapshot: &invalid_content,
+        request_key: "job-invalid-content",
+        request_sha256: &"4".repeat(64),
+        ..initial
+    };
+    assert_eq!(
+        store
+            .create_job(invalid, &compilation)
+            .await
+            .expect_err("prompt content digest must match")
+            .code(),
+        ErrorCode::InvalidRequest
+    );
+    let unsorted_prompts = PromptSnapshot {
+        profile: prompt_snapshot.profile.clone(),
+        prompts: vec![
+            PromptSnapshotPrompt {
+                key: "document_translate".into(),
+                content: "translate".into(),
+                sha256: digest("translate"),
+            },
+            prompt_snapshot.prompts[0].clone(),
+        ],
+    };
+    let invalid = CreateJob {
+        prompt_snapshot: &unsorted_prompts,
+        request_key: "job-unsorted-prompts",
+        request_sha256: &"4".repeat(64),
+        translate: true,
+        ..initial
+    };
+    assert_eq!(
+        store
+            .create_job(invalid, &compilation)
+            .await
+            .expect_err("prompt keys must be sorted and unique")
+            .code(),
+        ErrorCode::InvalidRequest
+    );
 
     let busy = CreateJob {
         request_key: "job-busy",

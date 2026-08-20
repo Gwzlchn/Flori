@@ -2,7 +2,7 @@ use super::{
     super::{Store, StoreError},
     wire::{error_code, transient},
 };
-use flori_core::{AttemptId, ErrorCode, TaskState};
+use flori_core::{AttemptId, CompiledTaskSpec, ErrorCode, TaskState};
 use sqlx::Row;
 
 impl Store {
@@ -202,21 +202,38 @@ pub(super) async fn promote_ready(
     job_id: &str,
     now_ms: i64,
 ) -> Result<(), StoreError> {
-    sqlx::query(
-        r#"UPDATE tasks AS candidate SET state='ready',ready_at_ms=?
-             WHERE candidate.job_id=? AND candidate.state='pending'
-               AND NOT EXISTS(
-                 SELECT 1 FROM json_each(candidate.spec_json,'$.needs') dependency
-                 LEFT JOIN tasks predecessor
-                   ON predecessor.job_id=candidate.job_id
-                  AND predecessor.task_key=dependency.value
-                 WHERE predecessor.id IS NULL
-                    OR predecessor.state NOT IN ('succeeded','skipped')
-               )"#,
+    let candidates = sqlx::query(
+        "SELECT id,spec_json FROM tasks WHERE job_id=? AND state='pending' ORDER BY task_key",
     )
-    .bind(now_ms)
     .bind(job_id)
-    .execute(&mut **transaction)
+    .fetch_all(&mut **transaction)
     .await?;
+    for candidate in candidates {
+        let spec_json: String = candidate.try_get("spec_json")?;
+        let spec = serde_json::from_str::<CompiledTaskSpec>(&spec_json)
+            .map_err(|_| StoreError::new(ErrorCode::CorruptState))?;
+        let mut ready = true;
+        for predecessor in spec.needs {
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT state FROM tasks WHERE job_id=? AND task_key=?")
+                    .bind(job_id)
+                    .bind(predecessor)
+                    .fetch_optional(&mut **transaction)
+                    .await?;
+            if !matches!(state.as_deref(), Some("succeeded" | "skipped")) {
+                ready = false;
+                break;
+            }
+        }
+        if ready {
+            sqlx::query(
+                "UPDATE tasks SET state='ready',ready_at_ms=? WHERE id=? AND state='pending'",
+            )
+            .bind(now_ms)
+            .bind(candidate.try_get::<String, _>("id")?)
+            .execute(&mut **transaction)
+            .await?;
+        }
+    }
     Ok(())
 }

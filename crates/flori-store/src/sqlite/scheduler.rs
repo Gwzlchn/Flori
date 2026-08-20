@@ -4,6 +4,7 @@ mod expire;
 mod job;
 mod pipeline;
 mod publish;
+mod snapshot;
 mod source;
 mod wire;
 
