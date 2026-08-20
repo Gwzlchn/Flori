@@ -64,7 +64,7 @@ impl Store {
             return Err(StoreError::new(ErrorCode::NotFound));
         }
         let row = sqlx::query(
-            "SELECT source_id,name,media_type,size_bytes,sha256,relative_path \
+            "SELECT source_id,media_type,size_bytes,sha256,relative_path \
              FROM source_inputs WHERE id=?",
         )
         .bind(source_input_id.to_string())
@@ -144,10 +144,14 @@ fn source_input_metadata(
     source_input_id: SourceInputId,
 ) -> Result<(String, String, u64, Sha256Digest), StoreError> {
     let relative_path: String = row.try_get("relative_path")?;
+    let file_name = relative_path
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| StoreError::new(ErrorCode::CorruptState))?;
     let expected_path = source_input_path(
         parse_id(row.try_get("source_id")?)?,
         source_input_id,
-        row.try_get("name")?,
+        file_name,
     )
     .map_err(|_| StoreError::new(ErrorCode::CorruptState))?;
     if relative_path != expected_path {
