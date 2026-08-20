@@ -1,12 +1,13 @@
 use utoipa::OpenApi;
 
 use crate::{
-    AiTool, AiUsageId, AiUsageState, ArtifactId, ArtifactKind, ArtifactOrigin, ArtifactRetention,
-    ArtifactWhen, AttemptId, AttemptState, CollectionId, CollectionKind, ConceptOccurrenceId,
-    CredentialId, CredentialKind, DomainId, ErrorCode, EvidenceId, EvidenceLocatorKind, Executor,
-    GlossaryTermId, GlossaryTermState, JobEventKind, JobEventScope, JobId, JobState, JobTrigger,
-    PipelineId, PipelineRevisionId, PromptSnapshotId, QrSessionId, RequestId, RerunMode, RunnerId,
-    RunnerState, RunnerTool, SearchChunkId, SourceId, SourceInputId, SourceKind,
+    AiTool, AiUsageId, AiUsageState, ArtifactId, ArtifactKind, ArtifactManifest,
+    ArtifactManifestEntry, ArtifactManifestSchema, ArtifactOrigin, ArtifactRetention, ArtifactWhen,
+    AttemptId, AttemptState, CollectionId, CollectionKind, ConceptOccurrenceId, CredentialId,
+    CredentialKind, DomainId, ErrorCode, EvidenceId, EvidenceLocatorKind, Executor, GlossaryTermId,
+    GlossaryTermState, JobEventKind, JobEventScope, JobId, JobState, JobTrigger, PipelineId,
+    PipelineRevisionId, PromptSnapshotId, QrSessionId, RequestId, RerunMode, RunnerId, RunnerState,
+    RunnerTool, SearchChunkId, Sha256Digest, SourceId, SourceInputId, SourceKind,
     SystemHealthStatus, TaskId, TaskLogLevel, TaskState, UploadId, UploadOwnerKind, UploadState,
     UsageOrigin,
 };
@@ -61,6 +62,10 @@ use crate::{
     SystemHealthStatus,
     JobEventKind,
     ErrorCode,
+    ArtifactManifestSchema,
+    ArtifactManifest,
+    ArtifactManifestEntry,
+    Sha256Digest,
 )))]
 struct ApiDoc;
 
@@ -89,9 +94,14 @@ mod tests {
         assert!(schemas.contains_key("SourceKind"));
         assert!(schemas.contains_key("Executor"));
         assert!(schemas.contains_key("ErrorCode"));
+        assert!(schemas.contains_key("ArtifactManifestSchema"));
+        assert!(schemas.contains_key("ArtifactManifest"));
+        assert!(schemas.contains_key("ArtifactManifestEntry"));
+        assert!(schemas.contains_key("Sha256Digest"));
         assert!(
             json.contains("^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
         );
         assert!(json.contains("\n  \"openapi\""));
+        assert!(json.contains("^[0-9a-f]{64}$"));
     }
 }

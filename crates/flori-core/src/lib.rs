@@ -2,10 +2,12 @@
 
 #![forbid(unsafe_code)]
 
+mod artifact;
 mod enums;
 mod ids;
 mod openapi;
 
+pub use artifact::*;
 pub use enums::*;
 pub use ids::*;
 pub use openapi::openapi_json;
