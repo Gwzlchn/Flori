@@ -14,6 +14,7 @@ mod openapi;
 mod pdf_evidence;
 mod runner_claim;
 mod runner_protocol;
+mod source;
 mod video;
 mod video_evidence;
 
@@ -29,6 +30,7 @@ pub use openapi::{ai_result_schema_json, openapi_json};
 pub use pdf_evidence::*;
 pub use runner_claim::*;
 pub use runner_protocol::*;
+pub use source::*;
 pub use video::*;
 pub use video_evidence::*;
 
