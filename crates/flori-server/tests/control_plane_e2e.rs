@@ -6,11 +6,11 @@ use std::{
 use flori_core::{
     AiAudit, AiModelCapability, AiRunnerSelection, AiTool, ArtifactId, ArtifactKind,
     ArtifactManifestEntry, CreateRunnerSlot, CreatedJob, DocumentStructure, DomainId, ErrorCode,
-    EvidenceId, Executor, FailAttemptRequest, JobId, JobInputs, JobTrigger, LogFrame, PipelineId,
-    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
-    PromptSnapshotPrompt, RegisterRunnerRequest, RerunJobRequest, RerunMode, ResolvedTaskInputs,
-    RunnerId, RunnerTool, RunnerToolCapability, Sha256Digest, SourceInputId, SourceKind,
-    StartUploadRequest, TaskClaim, TaskLogLevel, TaskLogLine, UsageOrigin, UsageUpdate,
+    EvidenceId, EvidenceManifest, Executor, FailAttemptRequest, JobId, JobInputs, JobTrigger,
+    LogFrame, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
+    PromptSnapshotProfile, PromptSnapshotPrompt, RegisterRunnerRequest, RerunJobRequest, RerunMode,
+    ResolvedTaskInputs, RunnerId, RunnerTool, RunnerToolCapability, Sha256Digest, SourceInputId,
+    SourceKind, StartUploadRequest, TaskClaim, TaskLogLevel, TaskLogLine, UsageOrigin, UsageUpdate,
     VerifyUploadRequest,
 };
 use flori_pipeline::compile;
@@ -374,6 +374,10 @@ fn artifact_body(
             "application/json",
             br#"{"tool":"codex_cli","status":"ok"}"#.to_vec(),
         ),
+        ArtifactKind::Translation => (
+            "text/markdown",
+            b"# Translation\n\nAttention is all you need.\n".to_vec(),
+        ),
         _ => panic!("unexpected required runner artifact: {kind:?}"),
     }
 }
@@ -396,16 +400,24 @@ async fn run_runner_task(client: &RunnerClient, claim: &TaskClaim) {
         )
         .await
         .expect("append log");
-    if claim.executor == Executor::AiDocumentNote {
+    if matches!(
+        claim.executor,
+        Executor::AiDocumentNote | Executor::AiDocumentTranslate
+    ) {
         assert_eq!(
             (claim.model.as_deref(), claim.effort.as_deref()),
             (Some("model-a"), Some("high"))
         );
+        let invocation_key = match claim.executor {
+            Executor::AiDocumentNote => "note-call",
+            Executor::AiDocumentTranslate => "translate-call",
+            _ => unreachable!("matched AI document executor"),
+        };
         let started = client
             .update_usage(
                 claim.exec_id,
                 &UsageUpdate::Started {
-                    invocation_key: "note-call".into(),
+                    invocation_key: invocation_key.into(),
                     tool: AiTool::CodexCli,
                     model: "model-a".into(),
                     effort: "high".into(),
@@ -417,7 +429,7 @@ async fn run_runner_task(client: &RunnerClient, claim: &TaskClaim) {
             .update_usage(
                 claim.exec_id,
                 &UsageUpdate::Final {
-                    invocation_key: "note-call".into(),
+                    invocation_key: invocation_key.into(),
                     origin: UsageOrigin::Observed,
                     input_tokens: Some(10),
                     output_tokens: Some(20),
@@ -722,6 +734,48 @@ async fn assert_published(harness: &Harness, job_id: JobId, usage_total: i64) {
     assert_eq!(usage, (usage_total, usage_total));
 }
 
+async fn assert_pdf_artifact_ids(harness: &Harness, job_id: JobId) {
+    let original: ArtifactId = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM artifacts WHERE job_id=? AND kind='source_original'",
+    )
+    .bind(job_id.to_string())
+    .fetch_one(&harness.pool)
+    .await
+    .expect("source original")
+    .parse()
+    .expect("typed source original");
+    let structure_path: String = sqlx::query_scalar(
+        "SELECT relative_path FROM artifacts WHERE job_id=? AND kind='document_structure'",
+    )
+    .bind(job_id.to_string())
+    .fetch_one(&harness.pool)
+    .await
+    .expect("document structure path");
+    let structure: DocumentStructure = serde_json::from_slice(
+        &fs::read(harness.root.join("artifacts").join(structure_path)).expect("document bytes"),
+    )
+    .expect("strict document structure");
+    assert_eq!(structure.source_artifact_id, original);
+    let evidence_path: String = sqlx::query_scalar(
+        "SELECT relative_path FROM artifacts WHERE job_id=? AND kind='evidence'",
+    )
+    .bind(job_id.to_string())
+    .fetch_one(&harness.pool)
+    .await
+    .expect("evidence path");
+    let evidence: EvidenceManifest = serde_json::from_slice(
+        &fs::read(harness.root.join("artifacts").join(evidence_path)).expect("evidence bytes"),
+    )
+    .expect("strict evidence");
+    assert!(
+        !evidence.items.is_empty()
+            && evidence
+                .items
+                .iter()
+                .all(|item| item.source_artifact_id == original)
+    );
+}
+
 #[tokio::test]
 async fn codex_daemon_publishes_over_real_http_sqlite_and_nas() {
     let (harness, job_id) = Harness::new().await;
@@ -1022,6 +1076,58 @@ async fn pdf_control_plane_executes_and_reruns_over_real_http_sqlite_and_nas() {
         .await
         .expect("restore current");
 
+    let translated = rerun_http(
+        &harness,
+        second,
+        &RerunJobRequest {
+            request_key: "translate-success".into(),
+            mode: RerunMode::FromTask,
+            from_task_key: Some("translate".into()),
+            ai_selection: None,
+        },
+    )
+    .await;
+    assert_ne!(translated, translate);
+    let claim = harness
+        .client
+        .poll()
+        .await
+        .expect("poll successful translation")
+        .expect("translation claim");
+    assert_eq!(
+        (claim.job_id, claim.task_key.as_str()),
+        (translated, "translate")
+    );
+    run_runner_task(&harness.client, &claim).await;
+    assert!(harness.client.poll().await.expect("drive core").is_none());
+    let translated_state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=?")
+        .bind(translated.to_string())
+        .fetch_one(&harness.pool)
+        .await
+        .expect("translated Job state");
+    assert_eq!(translated_state, "succeeded");
+    let translated_artifact: (String, String) = sqlx::query_as(
+        "SELECT origin,relative_path FROM artifacts WHERE job_id=? AND kind='translation'",
+    )
+    .bind(translated.to_string())
+    .fetch_one(&harness.pool)
+    .await
+    .expect("translation artifact");
+    assert_eq!(translated_artifact.0, "produced");
+    assert_eq!(
+        fs::read(harness.root.join("artifacts").join(translated_artifact.1))
+            .expect("translation bytes"),
+        b"# Translation\n\nAttention is all you need.\n"
+    );
+    assert_pdf_artifact_ids(&harness, translated).await;
+    let pointers: (String, String) =
+        sqlx::query_as("SELECT current_job_id,previous_job_id FROM sources WHERE id=?")
+            .bind(harness.source_id.to_string())
+            .fetch_one(&harness.pool)
+            .await
+            .expect("translated publication pointers");
+    assert_eq!(pointers, (translated.to_string(), second.to_string()));
+
     let runner_revision: i64 = sqlx::query_scalar("SELECT config_revision FROM runners WHERE id=?")
         .bind(harness.other_runner_id.to_string())
         .fetch_one(&harness.pool)
@@ -1029,7 +1135,7 @@ async fn pdf_control_plane_executes_and_reruns_over_real_http_sqlite_and_nas() {
         .expect("other Runner revision");
     let from_note = rerun_http(
         &harness,
-        second,
+        translated,
         &RerunJobRequest {
             request_key: "note-rerun".into(),
             mode: RerunMode::FromTask,
@@ -1058,14 +1164,14 @@ async fn pdf_control_plane_executes_and_reruns_over_real_http_sqlite_and_nas() {
         (&states["extract"], &states["note"], &states["validate"]),
         (&"skipped".into(), &"ready".into(), &"pending".into())
     );
-    let materialized: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM artifacts WHERE job_id=? AND origin='materialized'",
+    let materialized_translation: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM artifacts WHERE job_id=? AND origin='materialized' AND kind='translation'",
     )
     .bind(from_note.to_string())
     .fetch_one(&harness.pool)
     .await
-    .expect("materialized artifact");
-    assert_eq!(materialized, 2);
+    .expect("materialized translation");
+    assert_eq!(materialized_translation, 1);
     let selected: (String, String, String, i64) = sqlx::query_as(
         "SELECT pinned_runner_id,selected_model,selected_effort,runner_config_revision \
          FROM tasks WHERE job_id=? AND task_key='note'",
@@ -1083,6 +1189,49 @@ async fn pdf_control_plane_executes_and_reruns_over_real_http_sqlite_and_nas() {
             runner_revision,
         )
     );
+    assert!(
+        harness
+            .client
+            .poll()
+            .await
+            .expect("default Runner poll")
+            .is_none()
+    );
+    let pinned_client = RunnerClient::new(
+        &format!("http://{}", harness.address),
+        harness.other_runner_token.clone(),
+    )
+    .expect("pinned Runner client");
+    let claim = pinned_client
+        .poll()
+        .await
+        .expect("pinned Runner poll")
+        .expect("pinned note claim");
+    assert_eq!((claim.job_id, claim.task_key.as_str()), (from_note, "note"));
+    assert_eq!(
+        (
+            claim.model.as_deref(),
+            claim.effort.as_deref(),
+            claim.runner_config_revision
+        ),
+        (Some("model-a"), Some("high"), runner_revision as u64)
+    );
+    run_runner_task(&pinned_client, &claim).await;
+    assert!(pinned_client.poll().await.expect("drive core").is_none());
+    let note_state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=?")
+        .bind(from_note.to_string())
+        .fetch_one(&harness.pool)
+        .await
+        .expect("note rerun state");
+    assert_eq!(note_state, "succeeded");
+    assert_pdf_artifact_ids(&harness, from_note).await;
+    let pointers: (String, String) =
+        sqlx::query_as("SELECT current_job_id,previous_job_id FROM sources WHERE id=?")
+            .bind(harness.source_id.to_string())
+            .fetch_one(&harness.pool)
+            .await
+            .expect("note publication pointers");
+    assert_eq!(pointers, (from_note.to_string(), translated.to_string()));
 
     let conflict = post_json(
         &harness,

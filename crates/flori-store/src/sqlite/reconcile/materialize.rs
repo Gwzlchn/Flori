@@ -68,14 +68,13 @@ pub(super) async fn reconcile(
             &request_sha256,
         )
         .await?;
-        if owner_valid {
-            if artifacts
+        if owner_valid
+            && artifacts
                 .recovery_action(&source, true)
                 .map_err(|error| stored_artifact_error(error.code()))?
                 != RecoveryAction::RetryCommit
-            {
-                return Err(corrupt());
-            }
+        {
+            return Err(corrupt());
         }
         records.push((artifact.upload_id.to_string(), target));
     }

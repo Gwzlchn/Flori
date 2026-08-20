@@ -189,3 +189,25 @@ fn evidence_invalid() -> StoreError {
 fn corrupt() -> StoreError {
     StoreError::new(ErrorCode::CorruptState)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materialization_rejects_video_evidence_in_the_pdf_slice() {
+        let source = ArtifactId::generate();
+        let target = ArtifactId::generate();
+        let evidence_id = flori_core::EvidenceId::generate();
+        let bytes = format!(
+            r#"{{"schema":"flori.evidence.v1","items":[{{"evidence_id":"{evidence_id}","source_artifact_id":"{source}","locator":{{"kind":"video","value":{{"start_ms":1,"end_ms":2}}}},"quote":"x"}}]}}"#,
+        );
+        let error = rewrite(
+            ArtifactKind::Evidence,
+            &BTreeMap::from([(source, target)]),
+            bytes.as_bytes(),
+        )
+        .expect_err("video evidence is outside PDF rerun materialization");
+        assert_eq!(error.code(), ErrorCode::RerunBoundaryInvalid);
+    }
+}
