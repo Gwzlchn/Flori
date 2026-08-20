@@ -1,4 +1,6 @@
+mod io;
 mod prepare;
+mod record;
 
 use flori_core::{CreateUploadSource, Sha256Digest, SourceId, UploadId};
 
