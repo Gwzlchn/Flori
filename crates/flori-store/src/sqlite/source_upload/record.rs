@@ -4,11 +4,14 @@ use sqlx::{Row, Sqlite, Transaction};
 use crate::artifact::{UploadRecord, source_input_path};
 use crate::sqlite::StoreError;
 
-pub(super) struct ActiveSourceUpload {
+pub(in crate::sqlite) struct ActiveSourceUpload {
     pub record: UploadRecord,
+    pub pending: PendingSourceCommit,
+    pub request_key: String,
+    pub request_sha256: String,
 }
 
-pub(super) async fn load(
+pub(in crate::sqlite) async fn load(
     transaction: &mut Transaction<'_, Sqlite>,
     upload_id: UploadId,
 ) -> Result<ActiveSourceUpload, StoreError> {
@@ -57,7 +60,12 @@ pub(super) async fn load(
     record
         .restore_progress(received, state)
         .map_err(|_| corrupt())?;
-    Ok(ActiveSourceUpload { record })
+    Ok(ActiveSourceUpload {
+        record,
+        pending,
+        request_key: row.try_get("request_key")?,
+        request_sha256: row.try_get("request_sha256")?,
+    })
 }
 
 fn to_u64(value: i64) -> Result<u64, StoreError> {

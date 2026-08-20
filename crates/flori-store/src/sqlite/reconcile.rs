@@ -8,6 +8,7 @@ use super::{Store, StoreError};
 mod attempt;
 mod materialize;
 mod server_log;
+mod source;
 
 impl Store {
     pub async fn reconcile_uploads(
@@ -26,7 +27,7 @@ impl Store {
         for row in &groups {
             if !matches!(
                 row.try_get::<String, _>("owner_kind")?.as_str(),
-                "attempt" | "materialize"
+                "attempt" | "materialize" | "source"
             ) {
                 return Err(StoreError::new(ErrorCode::CorruptState));
             }
@@ -36,6 +37,7 @@ impl Store {
             match row.try_get::<String, _>("owner_kind")?.as_str() {
                 "attempt" => attempt::reconcile(self, artifacts, &owner_id, now_ms).await?,
                 "materialize" => materialize::reconcile(self, artifacts, &owner_id, now_ms).await?,
+                "source" => source::reconcile(self, artifacts, &owner_id, now_ms).await?,
                 _ => unreachable!("owner kinds were validated before recovery"),
             }
         }
