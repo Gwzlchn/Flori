@@ -11,6 +11,7 @@ mod materialize;
 mod openapi;
 mod runner_claim;
 mod runner_protocol;
+mod video;
 
 pub use artifact::*;
 pub use document::*;
@@ -21,6 +22,7 @@ pub use materialize::*;
 pub use openapi::{ai_result_schema_json, openapi_json};
 pub use runner_claim::*;
 pub use runner_protocol::*;
+pub use video::*;
 
 pub const CONTRACT_REVISION: &str = "flori.v1";
 pub const PIPELINE_COMPILER_VERSION: u8 = 1;
