@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    AiRunnerSelection, ArtifactId, ArtifactKind, ArtifactRetention, CompiledTaskSpec, JobId,
-    JobInputs, PipelineRevisionId, PromptSnapshot, PromptSnapshotId, Sha256Digest, SourceId,
-    TaskId, TaskInputBindings, TaskState, UploadId,
+    AiRunnerSelection, ArtifactId, ArtifactKind, ArtifactManifestEntry, ArtifactRetention,
+    CompiledTaskSpec, JobId, JobInputs, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
+    Sha256Digest, SourceId, TaskId, TaskInputBindings, TaskState, UploadId,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -16,6 +16,14 @@ pub struct PendingTaskCommit {
     pub bindings: TaskInputBindings,
     pub state: TaskState,
     pub ai_selection: Option<AiRunnerSelection>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PendingAttemptUpload {
+    pub artifact_id: ArtifactId,
+    pub declaration_name: String,
+    pub artifact: ArtifactManifestEntry,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -68,5 +76,15 @@ mod tests {
             "0".repeat(64),
         );
         serde_json::from_str::<PendingMaterializeCommit>(&json).expect_err("unknown field");
+    }
+
+    #[test]
+    fn attempt_upload_freezes_only_the_server_manifest_entry() {
+        let json = format!(
+            r#"{{"artifact_id":"{}","declaration_name":"figures","artifact":{{"name":"figures/one.png","kind":"figure","media_type":"image/png","size_bytes":3,"sha256":"{}","relative_path":"relative"}},"path":"runner-owned"}}"#,
+            ArtifactId::generate(),
+            "0".repeat(64),
+        );
+        serde_json::from_str::<PendingAttemptUpload>(&json).expect_err("unknown path field");
     }
 }
