@@ -1,11 +1,11 @@
 use std::{fmt::Write, fs, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    ArtifactManifest, AttemptId, AttemptState, CompiledTaskSpec, CompleteAttemptRequest, DomainId,
-    ErrorCode, Executor, FailAttemptRequest, JobId, JobInputs, JobTrigger, PipelineId,
-    PipelineRevisionId, PromptSnapshot, PromptSnapshotId, PromptSnapshotProfile,
-    PromptSnapshotPrompt, RunnerId, Sha256Digest, SourceId, SourceKind, TaskId, TaskInputBindings,
-    TaskInputReference, TaskState,
+    ArtifactManifest, AttemptId, AttemptState, CollectionId, CompiledTaskSpec,
+    CompleteAttemptRequest, DomainId, ErrorCode, Executor, FailAttemptRequest, JobId, JobInputs,
+    JobTrigger, PipelineId, PipelineRevisionId, PromptSnapshot, PromptSnapshotId,
+    PromptSnapshotProfile, PromptSnapshotPrompt, RunnerId, Sha256Digest, SourceId, SourceKind,
+    TaskId, TaskInputBindings, TaskInputReference, TaskState,
 };
 use flori_pipeline::compile;
 use flori_store::{CreateJob, CreateSource, Store, artifact::NasArtifactStore};
@@ -402,6 +402,10 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
     sqlx::query("INSERT INTO domains(id,slug,name,profile_text,created_at_ms,updated_at_ms) VALUES(?,?,?,'profile',0,0)")
         .bind(domain_id.to_string()).bind("papers").bind("Papers")
         .execute(&pool).await.expect("domain");
+    let collection_id = CollectionId::generate();
+    sqlx::query("INSERT INTO collections(id,domain_id,name,kind,enabled,created_at_ms,updated_at_ms) VALUES(?,?,'Reading','manual',1,0,0)")
+        .bind(collection_id.to_string()).bind(domain_id.to_string())
+        .execute(&pool).await.expect("collection");
     let yaml = include_bytes!("../../../pipelines/pdf.yml");
     let compilation = compile("pdf", yaml).expect("compile frozen PDF pipeline");
     let pipeline_id = PipelineId::generate();
@@ -438,11 +442,21 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
         canonical_ref: "https://example.test/paper.pdf",
         title: Some("Paper"),
         domain_id,
+        collection_ids: &[collection_id],
         request_key: "source-request",
         request_sha256: &"1".repeat(64),
         created_at_ms: 3,
     };
     let source_id = store.create_source(source_request).await.expect("source");
+    let membership: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM collection_sources WHERE collection_id=? AND source_id=?",
+    )
+    .bind(collection_id.to_string())
+    .bind(source_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("collection membership");
+    assert_eq!(membership, 1);
     assert_eq!(
         store
             .create_source(source_request)

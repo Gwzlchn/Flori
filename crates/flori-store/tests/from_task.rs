@@ -188,6 +188,7 @@ async fn foundation_with_translate(database: &TestDatabase, translate: bool) -> 
             canonical_ref: "https://example.test/source.pdf",
             title: None,
             domain_id,
+            collection_ids: &[],
             request_key: "source",
             request_sha256: &"a".repeat(64),
             created_at_ms: 2,

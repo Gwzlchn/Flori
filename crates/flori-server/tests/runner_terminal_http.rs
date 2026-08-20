@@ -70,6 +70,7 @@ impl Harness {
                 canonical_ref: "https://example.test/paper.pdf",
                 title: None,
                 domain_id,
+                collection_ids: &[],
                 request_key: "source-request",
                 request_sha256: &"a".repeat(64),
                 created_at_ms: 2,
