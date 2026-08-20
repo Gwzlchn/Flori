@@ -8,6 +8,7 @@ mod client;
 mod content;
 mod daemon;
 mod digest;
+mod media;
 mod spool;
 mod upload;
 
