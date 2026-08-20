@@ -393,6 +393,7 @@ version = "0.0.0"
 dependencies = [
  "flori-core",
  "flori-pipeline",
+ "serde_json",
  "sha2 0.11.0",
  "sqlx",
  "tokio",
