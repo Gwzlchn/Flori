@@ -1,6 +1,7 @@
 mod acquire;
 mod claim;
 mod extract;
+mod log;
 mod network;
 mod process;
 mod scan;
