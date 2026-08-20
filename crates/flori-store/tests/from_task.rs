@@ -277,11 +277,14 @@ async fn foundation_with_translate(database: &TestDatabase, translate: bool) -> 
         .expect("base runner registration");
     let mut task_ids = BTreeMap::new();
     let mut source_files = BTreeMap::new();
-    let rows = sqlx::query("SELECT id,task_key,spec_json,state FROM tasks WHERE job_id=?")
-        .bind(job_id.to_string())
-        .fetch_all(&pool)
-        .await
-        .expect("tasks");
+    let mut original_artifact_id = None;
+    let rows = sqlx::query(
+        "SELECT id,task_key,spec_json,state FROM tasks WHERE job_id=? ORDER BY task_key",
+    )
+    .bind(job_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("tasks");
     for row in rows {
         let task_id: TaskId = row
             .try_get::<String, _>("id")
@@ -322,6 +325,9 @@ async fn foundation_with_translate(database: &TestDatabase, translate: bool) -> 
             .filter(|item| item.when == ArtifactWhen::OnSuccess && item.required)
         {
             let artifact_id = flori_core::ArtifactId::generate();
+            if declaration.kind == ArtifactKind::SourceOriginal {
+                original_artifact_id = Some(artifact_id);
+            }
             let declared_path = PathBuf::from(&declaration.path);
             let file_name = declared_path
                 .file_name()
@@ -330,7 +336,12 @@ async fn foundation_with_translate(database: &TestDatabase, translate: bool) -> 
                 .to_owned();
             let relative = task_artifact_path(source_id, job_id, task_id, artifact_id, &file_name)
                 .expect("artifact path");
-            let bytes = format!("{task_key}:{}", declaration.name).into_bytes();
+            let bytes = fixture_artifact_bytes(
+                &task_key,
+                &declaration.name,
+                declaration.kind,
+                original_artifact_id.expect("source original precedes structured outputs"),
+            );
             let path = artifact_root.join(&relative);
             fs::create_dir_all(path.parent().expect("artifact parent")).expect("artifact parent");
             fs::write(&path, &bytes).expect("artifact bytes");
@@ -399,6 +410,24 @@ fn media_type(kind: ArtifactKind) -> &'static str {
         }
         ArtifactKind::Terms => "application/json",
         _ => panic!("unexpected test ArtifactKind"),
+    }
+}
+
+fn fixture_artifact_bytes(
+    task_key: &str,
+    name: &str,
+    kind: ArtifactKind,
+    source_artifact_id: flori_core::ArtifactId,
+) -> Vec<u8> {
+    match kind {
+        ArtifactKind::DocumentStructure => format!(
+            r#"{{"schema":"flori.document_structure.v1","source_artifact_id":"{source_artifact_id}","language":"en","pages":[{{"page":1,"width_pt":100.0,"height_pt":100.0}}],"sections":[],"figures":[],"tables":[]}}"#,
+        )
+        .into_bytes(),
+        ArtifactKind::Evidence => {
+            br#"{"schema":"flori.evidence.v1","items":[]}"#.to_vec()
+        }
+        _ => format!("{task_key}:{name}").into_bytes(),
     }
 }
 
@@ -813,9 +842,7 @@ async fn translate_rerun_enables_the_frozen_input_without_changing_current_on_fa
 async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_plan() {
     let database = TestDatabase::new();
     let foundation = foundation(&database).await;
-    for (path, _) in foundation.source_files.values() {
-        fs::remove_file(path).expect("hide source artifact");
-    }
+    fs::remove_file(&foundation.source_files["acquire/original"].0).expect("hide source artifact");
     let command = request("crash-rerun", "left", None);
     assert_eq!(
         error(
@@ -958,7 +985,10 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
         .await
         .expect("restore source current");
     restore_source_files(&foundation);
-    for (path, bytes) in foundation.source_files.values() {
+    for (key, (path, bytes)) in &foundation.source_files {
+        if key.ends_with("/structure") || key.ends_with("/evidence") {
+            continue;
+        }
         fs::write(path, vec![b'x'; bytes.len()]).expect("tamper source bytes");
     }
     assert_eq!(
@@ -1010,14 +1040,29 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
         .await
         .expect("restore non-leader digest");
 
-    let second = pending_upload(&pending, 1);
-    let second_bytes = source_bytes(&foundation, &pending, 1);
+    let copy_indices = pending
+        .artifacts
+        .iter()
+        .enumerate()
+        .filter(|(_, artifact)| {
+            !matches!(
+                artifact.kind,
+                ArtifactKind::DocumentStructure | ArtifactKind::Evidence
+            )
+        })
+        .map(|(index, _)| index)
+        .take(3)
+        .collect::<Vec<_>>();
+    let second_index = copy_indices[1];
+    let third_index = copy_indices[2];
+    let second = pending_upload(&pending, second_index);
+    let second_bytes = source_bytes(&foundation, &pending, second_index);
     foundation
         .artifacts
         .append_chunk(&second, 0, &digest(second_bytes), second_bytes)
         .expect("file ahead of cursor");
-    let mut third = pending_upload(&pending, 2);
-    let third_bytes = source_bytes(&foundation, &pending, 2);
+    let mut third = pending_upload(&pending, third_index);
+    let third_bytes = source_bytes(&foundation, &pending, third_index);
     foundation
         .artifacts
         .append(&mut third, 0, third_bytes)
@@ -1028,7 +1073,7 @@ async fn from_task_recovers_copy_windows_and_rejects_drift_or_a_second_active_pl
         .expect("verify third staging");
     sqlx::query("UPDATE uploads SET received_bytes=?,state='verified' WHERE id=?")
         .bind(i64::try_from(third.expected_size_bytes()).expect("third size"))
-        .bind(pending.artifacts[2].upload_id.to_string())
+        .bind(pending.artifacts[third_index].upload_id.to_string())
         .execute(&foundation.pool)
         .await
         .expect("persist verified before rename");
@@ -1132,9 +1177,7 @@ async fn from_task_freezes_current_prompt_and_ai_selection_at_prepare() {
         .execute(&foundation.pool)
         .await
         .expect("update current prompt");
-    for (path, _) in foundation.source_files.values() {
-        fs::remove_file(path).expect("hide source artifact");
-    }
+    fs::remove_file(&foundation.source_files["acquire/original"].0).expect("hide source artifact");
     let command = request("selected-translate", "translate", Some(selection.clone()));
     assert_eq!(
         error(
