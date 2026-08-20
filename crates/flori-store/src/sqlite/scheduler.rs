@@ -12,6 +12,7 @@ mod rerun_copy;
 mod rerun_plan;
 mod snapshot;
 mod source;
+mod validate;
 mod wire;
 
 pub(crate) use attempt::{finish_failure, finish_success};
