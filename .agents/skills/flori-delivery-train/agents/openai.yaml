@@ -1,4 +1,4 @@
 interface:
-  display_name: "Flori Staged Delivery"
-  short_description: "按 consult/change/ship/operate 分级交付 Flori"
-  default_prompt: "Use $flori-delivery-train to handle this Flori task at the narrowest authorized mode while preserving the required risk and release gates."
+  display_name: "Flori vNext Delivery"
+  short_description: "按 consult/deliver/operate 快速交付并限制复杂度"
+  default_prompt: "Use $flori-delivery-train to deliver this approved Flori task through its stated endpoint without expanding product scope or architecture."

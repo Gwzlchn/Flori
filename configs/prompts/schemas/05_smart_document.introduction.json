@@ -1,8 +1,0 @@
-{
-  "type": "object", "additionalProperties": false,
-  "required": ["introduction_markdown", "used_knowledge_refs"],
-  "properties": {
-    "introduction_markdown": {"type": "string", "minLength": 500, "maxLength": 30000},
-    "used_knowledge_refs": {"type": "array", "minItems": 1, "maxItems": 512, "uniqueItems": true, "items": {"type": "string"}}
-  }
-}

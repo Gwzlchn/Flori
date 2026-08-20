@@ -1,89 +1,125 @@
 ---
 name: flori-delivery-train
-description: Orchestrate Flori repository work with a fast read-only consult path and staged change, ship, or operate gates. Use when Codex or Claude Code reviews, changes, tests, commits, releases, deploys, operates content/runtime state, or coordinates agents/worktrees in the Flori repo and must preserve value boundaries, risk gates, evidence reuse, or release integrity without loading unrelated workflow rules.
+description: Deliver Flori work quickly from an approved bounded task packet while enforcing vNext scope, type, complexity, risk, Git, CI, worktree, and production-operation boundaries. Use for reviews, code or documentation changes, tests, commits, pushes, CI, releases, operations, and sub-agent coordination in this repository.
 ---
 
-# Flori Staged Delivery
+# Flori vNext Delivery
 
-Classify the requested action before loading process documents. Preserve rigor at the boundary being changed; do not run later delivery stages early.
+Optimize for a small verified vertical result. Do not build process or architecture that the task does not need.
 
-## Select the execution mode
+## 1. Choose one mode
 
-| Mode | Boundary | Required process |
-|---|---|---|
-| `consult` | Read-only answer, diagnosis, review, status, or discussion; no durable artifact or external mutation | Inspect only relevant evidence and report. Do not create a work item, select new delivery profiles, inventory unrelated Git state, or run delivery cleanup. A formal reviewer inherits the candidate's risk gate. |
-| `change` | Edit tracked files or durable local project records; stop before commit/push/deploy | Create or update one work item, implement, run targeted validation, and leave a reviewable candidate. |
-| `ship` | Commit, push, PR, CI, version, image, or deployment is requested | Run `change`, then load and execute only the requested release stages. |
-| `operate` | Mutate runtime data, content delivery state, credentials, cleanup targets, or production resources | Record the operation, establish rollback/recovery evidence, and verify the external result. Add `ship` only when code also needs release. |
+| Mode | Boundary |
+|---|---|
+| `consult` | Read-only answer, diagnosis or review. No durable write or external mutation. |
+| `deliver` | An approved task packet authorizes implementation through its stated commit, push and CI endpoint. |
+| `operate` | Production, deployment, credentials, external accounts, content delivery, data deletion or downtime. Requires separate authorization. |
 
-Mode may advance when the user expands the finish line. Do not infer `ship` or `operate` from a `consult` or `change` request.
+Do not split normal work into change/commit/push approval rounds. In `deliver`, stop only on the conditions in section 5.
 
-## Load authority lazily
+## 2. Load only the needed authority
 
-1. Treat `$REPO/CLAUDE.md` as governance authority. If its current contents are already supplied in context, do not read it again.
-2. For `consult`, read only the files, runtime state, or history needed to answer. Read `docs/README.md` only when document routing is unclear.
-3. For `change`, read the current work item. Read `.local/processing/迭代记录规范.txt` only when creating or structurally changing a work item. Read the relevant sections of `docs/11-dev-workflow.md` only for worktrees, multiple units, evidence/review, or integration.
-4. For `ship`, read `docs/11-dev-workflow.md` §4.7 plus the relevant sections of `docs/12-cicd.md` immediately before commit/release work.
-5. For `operate`, read the affected runbook. For source curation, delivery, cleanup/retry, or delivery-driven fixes, read `.local/delivery/README.txt` plus only the affected catalog, state, batch, and Bug records.
-6. Follow explicit review-first, no-commit, no-push, no-deploy, and scope limits first. Stop on conflicts with governance.
+1. Treat `CLAUDE.md` as workflow authority.
+2. For vNext scope, start at `docs/vnext/README.md` and read only the task's routed documents.
+3. Read old ADRs or Python code from `main` or Git history only when current-production evidence or rollback is required. They do not create vNext compatibility requirements.
+4. Read `.local/processing/迭代记录规范.txt` only when a WP, migration, operation or long investigation needs a durable record.
+5. Read content-delivery ledgers only for actual source curation, retry or deletion operations.
 
-## Profile only mutating work
+## 3. Require a bounded task packet
 
-For `change`, `ship`, and `operate`, record:
+Before editing, the packet must state:
 
-- Scale: `single` or `multi`.
-- Risk: `normal`, `contract`, or `critical`.
-- Release: `review-first`, `commit-only`, `ci`, or `full-deploy` when code delivery is involved. `commit-only` creates a local no-version value commit and stops before push; if it later advances to release, amend/squash the still-local project commit before the first push so the version stays in the value commit.
+- one observable user or developer value;
+- dependencies and risk level L0-L3;
+- allowed paths and explicit non-goals;
+- contract revision and fixture when applicable;
+- allowed counts for new architecture primitives;
+- compile/test/manual acceptance commands;
+- rollback boundary and delivery endpoint.
 
-Actual changes to security boundaries, database migrations, backup/restore behavior, identity, credentials, authorization, or destructive production state default to `critical`. A read-only discussion or design review about those topics remains `consult`; include relevant invariants and recovery concerns in the answer without invoking implementation, test, or release gates.
+Architecture primitives are tables, persistent states, endpoints, Pipeline fields, Artifact kinds, crates, dependencies, services, images, Providers, feature flags, compatibility readers and fallbacks. Their default allowed increase is zero.
 
-A durable design for one of those boundaries is `change/review-first` with risk profile `normal` unless it changes a tracked external contract. Mark its risk gate `critical-target`, record a design-level invariant/threat/rejection/rollback/recovery matrix, and obtain one independent design review before implementation relies on it; do not run adversarial product tests or release gates for the design document itself.
+## 4. Implement the smallest complete slice
 
-`critical` requires an invariant/threat/rejection/rollback/recovery matrix, adversarial tests, and independent final review. `contract` requires the contract and consumers in the same value unit. `multi` adds a dependency DAG, serial hotspot owners, integration batches, and one train integrator.
+1. Make the narrowest change that satisfies the acceptance behavior.
+2. Keep contract, implementation, consumer, tests and required docs in one WP.
+3. Do not add forwarding service/repository/manager layers, single-implementation factories, plugin registries, shadow DTOs or future compatibility.
+4. Prefer two short repetitions over a premature framework. Abstract only after three real callers, unless the frozen contract already requires two implementations.
+5. Keep Rust domain types authoritative. Generate OpenAPI and TypeScript; do not repair type errors with dynamic Value, aliases, casts or duplicate models.
+6. Run a deletion pass before commit.
 
-## Start a mutating unit
+Stop and re-slice a normal small task when it exceeds 300 net handwritten production lines, 10 handwritten files, two business crates, two frontend pages, or any undeclared architecture primitive. Also stop after two failed implementation paths, 20 minutes without a compiling skeleton, or 45 minutes without a local green result.
 
-1. Define one independently acceptable and reversible value boundary.
-2. Inspect Git/deployment state only to the extent needed for the selected mode. Use `.agents/skills/flori-delivery-train/scripts/delivery-snapshot.sh start` for the compact Git baseline when Git changes are in scope.
-3. Preserve unrelated changes. Use a lease worktree when work is parallel, main is dirty, or isolation is needed.
-4. Keep the work item compact. Always record outcome, scope, baseline, mode/profiles, validation, and remaining work. Add agent leases, hotspot owners, release, deployment, and content-delivery fields only when triggered.
-5. Assign one integrator. For `multi`, freeze the DAG and shared owners before parallel implementation.
+## 5. Stop only for a real boundary change
 
-## Implement and validate
+Ask the user again only when:
 
-1. Build the smallest complete vertical value; keep contract, migration, consumers, tests, and required docs in the same unit.
-2. Run new and directly related tests through `scripts/test.sh`. Use a unique `TEST_WARM_NAME` in a worktree. Do not run product tests for governance-only or ordinary read-only documentation work; use proportional static validation. A formal reviewer of a `contract` or `critical` candidate may rerun reviewer-scoped contract, risk-matrix, adversarial, or otherwise unverifiable tests without converting the review into `change`.
-3. Bind reusable evidence to candidate identity, inputs, command, runtime config, dependency image, and result. A candidate that includes ignored durable files uses a composite digest covering those files. Reuse the result only while the first five dimensions remain unchanged.
-4. Let implementers run targeted tests, reviewers challenge changed risks and unverifiable evidence, integrators run touched-path integration, and final CI run the full gate. Do not repeat the same full suite at every role.
-5. Default `normal` to one implementation review. Default `contract` and `critical` to one implementation review plus one independent final review. Freeze the candidate before final review and reopen only for a new P0/P1 inside the changed boundary; defer P2/P3 and hypothetical mixed-version support instead of growing the active unit.
-6. For `review-first`, leave the candidate inspectable and uncommitted until the user approves.
+1. the frozen product behavior or keep/delete decision must change;
+2. an undeclared architecture primitive is required;
+3. the complexity alarm cannot be resolved by splitting;
+4. the approved fixture, tool or environment cannot perform the acceptance method;
+5. work would spend unapproved AI money or mutate accounts, production, credentials, public networking or data;
+6. CI exposes an issue owned by another WP.
 
-## Ship or operate only when selected
+Do not stop merely to request diff review, commit permission, push permission or permission to fix in-scope CI.
 
-- Preserve one value commit per acceptance/rollback boundary. One complete released project has one version, carried by its final value commit. Checkpoints are recovery points and must be squashed before main; do not create commits for agents or review rounds.
-- Before the first push, amend a promoted `commit-only` unit or the final `multi` value commit to include the one version bump; the train may instead squash into one complete project commit. Do not create a version-only commit by default. Allow `build(release)` only when the value commits are already on a shared remote and history must not be rewritten, and record that reason. Use Git tags or GitHub Releases as release markers.
-- For `multi`, integrate by dependency batch, then amend/squash the version once, push once, and deploy once. Run builds early only when build inputs changed.
-- For content delivery, follow `.local/delivery/README.txt`; keep catalog, state, batch, Bug, and processing authorities separate.
-- For CI tuning, follow `docs/12-cicd.md` and use historical simulation plus bounded experiment cycles; do not churn main.
-- For production/destructive operations, require a precise target manifest, recoverable backup when needed, fail-closed checks, and post-operation reconciliation.
+## 6. Validate by risk
 
-## Default to cold upgrades on the personal NAS
+| Level | Default evidence |
+|---|---|
+| L0 | Static checks, links and decision simulations |
+| L1 | fmt/check/typecheck plus direct unit tests |
+| L2 | L1 plus a real SQLite, HTTP or sidecar integration |
+| L3 | L2 plus adversarial inputs, crash points, idempotency and independent final review |
 
-The default backend release model is a maintenance-window cold upgrade, not zero-downtime mixed-version operation:
+Mocks may replace external sites, Qoder/Codex and media tools. They must not replace DAG execution, SQLite transactions, Artifact commit, evidence resolution or frontend contracts.
 
-1. Pause new intake and subscriptions.
-2. Let short jobs finish; record and cancel or defer long jobs.
-3. Create and verify an exact DR generation.
-4. Stop Scheduler, API, MCP, and every Worker that can write current state.
-5. Start one product version, let one migration owner upgrade the database, and verify schema, ledger, readiness, and component versions.
-6. Explicitly rerun or resubmit invalidated steps, resume intake, and perform external acceptance.
+Bind reusable evidence to candidate identity, input, command, runtime configuration, dependency image and result. Re-run only when one of the first five changes or the reviewer cannot verify it.
 
-Do not extend old/new Scheduler or Worker coexistence, automatic active-DAG reshaping, old-writer-to-new-schema bridges, permanent support for every historical artifact schema, or generation machinery that exists only for rolling upgrades. Keep current compatibility code unless a bounded cleanup is separately authorized. Reopen such work only for an explicit zero-downtime or independently upgraded multi-node requirement. Exact DR, migration atomicity, idempotent commits, duplicate-AI-charge prevention, security, and evidence integrity remain mandatory.
+## 7. Coordinate sub-agents only when useful
 
-## Close at the reached mode
+Default to one Agent. Use parallel agents only for at least three independent nodes or when the user explicitly asks.
 
-1. Reconcile acceptance items and report only evidence relevant to stages actually reached.
-2. For `change`, update the work item and leave the reviewable candidate; do not perform release-only checks.
-3. For `ship` or a worktree-backed `change`, use `.agents/skills/flori-delivery-train/scripts/delivery-snapshot.sh close <task-branch>` to verify relevant Git state. Add `--extra <label=path>` for ignored durable candidate files, then reclaim only resources created by this unit when authorized.
-4. For `operate`, reconcile the affected runtime/content authorities and recovery evidence.
-5. Never claim success for skipped or unverified gates. State which later modes were not requested.
+Before delegation, assign each child:
+
+- one WP value and dependency state;
+- a disjoint path scope and non-goals;
+- contract revision, fixture and architecture budget;
+- test command and first evidence deadline;
+- shared hotspot owner and cleanup condition.
+
+Cargo.lock, SQLite schema, Pipeline schema, Artifact manifest, Runner OpenAPI, frontend router/generated types, CI and Compose each have one owner. Children do not change final version, integration branch, production or product scope. The main Agent integrates, verifies, commits, pushes and reclaims worktrees.
+
+Use `$FLORI_WORKING_DIR/wt/<slug>` for parallel or dirty-tree work. Each worktree has its own target/tmp. Never run task-scoped `cargo clean` on shared caches.
+
+## 8. Deliver without process inflation
+
+For an approved `deliver` packet:
+
+```text
+implement -> local minimum green -> deletion pass -> risk review
+          -> intentional commit -> push -> in-scope CI fix-forward -> report
+```
+
+- One independently acceptable and reversible value equals one commit.
+- Checkpoints and review rounds are not final commits; squash fixups before integration.
+- Small tasks do not need long worklogs. Keep one compact record for a WP, migration, operation or long investigation.
+- Do not bump the product version for rust-vnext intermediate or governance commits. Bump once at an actual release candidate.
+- CI is final evidence, not an interactive design loop. Get a local green result before push.
+- If the branch has no applicable CI yet, state that fact; do not expand the task by modifying CI owned by a later WP.
+
+## 9. Protect operations
+
+`operate` requires an exact target, rejection conditions, rollback or recovery, and post-operation reconciliation.
+
+- Ordinary upgrades do not create Flori backups.
+- A schema-changing upgrade stops all writers and retains the old SQLite and image. Migration failure exits and rolls back; do not add compatibility reads.
+- NAS owns Artifact backup and disaster recovery.
+- `delete_source` removes the whole Source and verifies no logical or physical orphan remains.
+- Production main merge, deployment, data deletion, credential changes and WP16 cold cutover always need explicit user authorization.
+
+## 10. Close at the authorized endpoint
+
+Report the delivered value, candidate or commit, exact validation, complexity delta and remaining dependency. Check task-owned branches/worktrees before finishing and reclaim only resources created by the task.
+
+Never claim CI, deployment or external verification that did not run.

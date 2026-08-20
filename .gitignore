@@ -1,50 +1,48 @@
-# 数据 / 运行时产物
+# Runtime and user data
 data/
+artifacts/
 inbox/
 output/
 backups/
-
-# 敏感
-.env
 cookies/
+*.db
+*.db-shm
+*.db-wal
 
-# 部署:模板入 git(deploy/),真实密钥/私钥/边缘 .env 不入
+# Secrets and local configuration
+.env
+*.pem
+*.key
 deploy/edge/.env
-deploy/tunnel/ssh/*
-!deploy/tunnel/ssh/.gitkeep
+deploy/tunnel/ssh/
 
-# Python
+# Rust
+target/
+**/target/
+
+# TypeScript
+node_modules/
+dist/
+frontend/.generated/
+
+# Python sidecar caches
 __pycache__/
 *.pyc
 .venv/
 *.egg-info/
 .pytest_cache/
-.hypothesis/          # schemathesis/hypothesis 本地缓存
-mutants/              # mutmut 变异测试工作目录(整份源码副本,本地 run 会生成)
-mutmut-cicd-stats.json
 
-# Node
-node_modules/
-dist/
-
-# OS
-.DS_Store
-
-# IDE
-.vscode/
-.idea/
-docs/bak/
-LOCAL.md
-.githooks/
-shared/PLAN.md
-plans/
+# Agent and local work
+.local/
+.qoder/
+.codex/
+.playwright-mcp/
 .claude/*
 !.claude/skills
-.coverage
+LOCAL.md
+.githooks/
 
-# 个人暂存/归档(笔记、旧计划、部署速查等,不入 git)
-.local/
-.playwright-mcp/
-
-# qodercli 在仓库内跑时会落 session 缓存,属工具产物不入 git
-.qoder/
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
