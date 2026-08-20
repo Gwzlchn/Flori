@@ -72,11 +72,46 @@ pub(super) async fn inputs(
     attempt_id: AttemptId,
 ) {
     let values = [
-        (ArtifactId::from_str("018f0000-0000-7000-8000-000000000001").expect("fixed artifact"), "original", "source_original", "application/pdf", "source.pdf", b"%PDF".as_slice()),
-        (ArtifactId::generate(), "structure", "document_structure", "application/json", "document.json", DOCUMENT.as_bytes()),
-        (ArtifactId::generate(), "smart_note", "smart_note", "text/markdown", "note.md", NOTE.as_bytes()),
-        (ArtifactId::generate(), "summary", "summary", "text/markdown", "summary.md", SUMMARY.as_bytes()),
-        (ArtifactId::generate(), "terms", "terms", "application/json", "terms.json", TERMS.as_bytes()),
+        (
+            ArtifactId::from_str("018f0000-0000-7000-8000-000000000001").expect("fixed artifact"),
+            "original",
+            "source_original",
+            "application/pdf",
+            "source.pdf",
+            b"%PDF".as_slice(),
+        ),
+        (
+            ArtifactId::generate(),
+            "structure",
+            "document_structure",
+            "application/json",
+            "document.json",
+            DOCUMENT.as_bytes(),
+        ),
+        (
+            ArtifactId::generate(),
+            "smart_note",
+            "smart_note",
+            "text/markdown",
+            "note.md",
+            NOTE.as_bytes(),
+        ),
+        (
+            ArtifactId::generate(),
+            "summary",
+            "summary",
+            "text/markdown",
+            "summary.md",
+            SUMMARY.as_bytes(),
+        ),
+        (
+            ArtifactId::generate(),
+            "terms",
+            "terms",
+            "application/json",
+            "terms.json",
+            TERMS.as_bytes(),
+        ),
     ];
     for (id, name, kind, media_type, file_name, body) in values {
         let relative = task_artifact_path(source_id, job_id, task_id, id, file_name).expect("path");

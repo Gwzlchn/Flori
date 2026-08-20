@@ -7,7 +7,7 @@ use flori_store::artifact::{UploadRecord, task_artifact_path};
 use super::{CrashPoint, Fixture, Reserved, digest, evidence_bytes, seed};
 
 impl Fixture {
-    pub(super) async fn reserve(&self, point: CrashPoint) -> Reserved {
+    pub(crate) async fn reserve(&self, point: CrashPoint) -> Reserved {
         let bytes = evidence_bytes();
         let sha256 = digest(&bytes);
         let attempt_id = AttemptId::generate();
@@ -120,7 +120,7 @@ impl Fixture {
     }
 }
 
-pub(super) async fn assert_reserved(fixture: &Fixture, reserved: &Reserved, state: &str) {
+pub(crate) async fn assert_reserved(fixture: &Fixture, reserved: &Reserved, state: &str) {
     let upload: (String, i64) =
         sqlx::query_as("SELECT state,received_bytes FROM uploads WHERE id=?")
             .bind(reserved.upload_id.to_string())
