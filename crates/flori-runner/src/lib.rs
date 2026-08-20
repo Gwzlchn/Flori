@@ -27,6 +27,6 @@ pub use ai::{
 };
 pub use client::{ClientError, RunnerClient};
 pub use daemon::{DaemonConfig, run as run_ai_daemon};
-pub use media::pdf::{PdfAcquireConfig, acquire_pdf};
+pub use media::pdf::{PdfAcquireConfig, PdfExtractConfig, PdfExtraction, acquire_pdf, extract_pdf};
 pub use spool::{Spool, SpoolError, SpoolUpload};
 pub use upload::manifest_sha256;
