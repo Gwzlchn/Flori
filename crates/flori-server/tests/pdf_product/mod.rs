@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use flori_core::{AiTool, DomainId, JobId, PipelineId, RunnerId};
+use flori_core::{AiTool, DomainId, JobId, PipelineId, RunnerId, SourceKind};
 use flori_runner::{DaemonConfig, RunnerClient};
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -106,6 +106,180 @@ impl Drop for Harness {
         if !self.preserve {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+}
+
+async fn start_media(harness: &Harness, image: &str) -> (DockerRunner, String) {
+    let media = RunnerClient::register(
+        &harness.base_url(),
+        fixture::MEDIA_REGISTRATION,
+        &fixture::media_capabilities(),
+    )
+    .await
+    .expect("register media Runner");
+    assert_eq!(media.runner_id, harness.media_runner_id);
+    (
+        DockerRunner::start(&harness.root, image, &harness.base_url(), &media.token),
+        media.token,
+    )
+}
+
+pub(super) async fn run_scanned(image: &str) {
+    let root = std::env::temp_dir().join(format!(
+        "flori-pdf-scan-{}",
+        flori_core::RequestId::generate()
+    ));
+    let harness = Harness::new(
+        root,
+        false,
+        fixture::FAKE_PROMPT,
+        fixture::MODEL,
+        fixture::EFFORT,
+    )
+    .await;
+    let pdf =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/vnext/scanned-paper.pdf");
+    let (_, job_id) = harness.upload_job(&pdf, "pdf-scanned").await;
+    let (mut media, _) = start_media(&harness, image).await;
+    wait_for_failed_job(&harness.pool, job_id, &mut media).await;
+
+    let job: (String, Option<String>) =
+        sqlx::query_as("SELECT state,error_code FROM jobs WHERE id=?")
+            .bind(job_id.to_string())
+            .fetch_one(&harness.pool)
+            .await
+            .expect("failed scanned PDF Job");
+    assert_eq!(
+        job,
+        ("failed".into(), Some("unsupported_scanned_pdf".into()))
+    );
+    let tasks: Vec<(String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT t.task_key,t.state,t.error_code,count(a.id) FROM tasks t LEFT JOIN attempts a ON a.task_id=t.id WHERE t.job_id=? GROUP BY t.id ORDER BY t.task_key",
+    )
+    .bind(job_id.to_string())
+    .fetch_all(&harness.pool)
+    .await
+    .expect("scanned PDF Tasks");
+    assert_eq!(
+        tasks,
+        vec![
+            (
+                "acquire".into(),
+                "failed".into(),
+                Some("unsupported_scanned_pdf".into()),
+                1
+            ),
+            (
+                "extract".into(),
+                "canceled".into(),
+                Some("task_canceled".into()),
+                0
+            ),
+            (
+                "note".into(),
+                "canceled".into(),
+                Some("task_canceled".into()),
+                0
+            ),
+            (
+                "publish".into(),
+                "canceled".into(),
+                Some("task_canceled".into()),
+                0
+            ),
+            ("translate".into(), "skipped".into(), None, 0),
+            (
+                "validate".into(),
+                "canceled".into(),
+                Some("task_canceled".into()),
+                0
+            ),
+        ]
+    );
+    let ai_usage: i64 = sqlx::query_scalar("SELECT count(*) FROM ai_usage WHERE job_id=?")
+        .bind(job_id.to_string())
+        .fetch_one(&harness.pool)
+        .await
+        .expect("AI usage count");
+    assert_eq!(ai_usage, 0, "scan rejection must happen before AI");
+    let downstream_artifacts: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM artifacts a JOIN tasks t ON t.id=a.task_id WHERE a.job_id=? AND t.task_key<>'acquire'",
+    )
+    .bind(job_id.to_string())
+    .fetch_one(&harness.pool)
+    .await
+    .expect("downstream Artifact count");
+    assert_eq!(downstream_artifacts, 0);
+    let artifact_kinds: Vec<String> =
+        sqlx::query_scalar("SELECT kind FROM artifacts WHERE job_id=? ORDER BY kind")
+            .bind(job_id.to_string())
+            .fetch_all(&harness.pool)
+            .await
+            .expect("scan rejection Artifacts");
+    assert_eq!(artifact_kinds, vec!["task_log"]);
+    let uploads: i64 = sqlx::query_scalar("SELECT count(*) FROM uploads")
+        .fetch_one(&harness.pool)
+        .await
+        .expect("upload ledger count");
+    assert_eq!(uploads, 0);
+}
+
+pub(super) async fn run_input_matrix(image: &str) {
+    let root = std::env::temp_dir().join(format!(
+        "flori-pdf-inputs-{}",
+        flori_core::RequestId::generate()
+    ));
+    let harness = Harness::new(
+        root,
+        false,
+        fixture::FAKE_PROMPT,
+        fixture::MODEL,
+        fixture::EFFORT,
+    )
+    .await;
+    let pdf =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/vnext/digital-paper.pdf");
+    let (_, upload) = harness.upload_job(&pdf, "pdf-input-upload").await;
+    let (_, direct) = harness
+        .remote_job(
+            SourceKind::PdfUrl,
+            "https://arxiv.org/pdf/1706.03762",
+            "pdf-input-url",
+        )
+        .await;
+    let (_, arxiv) = harness
+        .remote_job(
+            SourceKind::Arxiv,
+            "https://arxiv.org/abs/1706.03762",
+            "pdf-input-arxiv",
+        )
+        .await;
+    let jobs = [upload, direct, arxiv];
+    let (mut media, _) = start_media(&harness, image).await;
+    for job_id in jobs {
+        wait_for_task(&harness.pool, job_id, "acquire", &mut media).await;
+    }
+
+    let rows: Vec<(String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT s.kind,j.pipeline_revision_id,r.pipeline_id,t.executor,count(a.id) FROM jobs j JOIN sources s ON s.id=j.source_id JOIN pipeline_revisions r ON r.id=j.pipeline_revision_id JOIN tasks t ON t.job_id=j.id AND t.task_key='acquire' LEFT JOIN artifacts a ON a.task_id=t.id AND a.kind='source_original' WHERE j.id IN (?,?,?) GROUP BY j.id ORDER BY s.kind",
+    )
+    .bind(upload.to_string())
+    .bind(direct.to_string())
+    .bind(arxiv.to_string())
+    .fetch_all(&harness.pool)
+    .await
+    .expect("PDF input acquire contracts");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+        ["arxiv", "pdf_upload", "pdf_url"]
+    );
+    let revision = &rows[0].1;
+    for (_, revision_id, pipeline_id, executor, original_count) in &rows {
+        assert_eq!(revision_id, revision);
+        assert_eq!(pipeline_id, &harness.pipeline_id.to_string());
+        assert_eq!(executor, "document.acquire");
+        assert_eq!(*original_count, 1);
     }
 }
 
@@ -288,6 +462,28 @@ async fn wait_for_task(pool: &SqlitePool, job_id: JobId, task_key: &str, media: 
     })
     .await
     .expect("runner-media did not finish the PDF fixture in 120 seconds");
+}
+
+async fn wait_for_failed_job(pool: &SqlitePool, job_id: JobId, media: &mut DockerRunner) {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=?")
+                .bind(job_id.to_string())
+                .fetch_one(pool)
+                .await
+                .expect("scanned PDF Job state");
+            match state.as_str() {
+                "failed" => break,
+                "succeeded" | "canceled" => {
+                    panic!("scanned PDF Job unexpectedly ended as {state}")
+                }
+                _ => media.assert_running(),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("runner-media did not reject the scanned PDF in 120 seconds");
 }
 
 async fn wait_for_job(pool: &SqlitePool, job_id: JobId, daemon: &AiDaemon, timeout: Duration) {

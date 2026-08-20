@@ -6,8 +6,8 @@ use std::{
 };
 
 use flori_core::{
-    CreateJobRequest, CreateUploadSource, CreatedJob, DocumentStructure, ErrorCode, JobId,
-    JobInputs, SourceId, SourceKind,
+    CreateJobRequest, CreateRemoteSource, CreateUploadSource, CreatedJob, CreatedSource,
+    DocumentStructure, ErrorCode, JobId, JobInputs, SourceId, SourceKind,
 };
 use flori_runner::{DaemonConfig, RunnerClient, run_ai_daemon};
 use tokio::{sync::watch, task::JoinHandle};
@@ -24,20 +24,14 @@ pub(super) struct Ingested {
 }
 
 impl Harness {
-    pub(super) async fn ingest(
-        &self,
-        image: &str,
-        pdf_path: &Path,
-        model: &str,
-        effort: &str,
-    ) -> Ingested {
-        let pdf = fs::read(pdf_path).expect("read digital PDF");
+    pub(super) async fn upload_job(&self, pdf_path: &Path, request_key: &str) -> (SourceId, JobId) {
+        let pdf = fs::read(pdf_path).expect("read PDF");
         let created = http::upload_pdf(
             self.address,
             &CreateUploadSource {
-                request_key: "pdf-product-upload".into(),
+                request_key: format!("{request_key}-source"),
                 kind: SourceKind::PdfUpload,
-                title: Some("Flori vNext PDF Product Acceptance".into()),
+                title: Some("Flori vNext PDF Acceptance".into()),
                 domain_id: self.domain_id,
                 collection_ids: Vec::new(),
                 file_sha256: fixture::digest(&pdf),
@@ -49,24 +43,57 @@ impl Harness {
             &pdf,
         )
         .await;
+        let job = self.create_job(created.source_id, request_key).await;
+        (created.source_id, job)
+    }
+
+    pub(super) async fn remote_job(
+        &self,
+        kind: SourceKind,
+        canonical_ref: &str,
+        request_key: &str,
+    ) -> (SourceId, JobId) {
+        let created: CreatedSource = http::post_json(
+            self.address,
+            "/api/v1/sources",
+            &CreateRemoteSource {
+                request_key: format!("{request_key}-source"),
+                kind,
+                canonical_ref: canonical_ref.into(),
+                title: Some("Flori vNext remote PDF acceptance".into()),
+                domain_id: self.domain_id,
+                collection_ids: Vec::new(),
+                credential_id: None,
+            },
+        )
+        .await;
+        let job = self.create_job(created.source_id, request_key).await;
+        (created.source_id, job)
+    }
+
+    async fn create_job(&self, source_id: SourceId, request_key: &str) -> JobId {
         let job: CreatedJob = http::post_json(
             self.address,
-            &format!("/api/v1/sources/{}/jobs", created.source_id),
+            &format!("/api/v1/sources/{source_id}/jobs"),
             &CreateJobRequest {
-                request_key: "pdf-product-job".into(),
+                request_key: format!("{request_key}-job"),
                 pipeline_id: self.pipeline_id,
                 inputs: JobInputs { translate: false },
             },
         )
         .await;
-        let media = RunnerClient::register(
-            &self.base_url(),
-            fixture::MEDIA_REGISTRATION,
-            &fixture::media_capabilities(),
-        )
-        .await
-        .expect("register media Runner");
-        assert_eq!(media.runner_id, self.media_runner_id);
+        job.job_id
+    }
+
+    pub(super) async fn ingest(
+        &self,
+        image: &str,
+        pdf_path: &Path,
+        model: &str,
+        effort: &str,
+    ) -> Ingested {
+        let (source_id, job_id) = self.upload_job(pdf_path, "pdf-product").await;
+        let (mut media_process, media_token) = super::start_media(self, image).await;
         let qoder = RunnerClient::register(
             &self.base_url(),
             fixture::QODER_REGISTRATION,
@@ -75,16 +102,14 @@ impl Harness {
         .await
         .expect("register Qoder Runner");
         assert_eq!(qoder.runner_id, self.qoder_runner_id);
-        let mut media_process =
-            DockerRunner::start(&self.root, image, &self.base_url(), &media.token);
-        wait_for_task(&self.pool, job.job_id, "extract", &mut media_process).await;
-        let document = assertions::load_document(&self.pool, &self.artifact_root, job.job_id).await;
+        wait_for_task(&self.pool, job_id, "extract", &mut media_process).await;
+        let document = assertions::load_document(&self.pool, &self.artifact_root, job_id).await;
         let media_log = media_process.log_path.clone();
         drop(media_process);
         Ingested {
-            source_id: created.source_id,
-            job_id: job.job_id,
-            media_token: media.token,
+            source_id,
+            job_id,
+            media_token,
             qoder_token: qoder.token,
             media_log,
             document,
