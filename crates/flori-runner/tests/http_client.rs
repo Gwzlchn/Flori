@@ -83,6 +83,18 @@ fn artifact(name: &str, byte: char) -> ArtifactManifestEntry {
     }
 }
 
+#[test]
+fn remote_runner_requires_https() {
+    assert_eq!(
+        RunnerClient::new("http://example.com", "token")
+            .err()
+            .expect("public HTTP must fail")
+            .code(),
+        ErrorCode::InvalidRequest
+    );
+    RunnerClient::new("http://localhost:8080", "token").expect("loopback test transport");
+}
+
 #[tokio::test]
 async fn register_and_poll_use_protocol_and_bearer_headers() {
     let returned_token = ["long", "lived"].join("-");

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use flori_core::{
@@ -53,7 +54,11 @@ impl RunnerClient {
     pub fn new(base_url: &str, bearer_token: impl Into<String>) -> Result<Self, ClientError> {
         let mut base_url =
             Url::parse(base_url).map_err(|_| ClientError::local(ErrorCode::InvalidRequest))?;
-        if !matches!(base_url.scheme(), "http" | "https")
+        let local_http = base_url.scheme() == "http"
+            && base_url.host_str().is_some_and(|host| {
+                host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+            });
+        if !(base_url.scheme() == "https" || local_http)
             || base_url.cannot_be_a_base()
             || base_url.host().is_none()
             || !base_url.username().is_empty()
