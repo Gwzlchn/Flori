@@ -110,7 +110,7 @@ pub(super) async fn run(
         working_directory: workspace.to_owned(),
         timeout: Duration::from_millis(claim.timeout_ms),
         max_output_bytes: config.max_output_bytes,
-        proxy_url: config.proxy_url.clone(),
+        proxy_url: config.proxy_url.clone().ok_or(ErrorCode::InvalidRequest)?,
     };
     let result = match config.tool {
         #[cfg(feature = "qoder")]
@@ -487,8 +487,13 @@ mod tests {
             effort: "high".into(),
             renew_interval: Duration::from_secs(1),
             max_output_bytes: 1024 * 1024,
-            proxy_url: (tool == AiTool::QoderCli)
-                .then(|| reqwest::Url::parse("http://proxy.invalid:10809").expect("proxy")),
+            proxy_url: Some(
+                reqwest::Url::parse(match tool {
+                    AiTool::QoderCli => "http://qoder-proxy.invalid:10809",
+                    AiTool::CodexCli => "http://codex-proxy.invalid:10810",
+                })
+                .expect("proxy"),
+            ),
         };
         let (_keep, mut cancel) = watch::channel(false);
         let claim = claim(executor, timeout_ms);

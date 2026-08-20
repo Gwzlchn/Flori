@@ -31,7 +31,7 @@ pub struct AiProcessConfig {
     pub working_directory: PathBuf,
     pub timeout: Duration,
     pub max_output_bytes: usize,
-    pub proxy_url: Option<Url>,
+    pub proxy_url: Url,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,11 +79,6 @@ pub async fn run_ai_process(
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<AiProcessOutput, AiProcessError> {
     validate(config)?;
-    let proxy = match (&config.tool, &config.proxy_url) {
-        (AiTool::QoderCli, Some(url)) => Some(url),
-        (AiTool::CodexCli, None) => None,
-        _ => return Err(AiProcessError::new(ErrorCode::InvalidRequest)),
-    };
     let mut command = Command::new(&config.executable);
     command
         .args(&config.arguments)
@@ -97,18 +92,20 @@ pub async fn run_ai_process(
         .kill_on_drop(true)
         .process_group(0);
     match config.tool {
+        #[cfg(feature = "qoder")]
         AiTool::QoderCli => command.env("QODER_CONFIG_DIR", &config.tool_config_home),
+        #[cfg(feature = "codex")]
         AiTool::CodexCli => command.env("CODEX_HOME", &config.tool_config_home),
+        #[allow(unreachable_patterns)]
+        _ => return Err(AiProcessError::new(ErrorCode::InvalidRequest)),
     };
-    if let Some(proxy) = proxy {
-        let value = proxy.as_str().trim_end_matches('/');
-        command.envs([
-            ("HTTP_PROXY", value),
-            ("http_proxy", value),
-            ("HTTPS_PROXY", value),
-            ("https_proxy", value),
-        ]);
-    }
+    let value = config.proxy_url.as_str().trim_end_matches('/');
+    command.envs([
+        ("HTTP_PROXY", value),
+        ("http_proxy", value),
+        ("HTTPS_PROXY", value),
+        ("https_proxy", value),
+    ]);
     let mut child = command
         .spawn()
         .map_err(|_| AiProcessError::new(ErrorCode::ExecutorFailed))?;
@@ -353,8 +350,8 @@ mod tests {
     async fn prompt_is_stdin_and_environment_is_explicit() {
         let root = TestDir::new();
         let script = concat!(
-            "printf 'argc=%s home=%s config=%s leak=%s\\n' \"$#\" \"$HOME\" ",
-            "\"$CODEX_HOME\" \"${AWS_SECRET_ACCESS_KEY-unset}\"; ",
+            "printf 'argc=%s home=%s config=%s proxy=%s leak=%s\\n' \"$#\" \"$HOME\" ",
+            "\"$CODEX_HOME\" \"$HTTPS_PROXY\" \"${AWS_SECRET_ACCESS_KEY-unset}\"; ",
             "IFS= read -r value; printf 'prompt-bytes=%s' \"${#value}\""
         );
         let config = config(&root.0, Duration::from_secs(2), 4096, script);
@@ -368,6 +365,7 @@ mod tests {
         assert!(stdout.contains("argc=0"));
         assert!(stdout.contains(&format!("home={}", root.0.join("home").display())));
         assert!(stdout.contains(&format!("config={}", root.0.join("config").display())));
+        assert!(stdout.contains("proxy=http://codex-proxy.internal:10810"));
         assert!(stdout.contains("leak=unset"));
         assert!(stdout.contains("prompt-bytes=17"));
         assert!(!stdout.contains("TOP_SECRET_PROMPT"));
@@ -558,7 +556,7 @@ mod tests {
             working_directory: root.to_owned(),
             timeout,
             max_output_bytes,
-            proxy_url: None,
+            proxy_url: Url::parse("http://codex-proxy.internal:10810").expect("Codex proxy"),
         }
     }
 }

@@ -177,6 +177,7 @@ fn validate(config: &DaemonConfig) -> Result<(), ErrorCode> {
 
 fn valid_proxy(config: &DaemonConfig) -> bool {
     match (&config.tool, &config.proxy_url) {
+        #[cfg(feature = "qoder")]
         (AiTool::QoderCli, Some(url)) => {
             url.scheme() == "http"
                 && url.host().is_some()
@@ -186,7 +187,16 @@ fn valid_proxy(config: &DaemonConfig) -> bool {
                 && url.query().is_none()
                 && url.fragment().is_none()
         }
-        (AiTool::CodexCli, None) => true,
+        #[cfg(feature = "codex")]
+        (AiTool::CodexCli, Some(url)) => {
+            url.scheme() == "http"
+                && url.host().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+        }
         _ => false,
     }
 }

@@ -156,7 +156,7 @@ mod tests {
             working_directory: root.to_owned(),
             timeout: Duration::from_secs(2),
             max_output_bytes: 4096,
-            proxy_url: Some(Url::parse("http://proxy.internal:10809").expect("proxy")),
+            proxy_url: Url::parse("http://proxy.internal:10809").expect("proxy"),
         }
     }
 }

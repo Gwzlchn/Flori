@@ -24,10 +24,19 @@ fn environment(tool: AiTool) -> HashMap<&'static str, OsString> {
     ]);
     match tool {
         AiTool::QoderCli => {
-            values.insert("FLORI_AI_PROXY_URL", "http://proxy.internal:10809".into());
+            values.insert(
+                "FLORI_QODER_PROXY_URL",
+                "http://qoder-proxy.internal:10809".into(),
+            );
             values.insert("QODER_CONFIG_DIR", "/home/flori/.qoder".into())
         }
-        AiTool::CodexCli => values.insert("CODEX_HOME", "/home/flori/.codex".into()),
+        AiTool::CodexCli => {
+            values.insert(
+                "FLORI_CODEX_PROXY_URL",
+                "http://codex-proxy.internal:10810".into(),
+            );
+            values.insert("CODEX_HOME", "/home/flori/.codex".into())
+        }
     };
     values
 }
@@ -76,9 +85,12 @@ fn parses_qoder_and_codex_without_external_actions() {
         match tool {
             AiTool::QoderCli => assert_eq!(
                 config.proxy_url.as_ref().map(|url| url.as_str()),
-                Some("http://proxy.internal:10809/")
+                Some("http://qoder-proxy.internal:10809/")
             ),
-            AiTool::CodexCli => assert!(config.proxy_url.is_none()),
+            AiTool::CodexCli => assert_eq!(
+                config.proxy_url.as_ref().map(|url| url.as_str()),
+                Some("http://codex-proxy.internal:10810/")
+            ),
         }
     }
 }
@@ -118,10 +130,11 @@ fn binary_rejects_missing_configuration_without_an_http_request() {
         ("FLORI_RUNNER_SPOOL_DIR", "/tmp/flori-runner-test"),
         ("HOME", "/tmp/flori-home-test"),
         ("CODEX_HOME", "/tmp/flori-codex-test"),
+        ("FLORI_CODEX_PROXY_URL", "http://codex-proxy.internal:10810"),
     ];
     for missing in base.map(|(name, _)| name) {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_flori-runner"));
-        command.args(["run", "codex"]).env_clear();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_flori-runner-ai-codex"));
+        command.env_clear();
         for (name, value) in base {
             if name != missing {
                 command.env(name, value);
@@ -154,6 +167,10 @@ fn rejects_every_missing_or_empty_setting_before_a_client_exists() {
             AiTool::QoderCli => "QODER_CONFIG_DIR",
             AiTool::CodexCli => "CODEX_HOME",
         };
+        let proxy_name = match tool {
+            AiTool::QoderCli => "FLORI_QODER_PROXY_URL",
+            AiTool::CodexCli => "FLORI_CODEX_PROXY_URL",
+        };
         for name in [
             "FLORI_SERVER_URL",
             "FLORI_RUNNER_TOKEN",
@@ -162,6 +179,7 @@ fn rejects_every_missing_or_empty_setting_before_a_client_exists() {
             "FLORI_RUNNER_SPOOL_DIR",
             "HOME",
             config_name,
+            proxy_name,
         ] {
             let mut missing = environment(tool);
             missing.remove(name);
@@ -176,25 +194,6 @@ fn rejects_every_missing_or_empty_setting_before_a_client_exists() {
                 parse_with(tool_name, &empty).err(),
                 Some(RuntimeConfigError::InvalidEnvironment(name))
             );
-        }
-        if tool == AiTool::QoderCli {
-            for value in [None, Some(OsString::new())] {
-                let mut invalid = environment(tool);
-                match value {
-                    Some(value) => {
-                        invalid.insert("FLORI_AI_PROXY_URL", value);
-                    }
-                    None => {
-                        invalid.remove("FLORI_AI_PROXY_URL");
-                    }
-                }
-                let expected = if invalid.contains_key("FLORI_AI_PROXY_URL") {
-                    RuntimeConfigError::InvalidEnvironment("FLORI_AI_PROXY_URL")
-                } else {
-                    RuntimeConfigError::MissingEnvironment("FLORI_AI_PROXY_URL")
-                };
-                assert_eq!(parse_with(tool_name, &invalid).err(), Some(expected));
-            }
         }
     }
 }
@@ -247,7 +246,7 @@ fn allows_loopback_http_but_requires_absolute_directories() {
 }
 
 #[test]
-fn qoder_proxy_is_a_bare_http_authority_and_errors_never_echo_it() {
+fn provider_proxies_are_bare_http_authorities_and_errors_never_echo_them() {
     for invalid in [
         "https://proxy.internal:10809",
         "http://user@proxy.internal:10809",
@@ -258,25 +257,53 @@ fn qoder_proxy_is_a_bare_http_authority_and_errors_never_echo_it() {
         "http:///missing-host",
         "not-a-url",
     ] {
-        let mut values = environment(AiTool::QoderCli);
-        values.insert("FLORI_AI_PROXY_URL", invalid.into());
-        let error = parse_with("qoder", &values).err().expect("invalid proxy");
-        assert_eq!(
-            error,
-            RuntimeConfigError::InvalidEnvironment("FLORI_AI_PROXY_URL")
-        );
-        assert_eq!(error.to_string(), "invalid environment: FLORI_AI_PROXY_URL");
-        assert!(!error.to_string().contains(invalid));
+        for (tool, name, variable) in [
+            (AiTool::QoderCli, "qoder", "FLORI_QODER_PROXY_URL"),
+            (AiTool::CodexCli, "codex", "FLORI_CODEX_PROXY_URL"),
+        ] {
+            let mut values = environment(tool);
+            values.insert(variable, invalid.into());
+            let error = parse_with(name, &values).err().expect("invalid proxy");
+            assert_eq!(error, RuntimeConfigError::InvalidEnvironment(variable));
+            assert_eq!(
+                error.to_string(),
+                format!("invalid environment: {variable}")
+            );
+            assert!(!error.to_string().contains(invalid));
+        }
     }
 }
 
 #[test]
-fn codex_does_not_consume_the_qoder_proxy_setting() {
-    let mut values = environment(AiTool::CodexCli);
-    values.insert(
-        "FLORI_AI_PROXY_URL",
-        "http://user:secret@should-not-be-read.invalid".into(),
-    );
-    let config = parse_with("codex", &values).expect("Codex config");
-    assert!(config.proxy_url.is_none());
+fn provider_proxies_never_fallback_or_cross_contaminate() {
+    for (tool, name, own, other, expected) in [
+        (
+            AiTool::QoderCli,
+            "qoder",
+            "FLORI_QODER_PROXY_URL",
+            "FLORI_CODEX_PROXY_URL",
+            "http://qoder-proxy.internal:10809/",
+        ),
+        (
+            AiTool::CodexCli,
+            "codex",
+            "FLORI_CODEX_PROXY_URL",
+            "FLORI_QODER_PROXY_URL",
+            "http://codex-proxy.internal:10810/",
+        ),
+    ] {
+        let mut values = environment(tool);
+        values.insert(other, "http://other-provider.invalid:10811".into());
+        let config = parse_with(name, &values).expect("own proxy wins");
+        assert_eq!(
+            config.proxy_url.as_ref().map(|url| url.as_str()),
+            Some(expected)
+        );
+
+        values.remove(own);
+        assert_eq!(
+            parse_with(name, &values).err(),
+            Some(RuntimeConfigError::MissingEnvironment(own))
+        );
+    }
 }
