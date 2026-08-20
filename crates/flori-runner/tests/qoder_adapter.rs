@@ -48,6 +48,11 @@ fn commands_are_fixed_and_keep_prompt_and_secrets_out_of_audit_arguments() {
         note.arguments().last().map(String::as_str),
         Some("WebSearch")
     );
+    assert!(note.arguments().windows(2).any(|pair| pair
+        == [
+            "--settings",
+            r#"{"advanced":{"useProxyFromEnvironment":true}}"#
+        ]));
     assert!(note.arguments().iter().all(|arg| !arg.contains(prompt)));
     assert!(
         note.arguments()

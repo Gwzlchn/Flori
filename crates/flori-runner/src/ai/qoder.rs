@@ -89,6 +89,8 @@ pub fn invocation_command(
         "--input-format",
         "text",
         "--no-session-persistence",
+        "--settings",
+        r#"{"advanced":{"useProxyFromEnvironment":true}}"#,
         "--permission-mode",
         "dont_ask",
         "--max-model-request-retries",
