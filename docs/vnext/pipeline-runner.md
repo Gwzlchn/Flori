@@ -323,7 +323,7 @@ secret_inputs
 
 `resolved_inputs` 的 Artifact 只给经过授权、短期有效的 HTTPS 下载 URL和摘要。`secret_inputs` 只在目标 download Task claim 中带 cookie 值，不进入任何持久 Task JSON。
 
-若 Task声明 `task_log`，认领事务同时创建唯一的服务端 upload ledger；logs endpoint只按sequence追加这个staging文件。`LogFrame.line` 是完整 `TaskLogLine` JSON，不是任意文本。Attempt终态时Server计算摘要并按 `when=always` 提交已有日志；Runner不显式上传同名文件，也不把 `task_log` 计入终态manifest摘要。Runner失联时允许提交已收到的部分日志，但缺失的required log/audit只阻止Task成功，不阻止Attempt过期或Job失败。
+若 Task声明 `task_log`，认领事务同时创建唯一的服务端 upload ledger；logs endpoint只按sequence追加这个staging文件。`LogFrame.line` 是完整 `TaskLogLine` JSON，不是任意文本。NAS中的 `task_log` 是日志正文的唯一真相；SQLite只记录不含正文和摘要的 `log_cursor`。Attempt终态时Server计算摘要并按 `when=always` 提交已有日志；Runner不显式上传同名文件，也不把 `task_log` 计入终态manifest摘要。Runner失联时允许提交已收到的部分日志，但缺失的required log/audit只阻止Task成功，不阻止Attempt过期或Job失败。
 
 默认 lease 60 秒，Runner 每 20 秒调用续租。服务端可在部署配置中调节，但必须满足 renew 小于 lease 的一半。Task timeout 到达、Job取消、Runner禁用或 lease 到期后，`exec_id` 立即失效。
 

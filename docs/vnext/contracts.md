@@ -191,7 +191,7 @@ manifest 是服务端控制文件，不是额外 Artifact kind。Server 在 uplo
 
 `retention=source` 输入可直接绑定，因为其寿命本来就是整个 Source。新 Job的 `input_bindings_json` 只能指向自身 Artifact或同Source的 `retention=source` Artifact。重试必须先比较ledger request摘要，再从冻结commit继续。
 
-所有需要持久日志的 Runner Task 都声明一个 `task_log`；AI Task 还声明 `ai_audit`。Task认领事务预建服务端日志ledger，logs endpoint把严格 `TaskLogLine` 原始JSON加换行写入其staging文件。`task_log` 不在Runner提交的manifest摘要中；Server终态时独立校验sequence、摘要和声明，再与Runner上传的entry一起提交。未声明文件只存在于 Attempt 临时目录，结束后删除，UI 不提供访问。`core.*` 的状态变化进入 `job_events`，不伪造 Runner 日志 Artifact。
+所有需要持久日志的 Runner Task 都声明一个 `task_log`；AI Task 还声明 `ai_audit`。Task认领事务预建服务端日志ledger，logs endpoint把严格 `TaskLogLine` 原始JSON加换行写入其staging文件。NAS中的 `task_log` 是日志正文的唯一真相；SQLite `job_events` 只保存 `log_cursor` 元数据，不保存日志行、message或摘要。`task_log` 不在Runner提交的manifest摘要中；Server终态时独立校验sequence、摘要和声明，再与Runner上传的entry一起提交。未声明文件只存在于 Attempt 临时目录，结束后删除，UI 不提供访问。`core.*` 的状态变化进入 `job_events`，不伪造 Runner 日志 Artifact。
 
 ### Artifact 内容类型
 
