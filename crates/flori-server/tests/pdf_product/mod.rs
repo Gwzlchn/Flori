@@ -6,6 +6,7 @@ mod process;
 use std::{
     fs,
     net::SocketAddr,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -50,6 +51,8 @@ pub(super) struct RealConfig {
 impl Harness {
     async fn new(root: PathBuf, preserve: bool, prompt: &str, model: &str, effort: &str) -> Self {
         fs::create_dir(&root).expect("create PDF product root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("protect PDF product root");
         let sqlite_path = root.join("flori.sqlite");
         let artifact_root = root.join("artifacts");
         let store = Arc::new(Store::open(&sqlite_path).await.expect("empty SQLite"));
@@ -98,6 +101,35 @@ impl Harness {
 
     fn preserve(&mut self) {
         self.preserve = true;
+    }
+}
+
+struct PrivateQoderRuntime(PathBuf);
+
+impl PrivateQoderRuntime {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "flori-real-qoder-{}",
+            flori_core::RequestId::generate()
+        ));
+        fs::create_dir(&root).expect("create private Qoder runtime");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("protect private Qoder runtime");
+        Self(root)
+    }
+
+    fn home(&self) -> PathBuf {
+        self.0.join("unused-home")
+    }
+
+    fn work(&self) -> PathBuf {
+        self.0.join("work")
+    }
+}
+
+impl Drop for PrivateQoderRuntime {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -379,10 +411,7 @@ pub(super) async fn run_real(config: RealConfig) {
     let ingested = harness
         .ingest(&config.image, &config.pdf, &config.model, &config.effort)
         .await;
-    let home = harness.root.join("qoder-home");
-    let work = harness.root.join("qoder-work");
-    fs::create_dir(&home).expect("create Qoder HOME");
-    fs::create_dir(&work).expect("create Qoder work root");
+    let runtime = PrivateQoderRuntime::new();
     let client = RunnerClient::new(&harness.base_url(), ingested.qoder_token.clone())
         .expect("Qoder Runner client");
     let daemon = AiDaemon::start(
@@ -390,9 +419,9 @@ pub(super) async fn run_real(config: RealConfig) {
         DaemonConfig {
             tool: AiTool::QoderCli,
             executable: config.executable,
-            home,
+            home: runtime.home(),
             tool_config_home: config.config_home,
-            work_root: work,
+            work_root: runtime.work(),
             model: config.model,
             effort: config.effort,
             renew_interval: Duration::from_secs(5),
@@ -408,6 +437,9 @@ pub(super) async fn run_real(config: RealConfig) {
     )
     .await;
     daemon.stop().await;
+    drop(runtime);
+    assert!(!harness.root.join("qoder-home").exists());
+    assert!(!harness.root.join("qoder-work").exists());
     let receipt = assertions::verify_and_write_receipt(&VerifyContext {
         pool: &harness.pool,
         sqlite_path: &harness.sqlite_path,
