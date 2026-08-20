@@ -26,7 +26,7 @@ pub fn app(
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use flori_core::{AttemptId, CreateRunnerSlot, ErrorResponse, Sha256Digest};
+    use flori_core::{AttemptId, CreateRunnerSlot, ErrorResponse, Sha256Digest, UploadId};
     use sha2::{Digest, Sha256};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -139,6 +139,41 @@ mod tests {
         .await;
         assert_eq!(status(&poll), 204);
 
+        let upload_path = format!("/runner/v1/uploads/{}", UploadId::generate());
+        let valid_digest = format!("X-Flori-Chunk-SHA256: {}", "a".repeat(64));
+        let uppercase_digest = format!("X-Flori-Chunk-SHA256: {}", "A".repeat(64));
+        for invalid_headers in [
+            vec![
+                "Upload-Offset: 0",
+                "Upload-Offset: 0",
+                &valid_digest,
+                "Content-Type: application/octet-stream",
+            ],
+            vec![
+                "Upload-Offset: 01",
+                &valid_digest,
+                "Content-Type: application/octet-stream",
+            ],
+            vec![
+                "Upload-Offset: 0",
+                &uppercase_digest,
+                "Content-Type: application/octet-stream",
+            ],
+            vec![
+                "Upload-Offset: 0",
+                &valid_digest,
+                "Content-Type: text/plain",
+            ],
+        ] {
+            let mut headers = vec!["X-Flori-Protocol: 1", &authorization];
+            headers.extend(invalid_headers);
+            assert_error(
+                &exchange(address, put_request(&upload_path, &headers, "x")).await,
+                400,
+                ErrorCode::InvalidRequest,
+            );
+        }
+
         let exec_id = AttemptId::generate();
         assert_error(
             &exchange(
@@ -224,6 +259,10 @@ mod tests {
         request.push_str("\r\n");
         request.push_str(body);
         request
+    }
+
+    fn put_request(path: &str, headers: &[&str], body: &str) -> String {
+        request(path, headers, body).replacen("POST ", "PUT ", 1)
     }
 
     async fn exchange(address: std::net::SocketAddr, request: String) -> Vec<u8> {
