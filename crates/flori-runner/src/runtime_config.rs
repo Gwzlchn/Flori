@@ -26,6 +26,11 @@ pub(crate) struct RuntimeConfig {
     pub(crate) tool_config_dir: PathBuf,
 }
 
+pub(crate) struct MediaRuntimeConfig {
+    pub(crate) client: RunnerClient,
+    pub(crate) spool_dir: PathBuf,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeConfigError {
     InvalidArguments,
@@ -77,6 +82,21 @@ pub(crate) fn parse(
         home_dir,
         tool_config_dir,
     })
+}
+
+pub(crate) fn parse_media(
+    args: &[OsString],
+    mut environment: impl FnMut(&str) -> Option<OsString>,
+) -> Result<MediaRuntimeConfig, RuntimeConfigError> {
+    if args != ["run", "media"] {
+        return Err(RuntimeConfigError::InvalidArguments);
+    }
+    let server_url = required_text(&mut environment, SERVER_URL)?;
+    let token = required_text(&mut environment, TOKEN)?;
+    let spool_dir = required_path(&mut environment, SPOOL_DIR)?;
+    let client = RunnerClient::new(&server_url, token)
+        .map_err(|_| RuntimeConfigError::InvalidEnvironment(SERVER_URL))?;
+    Ok(MediaRuntimeConfig { client, spool_dir })
 }
 
 fn required_text(

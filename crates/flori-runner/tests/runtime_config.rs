@@ -4,7 +4,7 @@ mod runtime_config;
 use std::{collections::HashMap, ffi::OsString, net::TcpListener, path::PathBuf, process::Command};
 
 use flori_core::AiTool;
-use runtime_config::{RuntimeConfigError, parse};
+use runtime_config::{RuntimeConfigError, parse, parse_media};
 
 fn args(tool: &str) -> Vec<OsString> {
     ["run", tool].into_iter().map(Into::into).collect()
@@ -71,6 +71,28 @@ fn parses_qoder_and_codex_without_external_actions() {
         assert_eq!(config.home_dir, PathBuf::from("/home/flori"));
         assert_eq!(config.tool_config_dir, PathBuf::from(config_dir));
     }
+}
+
+#[test]
+fn parses_media_without_ai_configuration() {
+    let values = HashMap::from([
+        (
+            "FLORI_SERVER_URL",
+            OsString::from("https://flori.example.test"),
+        ),
+        ("FLORI_RUNNER_TOKEN", OsString::from("runner-token")),
+        (
+            "FLORI_RUNNER_SPOOL_DIR",
+            OsString::from("/var/lib/flori-runner/spool"),
+        ),
+    ]);
+    let config =
+        parse_media(&args("media"), |name| values.get(name).cloned()).expect("valid media config");
+    let _client = &config.client;
+    assert_eq!(
+        config.spool_dir,
+        PathBuf::from("/var/lib/flori-runner/spool")
+    );
 }
 
 #[test]
