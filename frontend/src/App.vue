@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 
 import { apiClient, apiError, type components } from "./api/client";
 import JobPanel from "./components/JobPanel.vue";
+import PdfReader from "./components/PdfReader.vue";
 
 const setup = ref<components["schemas"]["PdfSetupView"]>();
 const selectedFile = ref<File>();
@@ -12,6 +13,10 @@ const uploadKey = ref("");
 const jobKey = ref("");
 const busy = ref(false);
 const notice = ref("正在读取 PDF 配置…");
+const EVIDENCE_HINT = "点击笔记中的证据引用可跳到原文页。";
+const evidence = ref<components["schemas"]["EvidenceView"]>();
+const activeEvidenceId = ref("");
+const evidenceStatus = ref(EVIDENCE_HINT);
 const textContent = reactive(new Map<string, string>());
 const fileUrls = reactive(new Map<string, string>());
 const textKinds = new Set<components["schemas"]["ArtifactKind"]>([
@@ -21,6 +26,25 @@ const fileKinds = new Set<components["schemas"]["ArtifactKind"]>([
   "source_original", "figure", "table_region",
 ]);
 let pollTimer: number | undefined;
+
+function artifactOf(
+  kind: components["schemas"]["ArtifactKind"],
+): components["schemas"]["ArtifactView"] | undefined {
+  return job.value?.artifacts.find((artifact) => artifact.kind === kind);
+}
+
+function textOf(kind: components["schemas"]["ArtifactKind"]): string | undefined {
+  const artifact = artifactOf(kind);
+  return artifact ? textContent.get(artifact.artifact_id) : undefined;
+}
+
+const sourcePdf = computed(() => artifactOf("source_original"));
+const pdfUrl = computed(() => {
+  const artifact = sourcePdf.value;
+  return artifact ? fileUrls.get(artifact.artifact_id) : undefined;
+});
+const noteText = computed(() => textOf("smart_note"));
+const summaryText = computed(() => textOf("summary"));
 
 function chooseFile(event: Event): void {
   if (event.currentTarget instanceof HTMLInputElement) {
@@ -35,6 +59,56 @@ function rememberJob(id: string): void {
   const url = new URL(window.location.href);
   url.searchParams.set("job_id", id);
   history.replaceState(null, "", url);
+}
+
+function rememberEvidence(id: string): void {
+  const url = new URL(window.location.href);
+  if (id) url.searchParams.set("evidence_id", id);
+  else url.searchParams.delete("evidence_id");
+  history.replaceState(null, "", url);
+}
+
+function resetEvidence(): void {
+  evidence.value = undefined;
+  activeEvidenceId.value = "";
+  evidenceStatus.value = EVIDENCE_HINT;
+  rememberEvidence("");
+}
+
+async function selectEvidence(id: string): Promise<void> {
+  const current = job.value;
+  const pdf = sourcePdf.value;
+  activeEvidenceId.value = id;
+  rememberEvidence(id);
+  if (!current) return;
+  if (!pdf) {
+    evidenceStatus.value = "artifact_missing: 缺少原始 PDF，无法定位证据。";
+    return;
+  }
+  evidenceStatus.value = "正在读取证据…";
+  try {
+    const result = await apiClient.GET("/api/v1/evidence/{evidence_id}", {
+      params: { path: { evidence_id: id } },
+    });
+    if (activeEvidenceId.value !== id || job.value?.job_id !== current.job_id) return;
+    if (!result.data) {
+      evidenceStatus.value = apiError(result.error, "evidence_read_failed: 无法读取证据。");
+      return;
+    }
+    const view = result.data;
+    if (view.job_id !== current.job_id
+      || view.source_id !== current.source_id
+      || view.source_artifact_id !== pdf.artifact_id
+      || view.locator.kind !== "pdf") {
+      evidenceStatus.value = "evidence_mismatch: 该证据不属于当前 PDF，已拒绝跳转。";
+      return;
+    }
+    evidence.value = view;
+    evidenceStatus.value = `已定位第 ${view.locator.value.page} 页。`;
+  } catch {
+    if (activeEvidenceId.value !== id || job.value?.job_id !== current.job_id) return;
+    evidenceStatus.value = "network_temporary: 无法读取证据，请稍后重试。";
+  }
 }
 
 function clearArtifacts(): void {
@@ -121,6 +195,7 @@ async function submit(): Promise<void> {
       return;
     }
     clearArtifacts();
+    resetEvidence();
     rememberJob(created.data.job_id);
     await refreshJob();
   } catch {
@@ -136,8 +211,14 @@ onMounted(async () => {
     setup.value = result.data;
     notice.value = result.data ? "请选择一个数字版 PDF。" : apiError(result.error, "setup_failed: PDF 尚未配置。");
   } catch { notice.value = "network_temporary: 无法读取 PDF 配置。"; }
-  const saved = new URL(window.location.href).searchParams.get("job_id");
-  if (saved) { rememberJob(saved); await refreshJob(); }
+  const params = new URL(window.location.href).searchParams;
+  const savedJob = params.get("job_id");
+  const savedEvidence = params.get("evidence_id");
+  if (savedJob) {
+    rememberJob(savedJob);
+    await refreshJob();
+    if (savedEvidence) await selectEvidence(savedEvidence);
+  }
 });
 onUnmounted(() => { window.clearTimeout(pollTimer); clearArtifacts(); });
 </script>
@@ -179,6 +260,16 @@ onUnmounted(() => { window.clearTimeout(pollTimer); clearArtifacts(); });
         {{ notice }}
       </p>
     </section>
+    <PdfReader
+      v-if="job"
+      :note="noteText"
+      :summary="summaryText"
+      :pdf-url="pdfUrl"
+      :evidence="evidence"
+      :active-evidence-id="activeEvidenceId"
+      :status="evidenceStatus"
+      @select="selectEvidence"
+    />
     <JobPanel
       v-if="job"
       :job="job"
