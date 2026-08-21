@@ -30,7 +30,7 @@ async fn three_pdf_inputs_execute_one_pipeline_acquire_contract_when_external_is
 }
 
 #[tokio::test]
-async fn uploaded_pdf_reaches_current_with_real_qoder_when_explicitly_authorized() {
+async fn attention_pdf_meets_real_qoder_quality_gate_when_explicitly_authorized() {
     let root = match std::env::var("FLORI_REAL_QODER_ROOT") {
         Ok(root) => root,
         Err(std::env::VarError::NotPresent) => {

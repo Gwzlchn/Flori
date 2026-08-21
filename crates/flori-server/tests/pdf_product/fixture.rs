@@ -21,13 +21,11 @@ pub(super) const MEDIA_REGISTRATION: &str = "pdf-product-media-registration";
 pub(super) const QODER_REGISTRATION: &str = "pdf-product-qoder-registration";
 pub(super) const MODEL: &str = "fake-qoder-model";
 pub(super) const EFFORT: &str = "high";
+pub(super) const ATTENTION_PDF_SHA256: &str =
+    "bdfaa68d8984f0dc02beaca527b76f207d99b666d31d1da728ee0728182df697";
 pub(super) const FAKE_PROMPT: &str =
     "Generate a readable note, summary, terms, and exact PDF evidence.";
-pub(super) const REAL_PROMPT: &str = r#"Return only the flori.ai_result.v1 JSON requested by the runtime schema.
-Read the DocumentStructure JSON and select one text block, preferring one containing Transformer.
-Create one canonical lowercase UUID version 7 evidence_id. Copy the selected block's text into quote verbatim. Copy its page and every decimal bbox coordinate without rounding. Copy DocumentStructure.source_artifact_id exactly.
-Use that same evidence_id in the factual text, summary, and one term. Every reference marker must be [[evidence:<evidence_id>]].
-smart_note_markdown must contain the headings ## 来源事实 and ## AI 分析. State source facts only in the first section. Put interpretation in the second section and include the exact word Transformer so the published note is searchable."#;
+pub(super) const QUALITY_PROMPT: &str = include_str!("../../../../prompts/document_note.md");
 
 #[derive(Clone)]
 pub(super) struct ExpectedEvidence {

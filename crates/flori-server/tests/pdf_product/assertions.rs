@@ -1,8 +1,8 @@
-use std::{fs, net::SocketAddr, path::Path};
+use std::{collections::BTreeSet, fs, net::SocketAddr, path::Path};
 
 use flori_core::{
-    AiAudit, AiTool, DocumentStructure, EvidenceManifest, JobId, SourceId, TaskLogLine,
-    TermsManifest,
+    AiAudit, AiTool, DocumentStructure, EvidenceLocator, EvidenceManifest, JobId, SourceId,
+    TaskLogLine, TermsManifest,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -52,12 +52,14 @@ struct Receipt {
     source_id: SourceId,
     job_id: JobId,
     source_input_path: String,
+    ai_call_count: usize,
     usage: Vec<UsageReceipt>,
     artifacts: Vec<ArtifactReceipt>,
 }
 
 #[derive(Serialize)]
 struct UsageReceipt {
+    invocation_key: String,
     tool: String,
     model: String,
     effort: String,
@@ -203,19 +205,29 @@ pub(super) async fn verify_and_write_receipt(context: &VerifyContext<'_>) -> Str
         assert_eq!(entry.locator, expected.locator);
         assert_eq!(entry.quote, expected.quote);
     }
+    let quality_invocations = matches!(context.mode, VerifyMode::Real)
+        .then(|| verify_attention_quality(&artifacts, &evidence));
 
     http::verify_search_and_evidence(context, &evidence).await;
     let usage = usage(context.pool, context.job_id).await;
-    assert_eq!(usage.len(), 1);
-    assert_eq!(usage[0].tool, "qoder_cli");
-    assert_eq!(usage[0].state, "final");
-    assert_eq!(
-        (usage[0].input_tokens, usage[0].output_tokens),
-        (None, None)
-    );
+    assert!(usage.iter().all(|row| row.tool == "qoder_cli"
+        && row.state == "final"
+        && row.input_tokens.is_none()
+        && row.output_tokens.is_none()));
     match context.mode {
-        VerifyMode::Fake { .. } => assert_eq!(usage[0].credits_micros, Some(1_250_000)),
-        VerifyMode::Real => assert!(usage[0].credits_micros.is_some_and(|credits| credits > 0)),
+        VerifyMode::Fake { .. } => {
+            assert_eq!(usage.len(), 1);
+            assert_eq!(usage[0].credits_micros, Some(1_250_000));
+        }
+        VerifyMode::Real => {
+            assert_eq!(Some(usage.len()), quality_invocations);
+            assert!((1..=2).contains(&usage.len()));
+            assert!(
+                usage
+                    .iter()
+                    .all(|row| row.credits_micros.is_some_and(|credits| credits > 0))
+            );
+        }
     }
     assert_no_secrets(context, &artifacts);
     let receipt_path = context
@@ -231,6 +243,7 @@ pub(super) async fn verify_and_write_receipt(context: &VerifyContext<'_>) -> Str
         source_id: context.source_id,
         job_id: context.job_id,
         source_input_path: source_input,
+        ai_call_count: usage.len(),
         usage,
         artifacts,
     };
@@ -274,16 +287,136 @@ fn strict_content(kind: &str, bytes: &[u8], evidence: &mut Option<EvidenceManife
     }
 }
 
+fn verify_attention_quality(artifacts: &[ArtifactReceipt], evidence: &EvidenceManifest) -> usize {
+    let bytes = |kind| {
+        let path = &artifacts
+            .iter()
+            .find(|artifact| artifact.kind == kind)
+            .unwrap_or_else(|| panic!("missing quality Artifact {kind}"))
+            .absolute_path;
+        fs::read(path).unwrap_or_else(|error| panic!("read {kind}: {error}"))
+    };
+    let document: DocumentStructure =
+        serde_json::from_slice(&bytes("document_structure")).expect("quality document");
+    let terms: TermsManifest = serde_json::from_slice(&bytes("terms")).expect("quality terms");
+    let audit: AiAudit = serde_json::from_slice(&bytes("ai_audit")).expect("quality audit");
+    let note = String::from_utf8(bytes("smart_note")).expect("quality smart note");
+    let summary = String::from_utf8(bytes("summary")).expect("quality summary");
+
+    for heading in [
+        "### 研究背景、问题与贡献",
+        "### 方法与整体设计",
+        "### 核心机制与工作流程",
+        "### 训练或评估设计",
+        "### 主要结果",
+        "### Figure 与 Table 解读",
+        "### 局限性、适用边界与未决问题",
+    ] {
+        assert!(note.contains(heading), "quality note missing {heading}");
+    }
+    for topic in [
+        &["Self-Attention", "自注意力"][..],
+        &["Scaled Dot-Product Attention", "缩放点积注意力"][..],
+        &["Multi-Head Attention", "多头注意力"][..],
+        &["Positional Encoding", "位置编码"][..],
+    ] {
+        assert!(topic.iter().any(|term| note.contains(term)));
+    }
+    assert!(note.chars().count() >= 1_800 && chinese_chars(&note) >= 500);
+    assert!(summary.chars().count() >= 180 && chinese_chars(&summary) >= 80);
+    assert!(terms.terms.len() >= 6);
+    assert!(
+        terms
+            .terms
+            .iter()
+            .all(|term| chinese_chars(&term.explanation) >= 8)
+    );
+    assert!(evidence.items.len() >= 6);
+    let pages = evidence
+        .items
+        .iter()
+        .filter_map(|item| match item.locator {
+            EvidenceLocator::Pdf { page, .. } => Some(page),
+            EvidenceLocator::Video { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let quotes = evidence
+        .items
+        .iter()
+        .map(|item| item.quote.split_whitespace().collect::<String>())
+        .collect::<BTreeSet<_>>();
+    assert!(pages.len() >= 3 && quotes.len() >= 6);
+    for needles in [
+        &["encoder", "decoder", "model architecture"][..],
+        &[
+            "scaled dot-product attention",
+            "multi-head attention",
+            "self-attention",
+        ][..],
+        &["bleu", "wmt 2014", "outperforms", "table 3"][..],
+    ] {
+        assert!(evidence_has(&evidence.items, needles));
+    }
+    assert!(document.figures.iter().any(|figure| {
+        evidence
+            .items
+            .iter()
+            .any(|entry| pdf_source_matches(entry, figure.page, &figure.bbox, &figure.caption))
+    }));
+    assert!(
+        document.tables.iter().any(
+            |table| evidence.items.iter().any(|entry| pdf_source_matches(
+                entry,
+                table.page,
+                &table.bbox,
+                &table.caption
+            ) || pdf_source_matches(
+                entry,
+                table.page,
+                &table.bbox,
+                &table.text
+            ))
+        )
+    );
+    assert!((1..=2).contains(&audit.usage_invocation_keys.len()));
+    audit.usage_invocation_keys.len()
+}
+
+fn evidence_has(items: &[flori_core::EvidenceEntry], needles: &[&str]) -> bool {
+    items.iter().any(|item| {
+        let quote = item.quote.to_ascii_lowercase();
+        needles.iter().any(|needle| quote.contains(needle))
+    })
+}
+
+fn pdf_source_matches(
+    entry: &flori_core::EvidenceEntry,
+    page: u32,
+    bbox: &flori_core::PdfRect,
+    source: &str,
+) -> bool {
+    matches!(&entry.locator, EvidenceLocator::Pdf { page: actual, bbox: actual_bbox }
+        if *actual == page && actual_bbox == bbox)
+        && entry.quote.split_whitespace().eq(source.split_whitespace())
+}
+
+fn chinese_chars(value: &str) -> usize {
+    value
+        .chars()
+        .filter(|character| matches!(character, '\u{3400}'..='\u{9fff}'))
+        .count()
+}
+
 async fn usage(pool: &SqlitePool, job_id: JobId) -> Vec<UsageReceipt> {
-    sqlx::query_as::<_, (String, String, String, String, Option<i64>, Option<i64>, Option<i64>)>(
-        "SELECT tool,model,effort,state,input_tokens,output_tokens,credits_micros FROM ai_usage WHERE job_id=? ORDER BY id",
+    sqlx::query_as::<_, (String, String, String, String, String, Option<i64>, Option<i64>, Option<i64>)>(
+        "SELECT invocation_key,tool,model,effort,state,input_tokens,output_tokens,credits_micros FROM ai_usage WHERE job_id=? ORDER BY id",
     )
     .bind(job_id.to_string())
     .fetch_all(pool)
     .await
     .expect("AI usage")
     .into_iter()
-    .map(|row| UsageReceipt { tool: row.0, model: row.1, effort: row.2, state: row.3, input_tokens: row.4, output_tokens: row.5, credits_micros: row.6 })
+    .map(|row| UsageReceipt { invocation_key: row.0, tool: row.1, model: row.2, effort: row.3, state: row.4, input_tokens: row.5, output_tokens: row.6, credits_micros: row.7 })
     .collect()
 }
 

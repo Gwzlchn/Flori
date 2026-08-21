@@ -382,6 +382,15 @@ pub(super) async fn run(image: &str) {
 }
 
 pub(super) async fn run_real(config: RealConfig) {
+    assert_eq!(
+        (config.model.as_str(), config.effort.as_str()),
+        ("Ultimate", "high")
+    );
+    assert_eq!(
+        fixture::digest(&fs::read(&config.pdf).expect("read Attention PDF")).as_str(),
+        fixture::ATTENTION_PDF_SHA256,
+        "quality acceptance is fixed to Attention Is All You Need"
+    );
     assert!(
         config.root.is_absolute(),
         "real receipt root must be absolute"
@@ -403,7 +412,7 @@ pub(super) async fn run_real(config: RealConfig) {
     let mut harness = Harness::new(
         run_root,
         true,
-        fixture::REAL_PROMPT,
+        fixture::QUALITY_PROMPT,
         &config.model,
         &config.effort,
     )
