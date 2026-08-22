@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { apiClient, apiError, type components } from "./api/client";
 import JobPanel from "./components/JobPanel.vue";
 import PdfReader from "./components/PdfReader.vue";
+import SearchPanel from "./components/SearchPanel.vue";
 
 const setup = ref<components["schemas"]["PdfSetupView"]>();
 const selectedFile = ref<File>();
@@ -228,6 +229,7 @@ onUnmounted(() => { window.clearTimeout(pollTimer); clearArtifacts(); });
     <header>
       <h1>PDF 解析</h1><p>上传数字版 PDF，生成可追溯的智能笔记与证据。</p>
     </header>
+    <SearchPanel />
     <section
       class="card"
       aria-labelledby="upload-title"
