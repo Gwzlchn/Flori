@@ -64,6 +64,7 @@ async fn serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(Store::open(sqlite).await?);
     let artifacts = Arc::new(NasArtifactStore::new(artifact_root, max_artifact_bytes)?);
+    store.reconcile_source_deletes(&artifacts).await?;
     store.reconcile_uploads(&artifacts, now_ms()?).await?;
     store
         .bootstrap_pdf(

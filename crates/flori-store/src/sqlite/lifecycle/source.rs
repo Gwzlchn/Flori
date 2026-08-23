@@ -80,25 +80,20 @@ impl Store {
         &self,
         artifacts: &NasArtifactStore,
     ) -> Result<(), StoreError> {
-        let mut restored = false;
         for source_id in artifacts
             .source_delete_trash()
             .map_err(|error| StoreError::new(error.code()))?
         {
-            restored |= self.reconcile_source_delete(artifacts, source_id).await?;
+            self.reconcile_source_delete(artifacts, source_id).await?;
         }
-        if restored {
-            Err(StoreError::new(ErrorCode::Conflict))
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     async fn reconcile_source_delete(
         &self,
         artifacts: &NasArtifactStore,
         source_id: SourceId,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<(), StoreError> {
         let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sources WHERE id=?)")
             .bind(source_id.to_string())
             .fetch_one(&self.pool)
@@ -112,7 +107,7 @@ impl Store {
                 .finish_source_delete(source_id)
                 .map_err(|error| StoreError::new(error.code()))?;
         }
-        Ok(exists)
+        Ok(())
     }
 }
 

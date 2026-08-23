@@ -354,14 +354,10 @@ async fn delete_source_is_atomic_idempotent_and_recovers_both_crash_sides() {
     let trash = fixture.artifacts.join(".trash/sources");
     fs::create_dir_all(&trash).expect("trash root");
     fs::rename(&restored_root, trash.join(restored.source.to_string())).expect("crash before DB");
-    assert_eq!(
-        store
-            .reconcile_source_deletes(&artifacts)
-            .await
-            .expect_err("restore reports incomplete")
-            .code(),
-        ErrorCode::Conflict
-    );
+    store
+        .reconcile_source_deletes(&artifacts)
+        .await
+        .expect("restore incomplete delete");
     assert!(restored_root.is_dir());
 
     fs::rename(&restored_root, trash.join(restored.source.to_string())).expect("crash after DB");
