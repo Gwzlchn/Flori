@@ -1,4 +1,7 @@
-use flori_core::{ErrorCode, JobId};
+use flori_core::{
+    AttemptId, ErrorCode, JobEventPayload, JobId, JobState, JobStateEvent, TaskId, TaskState,
+    TaskStateEvent,
+};
 use sqlx::Row;
 
 use crate::artifact::NasArtifactStore;
@@ -43,6 +46,13 @@ impl Store {
             }
             _ => return Err(StoreError::new(ErrorCode::CorruptState)),
         }
+        let canceled = sqlx::query(
+            "SELECT id,current_attempt_id FROM tasks WHERE job_id=? \
+             AND state IN ('pending','ready','leased') ORDER BY id",
+        )
+        .bind(&id)
+        .fetch_all(&mut *transaction)
+        .await?;
         sqlx::query(
             "UPDATE attempts SET state='canceled',finished_at_ms=?,error_code='task_canceled', \
              error_message='parent job canceled' WHERE state='leased' AND task_id IN \
@@ -72,8 +82,43 @@ impl Store {
         if changed.rows_affected() != 1 {
             return Err(StoreError::new(ErrorCode::Conflict));
         }
+        for task in canceled {
+            super::super::events::insert_event(
+                &mut transaction,
+                &JobEventPayload::TaskState(TaskStateEvent {
+                    job_id,
+                    task_id: task
+                        .try_get::<String, _>("id")?
+                        .parse::<TaskId>()
+                        .map_err(|_| corrupt())?,
+                    state: TaskState::Canceled,
+                    attempt_id: task
+                        .try_get::<Option<String>, _>("current_attempt_id")?
+                        .map(|value| value.parse::<AttemptId>())
+                        .transpose()
+                        .map_err(|_| corrupt())?,
+                    error_code: Some(ErrorCode::TaskCanceled),
+                }),
+                now_ms,
+            )
+            .await?;
+        }
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::JobState(JobStateEvent {
+                job_id,
+                state: JobState::Canceled,
+                error_code: Some(ErrorCode::TaskCanceled),
+            }),
+            now_ms,
+        )
+        .await?;
         transaction.commit().await?;
         self.reconcile_uploads(artifacts, now_ms).await?;
         self.prune_source_jobs(artifacts, source_id).await
     }
+}
+
+fn corrupt() -> StoreError {
+    StoreError::new(ErrorCode::CorruptState)
 }

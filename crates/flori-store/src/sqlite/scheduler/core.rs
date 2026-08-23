@@ -2,7 +2,7 @@ use super::{
     super::{Store, StoreError},
     attempt::promote_ready,
 };
-use flori_core::{AttemptId, ErrorCode, JobId, TaskId, TaskState};
+use flori_core::{AttemptId, ErrorCode, JobEventPayload, JobId, TaskId, TaskState, TaskStateEvent};
 use sqlx::Row;
 
 impl Store {
@@ -70,14 +70,30 @@ impl Store {
             "UPDATE tasks SET state='succeeded',current_attempt_id=?,started_at_ms=?, \
              finished_at_ms=? WHERE id=? AND state='ready'",
         )
-        .bind(attempt_id)
+        .bind(&attempt_id)
         .bind(now_ms)
         .bind(now_ms)
         .bind(&task_id)
         .execute(&mut *transaction)
         .await?;
         promote_ready(&mut transaction, &job_id, now_ms).await?;
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::TaskState(TaskStateEvent {
+                job_id: job_id.parse().map_err(|_| corrupt())?,
+                task_id: task_id.parse().map_err(|_| corrupt())?,
+                state: TaskState::Succeeded,
+                attempt_id: Some(attempt_id.parse().map_err(|_| corrupt())?),
+                error_code: None,
+            }),
+            now_ms,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(TaskState::Succeeded)
     }
+}
+
+fn corrupt() -> StoreError {
+    StoreError::new(ErrorCode::CorruptState)
 }

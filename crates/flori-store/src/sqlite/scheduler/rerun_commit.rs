@@ -1,6 +1,9 @@
 use std::fmt::Write;
 
-use flori_core::{ArtifactKind, ArtifactRetention, ErrorCode, PendingMaterializeCommit, TaskState};
+use flori_core::{
+    ArtifactKind, ArtifactRetention, ErrorCode, JobEventPayload, JobState, JobStateEvent,
+    PendingMaterializeCommit, TaskState,
+};
 use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, Transaction};
 
@@ -101,7 +104,18 @@ pub(super) async fn commit_plan(
         &pending.job_id.to_string(),
         pending.created_at_ms,
     )
-    .await
+    .await?;
+    super::super::events::insert_event(
+        transaction,
+        &JobEventPayload::JobState(JobStateEvent {
+            job_id: pending.job_id,
+            state: JobState::Queued,
+            error_code: None,
+        }),
+        pending.created_at_ms,
+    )
+    .await?;
+    Ok(())
 }
 
 fn digest(value: &str) -> String {

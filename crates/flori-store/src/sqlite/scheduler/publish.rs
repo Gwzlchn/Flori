@@ -1,7 +1,10 @@
 use super::super::knowledge::rebuild_source_projection;
 use super::super::{Store, StoreError};
 use crate::artifact::NasArtifactStore;
-use flori_core::{AttemptId, ErrorCode, JobId, SourceId, TaskId};
+use flori_core::{
+    AttemptId, ErrorCode, JobEventPayload, JobId, JobState, JobStateEvent, SourceChangedEvent,
+    SourceId, TaskId, TaskState, TaskStateEvent,
+};
 use sqlx::Row;
 
 impl Store {
@@ -159,6 +162,36 @@ impl Store {
             transaction.rollback().await?;
             return Err(StoreError::new(ErrorCode::CorruptState));
         }
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::TaskState(TaskStateEvent {
+                job_id: job_id.parse().map_err(|_| corrupt())?,
+                task_id: task_id.parse().map_err(|_| corrupt())?,
+                state: TaskState::Succeeded,
+                attempt_id: Some(attempt_id.parse().map_err(|_| corrupt())?),
+                error_code: None,
+            }),
+            now_ms,
+        )
+        .await?;
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::JobState(JobStateEvent {
+                job_id: job_id.parse().map_err(|_| corrupt())?,
+                state: JobState::Succeeded,
+                error_code: None,
+            }),
+            now_ms,
+        )
+        .await?;
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::SourceChanged(SourceChangedEvent {
+                source_id: source_id.parse().map_err(|_| corrupt())?,
+            }),
+            now_ms,
+        )
+        .await?;
         transaction.commit().await?;
         if let Some(artifacts) = artifacts {
             self.prune_source_jobs(

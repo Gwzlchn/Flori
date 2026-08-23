@@ -8,9 +8,9 @@ use super::{
     wire::{executor, job_trigger, source_kind},
 };
 use flori_core::{
-    CompiledTaskSpec, DomainId, ErrorCode, JobId, JobInputs, JobTrigger, PipelineRevisionId,
-    PromptSnapshot, PromptSnapshotId, Sha256Digest, SourceId, SourceKind, TaskId,
-    TaskInputBindings, TaskInputReference,
+    CompiledTaskSpec, DomainId, ErrorCode, JobEventPayload, JobId, JobInputs, JobState,
+    JobStateEvent, JobTrigger, PipelineRevisionId, PromptSnapshot, PromptSnapshotId, Sha256Digest,
+    SourceId, SourceKind, TaskId, TaskInputBindings, TaskInputReference,
 };
 use flori_pipeline::{Compilation, RuleCondition};
 use sqlx::Row;
@@ -167,6 +167,16 @@ impl Store {
             .await?;
         }
         promote_ready(&mut transaction, &job_id.to_string(), input.created_at_ms).await?;
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::JobState(JobStateEvent {
+                job_id,
+                state: JobState::Queued,
+                error_code: None,
+            }),
+            input.created_at_ms,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(job_id)
     }

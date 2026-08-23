@@ -1,4 +1,4 @@
-use flori_core::{ErrorCode, SourceId, UploadId, UploadState};
+use flori_core::{ErrorCode, JobEventPayload, SourceChangedEvent, SourceId, UploadId, UploadState};
 
 use crate::artifact::{NasArtifactStore, RecoveryAction};
 use crate::sqlite::{Store, StoreError, scheduler::source_kind};
@@ -100,6 +100,14 @@ impl Store {
         if deleted.rows_affected() != 1 {
             return Err(StoreError::new(ErrorCode::CorruptState));
         }
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::SourceChanged(SourceChangedEvent {
+                source_id: pending.source_id,
+            }),
+            now_ms,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(pending.source_id)
     }

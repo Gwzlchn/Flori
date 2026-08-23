@@ -4,7 +4,10 @@ use super::{
     super::{Store, StoreError},
     wire::source_kind,
 };
-use flori_core::{CollectionId, DomainId, ErrorCode, Sha256Digest, SourceId, SourceKind};
+use flori_core::{
+    CollectionId, DomainId, ErrorCode, JobEventPayload, Sha256Digest, SourceChangedEvent, SourceId,
+    SourceKind,
+};
 use sqlx::{Row, Sqlite, Transaction};
 
 #[derive(Clone, Copy, Debug)]
@@ -80,6 +83,12 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         }
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::SourceChanged(SourceChangedEvent { source_id }),
+            input.created_at_ms,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(source_id)
     }

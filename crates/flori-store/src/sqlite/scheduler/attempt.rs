@@ -2,7 +2,10 @@ use super::{
     super::StoreError,
     wire::{error_code, transient},
 };
-use flori_core::{CompiledTaskSpec, ErrorCode, TaskState};
+use flori_core::{
+    AttemptId, CompiledTaskSpec, ErrorCode, JobEventPayload, JobId, JobState, JobStateEvent,
+    TaskId, TaskState, TaskStateEvent,
+};
 use sqlx::{Row, Sqlite, Transaction};
 
 fn ensure_one(result: sqlx::sqlite::SqliteQueryResult) -> Result<(), StoreError> {
@@ -40,6 +43,16 @@ pub(crate) async fn finish_success(
         .execute(&mut **transaction)
         .await?,
     )?;
+    task_event(
+        transaction,
+        job_id,
+        task_id,
+        Some(attempt_id),
+        TaskState::Succeeded,
+        None,
+        now_ms,
+    )
+    .await?;
     promote_ready(transaction, job_id, now_ms).await?;
     Ok(TaskState::Succeeded)
 }
@@ -81,6 +94,16 @@ pub(crate) async fn finish_failure(
             .execute(&mut **transaction)
             .await?,
         )?;
+        task_event(
+            transaction,
+            job_id,
+            task_id,
+            None,
+            TaskState::Ready,
+            None,
+            now_ms,
+        )
+        .await?;
         return Ok(TaskState::Ready);
     }
     ensure_one(
@@ -96,6 +119,16 @@ pub(crate) async fn finish_failure(
         .execute(&mut **transaction)
         .await?,
     )?;
+    task_event(
+        transaction,
+        job_id,
+        task_id,
+        Some(attempt_id),
+        TaskState::Failed,
+        Some(code),
+        now_ms,
+    )
+    .await?;
     sqlx::query(
         "UPDATE attempts SET state='canceled',finished_at_ms=?,error_code='task_canceled', \
          error_message='parent job failed' WHERE state='leased' AND task_id IN \
@@ -128,6 +161,16 @@ pub(crate) async fn finish_failure(
         .execute(&mut **transaction)
         .await?,
     )?;
+    super::super::events::insert_event(
+        transaction,
+        &JobEventPayload::JobState(JobStateEvent {
+            job_id: job_id.parse().map_err(|_| corrupt())?,
+            state: JobState::Failed,
+            error_code: Some(code),
+        }),
+        now_ms,
+    )
+    .await?;
     Ok(TaskState::Failed)
 }
 
@@ -160,14 +203,58 @@ pub(super) async fn promote_ready(
             }
         }
         if ready {
-            sqlx::query(
+            let changed = sqlx::query(
                 "UPDATE tasks SET state='ready',ready_at_ms=? WHERE id=? AND state='pending'",
             )
             .bind(now_ms)
             .bind(candidate.try_get::<String, _>("id")?)
             .execute(&mut **transaction)
             .await?;
+            if changed.rows_affected() == 1 {
+                task_event(
+                    transaction,
+                    job_id,
+                    candidate.try_get::<String, _>("id")?.as_str(),
+                    None,
+                    TaskState::Ready,
+                    None,
+                    now_ms,
+                )
+                .await?;
+            }
         }
     }
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn task_event(
+    transaction: &mut Transaction<'_, Sqlite>,
+    job_id: &str,
+    task_id: &str,
+    attempt_id: Option<&str>,
+    state: TaskState,
+    error_code: Option<ErrorCode>,
+    now_ms: i64,
+) -> Result<(), StoreError> {
+    super::super::events::insert_event(
+        transaction,
+        &JobEventPayload::TaskState(TaskStateEvent {
+            job_id: job_id.parse::<JobId>().map_err(|_| corrupt())?,
+            task_id: task_id.parse::<TaskId>().map_err(|_| corrupt())?,
+            state,
+            attempt_id: attempt_id
+                .map(str::parse::<AttemptId>)
+                .transpose()
+                .map_err(|_| corrupt())?,
+            error_code,
+        }),
+        now_ms,
+    )
+    .await?;
+    Ok(())
+}
+
+fn corrupt() -> StoreError {
+    StoreError::new(ErrorCode::CorruptState)
 }
