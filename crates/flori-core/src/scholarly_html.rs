@@ -5,7 +5,7 @@ use lol_html::{RewriteStrSettings, element, rewrite_str};
 pub fn sanitize_scholarly_html(
     html: &str,
     resources: &BTreeSet<&str>,
-    head: Option<&'static str>,
+    head: &'static str,
 ) -> Result<String, &'static str> {
     rewrite_str(
         html,
@@ -57,9 +57,7 @@ pub fn sanitize_scholarly_html(
                 Ok(())
             }))
             .append_element_content_handler(element!("head", move |item| {
-                if let Some(head) = head {
-                    item.append(head, lol_html::html_content::ContentType::Html);
-                }
+                item.append(head, lol_html::html_content::ContentType::Html);
                 Ok(())
             })),
     )
@@ -76,7 +74,7 @@ mod tests {
         let output = sanitize_scholarly_html(
             html,
             &BTreeSet::from(["scholarly_resources/ok.png"]),
-            Some("<style>body{color:black}</style>"),
+            "<style>body{color:black}</style>",
         )
         .expect("sanitize");
         assert!(output.contains("scholarly_resources/ok.png"));

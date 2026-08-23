@@ -213,14 +213,13 @@ impl ScholarlyHtmlSnapshot {
 }
 
 fn valid_scholarly_name(value: &str) -> bool {
-    value
-        .strip_prefix("scholarly_resources/")
-        .is_some_and(|name| {
-            !name.is_empty()
-                && name.len() <= 255
-                && !name.starts_with('.')
-                && !name.contains(['/', '\\', '\0'])
-        })
+    let Some(name) = value.strip_prefix("scholarly_resources/") else {
+        return false;
+    };
+    !name.is_empty()
+        && name.len() <= 255
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', '\0'])
 }
 
 #[cfg(test)]

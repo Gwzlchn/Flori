@@ -54,7 +54,7 @@ pub(super) fn sanitize(
     )
     .map_err(|_| ErrorCode::UnsupportedSource)?;
     let allowed = resources.values().map(String::as_str).collect();
-    flori_core::sanitize_scholarly_html(&rewritten, &allowed, None)
+    flori_core::sanitize_scholarly_html(&rewritten, &allowed, "")
         .map_err(|_| ErrorCode::UnsupportedSource)
 }
 

@@ -8,7 +8,7 @@ const BLOCKS: &str =
     "p[id],figcaption[id],td[id],th[id],li[id],h1[id],h2[id],h3[id],h4[id],h5[id],h6[id]";
 
 pub(super) fn render(html: &str, resources: &BTreeSet<&str>) -> Result<String, ErrorCode> {
-    flori_core::sanitize_scholarly_html(html, resources, Some(READER_HEAD))
+    flori_core::sanitize_scholarly_html(html, resources, READER_HEAD)
         .map_err(|_| ErrorCode::CorruptState)
 }
 
