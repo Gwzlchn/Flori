@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 
 import type { components } from "../api/client";
+import PipelineDag from "./PipelineDag.vue";
 
 const props = defineProps<{
   job: components["schemas"]["JobView"];
@@ -24,16 +25,6 @@ const orderedTasks = computed(() => {
     done.add(task.task_key);
   }
   return ordered;
-});
-const taskLevels = computed(() => {
-  const depths = new Map<string, number>();
-  const levels: components["schemas"]["TaskView"][][] = [];
-  for (const task of orderedTasks.value) {
-    const depth = task.spec.needs.reduce((value, need) => Math.max(value, (depths.get(need) ?? -1) + 1), 0);
-    depths.set(task.task_key, depth);
-    (levels[depth] ??= []).push(task);
-  }
-  return levels;
 });
 const selectedTask = computed(() => props.job.tasks.find((task) => task.task_key === selectedTaskKey.value)
   ?? orderedTasks.value[0]);
@@ -87,28 +78,11 @@ function taskLabel(key: string): string { return taskLabels[key] ?? key; }
     >
       {{ job.error_code }}: {{ job.error_message }}
     </p>
-    <div
-      class="pipeline-dag"
-      aria-label="可点击 Pipeline DAG"
-    >
-      <div
-        v-for="(level, index) in taskLevels"
-        :key="index"
-        class="dag-level"
-      >
-        <span class="dag-level-label">阶段 {{ index + 1 }}</span>
-        <button
-          v-for="task in level"
-          :key="task.task_id"
-          type="button"
-          class="dag-node"
-          :class="[{ 'is-active': selectedTask?.task_id === task.task_id }, `state-${task.state}`]"
-          @click="selectedTaskKey = task.task_key"
-        >
-          <b>{{ taskLabel(task.task_key) }}</b><small>{{ task.executor }}</small><span>{{ stateLabels[task.state] }}</span>
-        </button>
-      </div>
-    </div>
+    <PipelineDag
+      :tasks="job.tasks"
+      :selected-task-id="selectedTask?.task_id"
+      @select="selectedTaskKey = $event"
+    />
     <article
       v-if="selectedTask"
       class="step-workbench"
