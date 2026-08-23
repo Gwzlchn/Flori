@@ -55,13 +55,15 @@ impl NasArtifactStore {
         &self,
         source_id: SourceId,
     ) -> Result<(), ArtifactStoreError> {
+        let source = self.root.join("sources").join(source_id.to_string());
+        reject_existing(&source)?;
         let trash_root = self.trash_root("sources")?;
         let trash = trash_root.join(source_id.to_string());
         if checked_directory(&trash)?.is_some() {
             fs::remove_dir_all(&trash)?;
             sync_directory(&trash_root)?;
         }
-        Ok(())
+        reject_existing(&source)
     }
 
     pub(crate) fn source_delete_trash(&self) -> Result<Vec<SourceId>, ArtifactStoreError> {

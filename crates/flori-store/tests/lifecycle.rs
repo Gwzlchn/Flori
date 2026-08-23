@@ -1,9 +1,10 @@
 use std::{fs, path::PathBuf};
 
 use flori_core::{
-    AiTool, AiUsageId, AttemptId, CompleteAttemptRequest, DomainId, ErrorCode, JobId, LogFrame,
-    PipelineId, PipelineRevisionId, PromptSnapshotId, RunnerId, Sha256Digest, SourceId,
-    SourceInputId, StartUploadRequest, TaskId, UploadId, UsageOrigin, UsageUpdate,
+    AiTool, AiUsageId, ArtifactId, AttemptId, CollectionId, CompleteAttemptRequest, DomainId,
+    ErrorCode, EvidenceId, JobId, LogFrame, PipelineId, PipelineRevisionId, PromptSnapshotId,
+    RunnerId, Sha256Digest, SourceId, SourceInputId, StartUploadRequest, TaskId, UploadId,
+    UsageOrigin, UsageUpdate,
 };
 use flori_store::{StartAiUsage, Store, artifact::NasArtifactStore};
 use sha2::{Digest, Sha256};
@@ -368,6 +369,54 @@ async fn delete_source_is_atomic_idempotent_and_recovers_both_crash_sides() {
         ErrorCode::ArtifactInvalidPath
     );
     fs::remove_file(source_root.join("unsafe-link")).expect("remove symlink");
+    let artifact = ArtifactId::generate();
+    let evidence = EvidenceId::generate();
+    let collection = CollectionId::generate();
+    let artifact_path = format!(
+        "sources/{}/jobs/{}/tasks/{}/{artifact}/evidence.json",
+        active.source, active.job, active.task
+    );
+    let artifact_file = fixture.artifacts.join(&artifact_path);
+    fs::create_dir_all(artifact_file.parent().expect("artifact parent")).expect("artifact dir");
+    fs::write(&artifact_file, b"{}").expect("artifact bytes");
+    sqlx::query("UPDATE sources SET kind='youtube_channel' WHERE id=?")
+        .bind(active.source.to_string())
+        .execute(&pool)
+        .await
+        .expect("subscription source kind");
+    let domain: String = sqlx::query_scalar("SELECT domain_id FROM sources WHERE id=?")
+        .bind(active.source.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("source domain");
+    sqlx::query("INSERT INTO collections(id,domain_id,name,kind,subscription_source_id,enabled,fanout_limit,created_at_ms,updated_at_ms) VALUES(?,?,'subscription','subscription',?,1,10,0,0)")
+        .bind(collection.to_string()).bind(domain).bind(active.source.to_string())
+        .execute(&pool).await.expect("subscription collection");
+    sqlx::query(
+        "INSERT INTO collection_sources(collection_id,source_id,added_at_ms) VALUES(?,?,0)",
+    )
+    .bind(collection.to_string())
+    .bind(active.source.to_string())
+    .execute(&pool)
+    .await
+    .expect("collection source");
+    sqlx::query("INSERT INTO artifacts(id,source_id,job_id,task_id,origin,name,kind,media_type,file_name,size_bytes,sha256,relative_path,retention,created_at_ms) VALUES(?,?,?,?,'materialized','evidence','evidence','application/json','evidence.json',2,?,?,'published',0)")
+        .bind(artifact.to_string()).bind(active.source.to_string()).bind(active.job.to_string())
+        .bind(active.task.to_string()).bind(digest("{}").as_str()).bind(&artifact_path)
+        .execute(&pool).await.expect("artifact");
+    sqlx::query("INSERT INTO evidence(id,source_id,job_id,artifact_id,locator_kind,page,x1,y1,x2,y2,quote) VALUES(?,?,?,?,'pdf',1,0,0,1,1,'quote')")
+        .bind(evidence.to_string()).bind(active.source.to_string()).bind(active.job.to_string())
+        .bind(artifact.to_string()).execute(&pool).await.expect("evidence");
+    sqlx::query("INSERT INTO search_chunks(chunk_id,source_id,job_id,artifact_id,title,body) VALUES('chunk',?,?,?,'title','body')")
+        .bind(active.source.to_string()).bind(active.job.to_string()).bind(artifact.to_string())
+        .execute(&pool).await.expect("search chunk");
+    sqlx::query("INSERT INTO search_chunk_evidence(chunk_id,evidence_id) VALUES('chunk',?)")
+        .bind(evidence.to_string())
+        .execute(&pool)
+        .await
+        .expect("search evidence");
+    sqlx::query("INSERT INTO job_events(scope,scope_id,kind,payload_json,created_at_ms) VALUES('source',?,'source_changed','{}',0)")
+        .bind(active.source.to_string()).execute(&pool).await.expect("source event");
     store
         .delete_source(&artifacts, active.source)
         .await
@@ -376,9 +425,29 @@ async fn delete_source_is_atomic_idempotent_and_recovers_both_crash_sides() {
         .delete_source(&artifacts, active.source)
         .await
         .expect("repeat delete");
-    let remaining: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM sources)+(SELECT count(*) FROM jobs)+(SELECT count(*) FROM tasks)+(SELECT count(*) FROM attempts)+(SELECT count(*) FROM source_inputs)+(SELECT count(*) FROM ai_usage)")
+    let orphan = SourceId::generate();
+    let orphan_root = fixture.artifacts.join("sources").join(orphan.to_string());
+    fs::create_dir_all(&orphan_root).expect("orphan source root");
+    fs::write(orphan_root.join("orphan"), b"orphan").expect("orphan bytes");
+    assert_eq!(
+        store
+            .delete_source(&artifacts, orphan)
+            .await
+            .expect_err("orphan must fail closed")
+            .code(),
+        ErrorCode::ArtifactInvalidPath
+    );
+    fs::remove_dir_all(orphan_root).expect("remove orphan fixture");
+    let remaining: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM sources)+(SELECT count(*) FROM jobs)+(SELECT count(*) FROM tasks)+(SELECT count(*) FROM attempts)+(SELECT count(*) FROM source_inputs)+(SELECT count(*) FROM artifacts)+(SELECT count(*) FROM evidence)+(SELECT count(*) FROM search_chunks)+(SELECT count(*) FROM search_chunk_evidence)+(SELECT count(*) FROM collection_sources)+(SELECT count(*) FROM ai_usage)+(SELECT count(*) FROM job_events WHERE scope IN ('source','job'))")
         .fetch_one(&pool).await.expect("remaining");
     assert_eq!(remaining, 0);
+    let collection_state: (Option<String>, i64) =
+        sqlx::query_as("SELECT subscription_source_id,enabled FROM collections WHERE id=?")
+            .bind(collection.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("collection state");
+    assert_eq!(collection_state, (None, 0));
     assert!(!source_root.exists());
     assert!(
         !fixture
