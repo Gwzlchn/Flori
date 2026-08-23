@@ -32,6 +32,7 @@ pub(super) fn check(root: &Path) -> Result<(), String> {
         .lines()
         .chain([
             "crates/flori-core/src/knowledge.rs",
+            "crates/flori-core/src/scholarly_html.rs",
             "crates/flori-core/src/source.rs",
         ])
         .collect::<Vec<_>>();

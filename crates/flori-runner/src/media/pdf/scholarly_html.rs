@@ -38,61 +38,24 @@ pub(super) fn sanitize(
     provider: ScholarlyProvider,
     resources: &BTreeMap<String, String>,
 ) -> Result<String, ErrorCode> {
-    rewrite_str(
+    let rewritten = rewrite_str(
         html,
-        RewriteStrSettings::new()
-            .append_element_content_handler(element!(
-                "script,iframe,frame,object,embed,form,input,button,textarea,select,option,link,style,base,meta,svg,canvas,audio,video,source",
-                |item| {
-                    item.remove();
-                    Ok(())
-                }
-            ))
-            .append_element_content_handler(element!("img", |item| {
-                let name = item
-                    .get_attribute("src")
-                    .and_then(|value| base.join(&value).ok())
-                    .filter(|url| scholarly_fetch::provider_url(provider, url))
-                    .and_then(|url| resources.get(url.as_str()));
-                if let Some(name) = name {
-                    item.set_attribute("data-flori-resource", name)?;
-                    item.remove_attribute("src");
-                } else {
-                    item.remove();
-                }
-                Ok(())
-            }))
-            .append_element_content_handler(element!("*", |item| {
-                let names = item
-                    .attributes()
-                    .iter()
-                    .map(|attribute| attribute.name())
-                    .collect::<Vec<_>>();
-                for name in names {
-                    let lower = name.to_ascii_lowercase();
-                    if lower.starts_with("on")
-                        || matches!(
-                            lower.as_str(),
-                            "style" | "srcset" | "srcdoc" | "action" | "formaction" | "nonce"
-                                | "integrity" | "crossorigin" | "referrerpolicy" | "xlink:href"
-                        )
-                    {
-                        item.remove_attribute(&name);
-                    }
-                }
-                Ok(())
-            }))
-            .append_element_content_handler(element!("a[href]", |item| {
-                if item
-                    .get_attribute("href")
-                    .is_some_and(|href| !href.starts_with('#'))
-                {
-                    item.remove_attribute("href");
-                }
-                Ok(())
-            })),
+        RewriteStrSettings::new().append_element_content_handler(element!("img", |item| {
+            let name = item
+                .get_attribute("src")
+                .and_then(|value| base.join(&value).ok())
+                .filter(|url| scholarly_fetch::provider_url(provider, url))
+                .and_then(|url| resources.get(url.as_str()));
+            if let Some(name) = name {
+                item.set_attribute("data-flori-resource", name)?;
+            }
+            Ok(())
+        })),
     )
-    .map_err(|_| ErrorCode::UnsupportedSource)
+    .map_err(|_| ErrorCode::UnsupportedSource)?;
+    let allowed = resources.values().map(String::as_str).collect();
+    flori_core::sanitize_scholarly_html(&rewritten, &allowed, None)
+        .map_err(|_| ErrorCode::UnsupportedSource)
 }
 
 #[cfg(test)]

@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use serde::{Deserialize, Deserializer, Serialize, de};
 use utoipa::ToSchema;
 
@@ -190,7 +188,6 @@ impl ScholarlyHtmlSnapshot {
         {
             return Err("invalid scholarly HTML snapshot");
         }
-        let mut names = BTreeSet::new();
         let mut total_bytes = 0_u64;
         let mut previous_name = "";
         for resource in &self.resources {
@@ -202,7 +199,6 @@ impl ScholarlyHtmlSnapshot {
                     resource.media_type.as_str(),
                     "image/avif" | "image/gif" | "image/jpeg" | "image/png" | "image/webp"
                 )
-                || !names.insert(resource.artifact_name.as_str())
             {
                 return Err("invalid scholarly resource");
             }
