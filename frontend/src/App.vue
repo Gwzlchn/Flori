@@ -16,7 +16,7 @@ const {
   setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
   textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
   documentView, documentHtml,
-  chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob, closeJob,
+  chooseFile, setUploadContext, submit, selectEvidence, loadArtifact, refreshJob, openJob, closeJob,
 } = workspace;
 const {
   domains, collections, sources, selectedDomainId, selectedCollectionId, selectedDomain,
@@ -162,6 +162,7 @@ watch(source, (current) => {
           :text-content="textContent"
           :file-urls="fileUrls"
           @select="selectEvidence"
+          @load-artifact="loadArtifact"
           @refresh="refreshJob"
         />
         <RerunPanel

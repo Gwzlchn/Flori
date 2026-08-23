@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 
 import type { components } from "../api/client";
+import ArtifactPreview from "./ArtifactPreview.vue";
 import PipelineDag from "./PipelineDag.vue";
 
 const props = defineProps<{
@@ -10,7 +11,10 @@ const props = defineProps<{
   textContent: ReadonlyMap<string, string>;
   fileUrls: ReadonlyMap<string, string>;
 }>();
-defineEmits<{ refresh: [] }>();
+defineEmits<{
+  refresh: [];
+  loadArtifact: [artifact: components["schemas"]["ArtifactView"]];
+}>();
 const selectedTaskKey = ref("");
 
 const orderedTasks = computed(() => {
@@ -41,9 +45,6 @@ const stateLabels: Record<components["schemas"]["TaskState"], string> = {
 
 watch(() => props.job.job_id, () => { selectedTaskKey.value = orderedTasks.value[0]?.task_key ?? ""; }, { immediate: true });
 
-function sizeLabel(bytes: number): string {
-  return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
 function taskLabel(key: string): string { return taskLabels[key] ?? key; }
 </script>
 
@@ -120,25 +121,14 @@ function taskLabel(key: string): string { return taskLabels[key] ?? key; }
         </section>
         <section>
           <h3>实际产物</h3><div class="step-artifacts">
-            <details
+            <ArtifactPreview
               v-for="artifact in selectedArtifacts"
               :key="artifact.artifact_id"
-              class="step-artifact"
-            >
-              <summary><span><b>{{ artifact.name }}</b><small>{{ artifact.kind }} · {{ sizeLabel(artifact.size_bytes) }}</small></span><span>查看</span></summary>
-              <img
-                v-if="(artifact.kind === 'figure' || artifact.kind === 'table_region') && fileUrls.get(artifact.artifact_id)"
-                :src="fileUrls.get(artifact.artifact_id)"
-                :alt="artifact.name"
-              >
-              <pre v-else-if="textContent.has(artifact.artifact_id)">{{ textContent.get(artifact.artifact_id) }}</pre>
-              <p
-                v-else
-                class="meta"
-              >
-                此产物没有可内嵌预览。
-              </p>
-            </details><p
+              :artifact="artifact"
+              :text="textContent.get(artifact.artifact_id)"
+              :file-url="fileUrls.get(artifact.artifact_id)"
+              @load="$emit('loadArtifact', $event)"
+            /><p
               v-if="!selectedArtifacts.length"
               class="meta"
             >
@@ -180,33 +170,14 @@ function taskLabel(key: string): string { return taskLabels[key] ?? key; }
         <span class="summary-action">展开清单</span>
       </summary>
       <div class="artifact-list">
-        <details
+        <ArtifactPreview
           v-for="artifact in job.artifacts"
           :key="artifact.artifact_id"
-          class="artifact-row"
-        >
-          <summary>
-            <span><b>{{ artifact.kind }}</b><small>{{ artifact.name }}</small></span>
-            <span>{{ sizeLabel(artifact.size_bytes) }}</span>
-          </summary>
-          <a
-            v-if="artifact.kind === 'source_original' && fileUrls.get(artifact.artifact_id)"
-            :href="fileUrls.get(artifact.artifact_id)"
-            download="source.pdf"
-          >下载原始 PDF</a>
-          <img
-            v-else-if="(artifact.kind === 'figure' || artifact.kind === 'table_region') && fileUrls.get(artifact.artifact_id)"
-            :src="fileUrls.get(artifact.artifact_id)"
-            :alt="`${artifact.kind}: ${artifact.name}`"
-          >
-          <pre v-else-if="textContent.has(artifact.artifact_id)">{{ textContent.get(artifact.artifact_id) }}</pre>
-          <p
-            v-else
-            class="meta"
-          >
-            此产物没有可内嵌预览。
-          </p>
-        </details>
+          :artifact="artifact"
+          :text="textContent.get(artifact.artifact_id)"
+          :file-url="fileUrls.get(artifact.artifact_id)"
+          @load="$emit('loadArtifact', $event)"
+        />
       </div>
     </details>
   </section>

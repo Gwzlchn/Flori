@@ -5,9 +5,14 @@ import { apiClient, apiError, type components } from "../api/client";
 const EVIDENCE_HINT = "点击笔记中的证据引用可跳到原文页。";
 const TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
   "document_structure", "translation", "smart_note", "summary", "terms", "evidence", "task_log", "ai_audit",
+  "subtitle", "transcript", "danmaku", "parts_manifest", "subscription_manifest", "mechanical_note",
+  "scholarly_html", "scholarly_html_snapshot",
 ]);
 const FILE_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
   "source_original", "figure", "table_region", "scholarly_resource",
+]);
+const EAGER_TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
+  "document_structure", "translation", "smart_note", "summary",
 ]);
 
 export function usePdfWorkspace() {
@@ -127,8 +132,7 @@ export function usePdfWorkspace() {
     documentHtml.value = undefined;
   }
 
-  async function loadArtifacts(artifacts: components["schemas"]["ArtifactView"][]): Promise<void> {
-    for (const artifact of artifacts) {
+  async function loadArtifact(artifact: components["schemas"]["ArtifactView"]): Promise<void> {
       if (TEXT_KINDS.has(artifact.kind) && !textContent.has(artifact.artifact_id)) {
         const result = await apiClient.GET("/api/v1/artifacts/{artifact_id}/content", {
           params: { path: { artifact_id: artifact.artifact_id } }, parseAs: "text",
@@ -143,6 +147,11 @@ export function usePdfWorkspace() {
         if (result.data !== undefined) fileUrls.set(artifact.artifact_id, URL.createObjectURL(result.data));
         else notice.value = apiError(result.error, "artifact_read_failed: 无法读取成果。");
       }
+  }
+
+  async function loadArtifacts(artifacts: components["schemas"]["ArtifactView"][]): Promise<void> {
+    for (const artifact of artifacts) {
+      if (EAGER_TEXT_KINDS.has(artifact.kind) || FILE_KINDS.has(artifact.kind)) await loadArtifact(artifact);
     }
   }
 
@@ -275,6 +284,6 @@ export function usePdfWorkspace() {
     setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
     textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
     documentView, documentHtml,
-    chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob, closeJob,
+    chooseFile, setUploadContext, submit, selectEvidence, loadArtifact, refreshJob, openJob, closeJob,
   };
 }
