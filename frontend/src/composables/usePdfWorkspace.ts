@@ -16,6 +16,8 @@ export function usePdfWorkspace() {
   const job = ref<components["schemas"]["JobView"]>();
   const source = ref<components["schemas"]["SourceView"]>();
   const jobId = ref("");
+  const uploadDomainId = ref("");
+  const uploadCollectionId = ref("");
   const uploadKey = ref("");
   const jobKey = ref("");
   const busy = ref(false);
@@ -50,6 +52,11 @@ export function usePdfWorkspace() {
     selectedFile.value = event.currentTarget.files?.item(0) ?? undefined;
     uploadKey.value = selectedFile.value ? crypto.randomUUID() : "";
     jobKey.value = selectedFile.value ? crypto.randomUUID() : "";
+  }
+
+  function setUploadContext(domainId: string, collectionId = ""): void {
+    uploadDomainId.value = domainId;
+    uploadCollectionId.value = collectionId;
   }
 
   function remember(name: "job_id" | "evidence_id", value: string): void {
@@ -170,8 +177,10 @@ export function usePdfWorkspace() {
       const bytes = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
       const digest = Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
       const metadata: components["schemas"]["CreateUploadSource"] = {
-        request_key: uploadKey.value, kind: "pdf_upload", domain_id: currentSetup.domain_id,
-        collection_ids: [], file_sha256: digest, title: file.name,
+        request_key: uploadKey.value, kind: "pdf_upload",
+        domain_id: uploadDomainId.value || currentSetup.domain_id,
+        collection_ids: uploadCollectionId.value ? [uploadCollectionId.value] : [],
+        file_sha256: digest, title: file.name,
       };
       notice.value = "正在上传 PDF…";
       const uploaded = await apiClient.POST("/api/v1/sources/uploads", {
@@ -205,6 +214,7 @@ export function usePdfWorkspace() {
     try {
       const result = await apiClient.GET("/api/v1/pdf/setup");
       setup.value = result.data;
+      if (result.data && !uploadDomainId.value) uploadDomainId.value = result.data.domain_id;
       notice.value = result.data ? "请选择一个数字版 PDF。" : apiError(result.error, "setup_failed: PDF 尚未配置。");
     } catch { notice.value = "network_temporary: 无法读取 PDF 配置。"; }
     const params = new URL(window.location.href).searchParams;
@@ -216,6 +226,6 @@ export function usePdfWorkspace() {
   return {
     setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
     textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
-    chooseFile, submit, selectEvidence, refreshJob, openJob,
+    chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob,
   };
 }

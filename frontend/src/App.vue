@@ -1,71 +1,67 @@
 <script setup lang="ts">
+import { computed, watch } from "vue";
+
+import KnowledgeSidebar from "./components/KnowledgeSidebar.vue";
 import PdfReader from "./components/PdfReader.vue";
 import RerunPanel from "./components/RerunPanel.vue";
 import SearchPanel from "./components/SearchPanel.vue";
+import { useKnowledgeNavigation } from "./composables/useKnowledgeNavigation";
 import { usePdfWorkspace } from "./composables/usePdfWorkspace";
 
 const workspace = usePdfWorkspace();
+const library = useKnowledgeNavigation();
 const {
   setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
   textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
-  chooseFile, submit, selectEvidence, refreshJob, openJob,
+  chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob,
 } = workspace;
+const {
+  domains, collections, sources, selectedDomainId, selectedCollectionId, selectedDomain,
+  selectedCollection, status: libraryStatus, select: selectContext, selectSource, refresh: refreshLibrary,
+} = library;
+
+const collectionNames = computed(() => source.value?.collection_ids
+  .map((id) => collections.value.find((item) => item.collection_id === id)?.name)
+  .filter((name): name is string => name !== undefined) ?? []);
+const activeDomainName = computed(() => domains.value.find((item) => item.domain_id === source.value?.domain_id)?.name
+  ?? selectedDomain.value?.name ?? "知识库");
+const activeCollectionName = computed(() => collectionNames.value[0] ?? selectedCollection.value?.name);
+
+function chooseContext(domainId: string, collectionId = ""): void {
+  selectContext(domainId, collectionId);
+  setUploadContext(domainId, collectionId);
+}
+
+watch(source, (current) => {
+  if (!current) return;
+  selectSource(current);
+  setUploadContext(current.domain_id, current.collection_ids[0] ?? "");
+  void refreshLibrary();
+});
 
 function shortId(value: string): string { return `${value.slice(0, 8)}…${value.slice(-4)}`; }
 </script>
 
 <template>
   <div class="app-shell">
-    <aside class="sidebar">
-      <a
-        class="brand"
-        href="#workspace"
-        aria-label="Flori PDF 工作台"
-      >
-        <span class="brand-mark">✦</span>
-        <span><strong>Flori</strong><small>PDF knowledge</small></span>
-      </a>
-      <nav
-        class="side-nav"
-        aria-label="工作台导航"
-      >
-        <a
-          class="is-active"
-          href="#workspace"
-        ><span>▣</span>阅读工作台</a>
-        <a href="#upload"><span>↑</span>上传 PDF</a>
-        <a
-          v-if="job"
-          href="#pipeline"
-        ><span>⌁</span>运行状态</a>
-        <a
-          v-if="job"
-          href="#operations"
-        ><span>···</span>更多操作</a>
-      </nav>
-      <div
-        v-if="job"
-        class="side-current"
-      >
-        <p class="eyebrow">
-          当前文献
-        </p>
-        <strong>{{ sourceTitle }}</strong>
-        <span
-          class="status-pill"
-          :class="`state-${job.state}`"
-        >{{ job.state }}</span>
-        <small>Job {{ shortId(job.job_id) }}</small>
-      </div>
-      <footer class="side-footer">
-        <span class="health-dot" /> vNext preview
-      </footer>
-    </aside>
+    <KnowledgeSidebar
+      :domains="domains"
+      :collections="collections"
+      :sources="sources"
+      :active-source-id="source?.source_id"
+      :selected-domain-id="selectedDomainId"
+      :selected-collection-id="selectedCollectionId"
+      :status="libraryStatus"
+      @open="openJob"
+      @select="chooseContext"
+    />
 
     <div class="app-main">
       <header class="topbar">
         <div class="breadcrumb">
-          <span>知识库</span><b>/</b><strong>{{ job ? sourceTitle : "PDF 工作台" }}</strong>
+          <span>{{ activeDomainName }}</span><b>/</b>
+          <span v-if="activeCollectionName">{{ activeCollectionName }}</span>
+          <b v-if="activeCollectionName">/</b><strong>{{ job ? sourceTitle : "投递内容" }}</strong>
         </div>
         <SearchPanel @open="openJob" />
       </header>
@@ -119,7 +115,7 @@ function shortId(value: string): string { return `${value.slice(0, 8)}…${value
           :open="!job"
         >
           <summary>
-            <span><b>上传并解析 PDF</b><small>首次流程先发布笔记，不自动翻译全文</small></span>
+            <span><b>上传并解析 PDF</b><small>投递到 {{ selectedDomain?.name ?? "默认领域" }} / {{ selectedCollection?.name ?? "未归分类" }}</small></span>
             <span class="summary-action">选择文件</span>
           </summary>
           <div class="upload-body">
@@ -159,6 +155,9 @@ function shortId(value: string): string { return `${value.slice(0, 8)}…${value
         <PdfReader
           v-if="job"
           :job="job"
+          :source="source"
+          :domain-name="domains.find((item) => item.domain_id === source?.domain_id)?.name"
+          :collection-names="collectionNames"
           :note="noteText"
           :summary="summaryText"
           :translation="translationText"

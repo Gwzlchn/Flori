@@ -5,10 +5,13 @@ import type { components } from "../api/client";
 import JobPanel from "./JobPanel.vue";
 import MarkdownContent from "./MarkdownContent.vue";
 
-type ReaderTab = "note" | "summary" | "visuals" | "pipeline" | "artifacts";
+type ReaderTab = "artifacts" | "pipeline" | "metadata" | "visuals";
 
 const props = defineProps<{
   job: components["schemas"]["JobView"];
+  source: components["schemas"]["SourceView"] | undefined;
+  domainName: string | undefined;
+  collectionNames: string[];
   note: string | undefined;
   summary: string | undefined;
   translation: string | undefined;
@@ -20,14 +23,13 @@ const props = defineProps<{
   fileUrls: ReadonlyMap<string, string>;
 }>();
 const emit = defineEmits<{ select: [evidenceId: string]; refresh: [] }>();
-const tab = ref<ReaderTab>("note");
+const tab = ref<ReaderTab>("artifacts");
 
 const tabs: { id: ReaderTab; label: string }[] = [
-  { id: "note", label: "笔记" },
-  { id: "summary", label: "摘要" },
-  { id: "visuals", label: "图表" },
+  { id: "artifacts", label: "产物" },
   { id: "pipeline", label: "Pipeline" },
-  { id: "artifacts", label: "原始产物" },
+  { id: "metadata", label: "元信息" },
+  { id: "visuals", label: "图表" },
 ];
 const locator = computed(() => props.evidence?.locator.kind === "pdf" ? props.evidence.locator.value : undefined);
 const viewerSrc = computed(() => {
@@ -76,11 +78,17 @@ const visuals = computed(() => props.job.artifacts.filter((artifact) =>
     <div class="reader-layout">
       <div class="reader-content">
         <section
-          v-if="tab === 'note'"
-          id="panel-note"
+          v-if="tab === 'artifacts'"
+          id="panel-artifacts"
           role="tabpanel"
-          aria-labelledby="tab-note"
+          aria-labelledby="tab-artifacts"
+          class="knowledge-output"
         >
+          <header class="output-heading">
+            <p class="eyebrow">
+              Published output
+            </p><h3>智能笔记</h3>
+          </header>
           <MarkdownContent
             v-if="note"
             :content="note"
@@ -93,6 +101,23 @@ const visuals = computed(() => props.job.artifacts.filter((artifact) =>
           >
             智能笔记尚未生成。Pipeline 完成后会在这里显示。
           </p>
+          <section class="summary-note">
+            <p class="eyebrow">
+              中文摘要
+            </p>
+            <MarkdownContent
+              v-if="summary"
+              :content="summary"
+              :active-evidence-id="activeEvidenceId"
+              @select="emit('select', $event)"
+            />
+            <p
+              v-else
+              class="empty-state"
+            >
+              当前成果没有摘要。
+            </p>
+          </section>
           <details
             v-if="translation"
             class="translation-block"
@@ -104,25 +129,13 @@ const visuals = computed(() => props.job.artifacts.filter((artifact) =>
               @select="emit('select', $event)"
             />
           </details>
-        </section>
-        <section
-          v-else-if="tab === 'summary'"
-          id="panel-summary"
-          role="tabpanel"
-          aria-labelledby="tab-summary"
-        >
-          <MarkdownContent
-            v-if="summary"
-            :content="summary"
-            :active-evidence-id="activeEvidenceId"
-            @select="emit('select', $event)"
+          <JobPanel
+            :job="job"
+            mode="artifacts"
+            :text-content="textContent"
+            :file-urls="fileUrls"
+            @refresh="emit('refresh')"
           />
-          <p
-            v-else
-            class="empty-state"
-          >
-            当前成果没有摘要。
-          </p>
         </section>
         <section
           v-else-if="tab === 'visuals'"
@@ -162,15 +175,29 @@ const visuals = computed(() => props.job.artifacts.filter((artifact) =>
           :file-urls="fileUrls"
           @refresh="emit('refresh')"
         />
-        <JobPanel
+        <section
           v-else
-          id="panel-artifacts"
-          :job="job"
-          mode="artifacts"
-          :text-content="textContent"
-          :file-urls="fileUrls"
-          @refresh="emit('refresh')"
-        />
+          id="panel-metadata"
+          role="tabpanel"
+          aria-labelledby="tab-metadata"
+          class="metadata-panel"
+        >
+          <p class="eyebrow">
+            Source
+          </p><h3>内容元信息</h3>
+          <dl class="metadata-grid">
+            <div><dt>标题</dt><dd>{{ source?.title ?? source?.canonical_ref ?? "—" }}</dd></div>
+            <div><dt>领域</dt><dd>{{ domainName ?? source?.domain_id ?? "—" }}</dd></div>
+            <div><dt>分类</dt><dd>{{ collectionNames.join("、") || "未归分类" }}</dd></div>
+            <div><dt>来源类型</dt><dd>{{ source?.kind ?? "—" }}</dd></div>
+            <div><dt>规范引用</dt><dd>{{ source?.canonical_ref ?? "—" }}</dd></div>
+            <div><dt>Job 状态</dt><dd>{{ job.state }} · {{ job.trigger }}</dd></div>
+            <div><dt>Pipeline revision</dt><dd>{{ job.pipeline_revision_id }}</dd></div>
+            <div><dt>输入</dt><dd>translate={{ job.inputs.translate }}</dd></div>
+            <div><dt>Current Job</dt><dd>{{ source?.current_job_id ?? "—" }}</dd></div>
+            <div><dt>Previous Job</dt><dd>{{ source?.previous_job_id ?? "—" }}</dd></div>
+          </dl>
+        </section>
       </div>
 
       <aside
