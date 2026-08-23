@@ -17,7 +17,10 @@ pub(crate) fn system() {}
 #[utoipa::path(
     get,
     path = "/api/v1/events",
-    params(("after" = Option<u64>, Query)),
+    params(
+        ("after" = Option<u64>, Query),
+        ("Last-Event-ID" = Option<u64>, Header)
+    ),
     responses(
         (status = 200, body = String, content_type = "text/event-stream"),
         (status = 400, body = ErrorResponse),
@@ -28,7 +31,11 @@ pub(crate) fn events() {}
 #[utoipa::path(
     get,
     path = "/api/v1/jobs/{job_id}/events",
-    params(("job_id" = JobId, Path), ("after" = Option<u64>, Query)),
+    params(
+        ("job_id" = JobId, Path),
+        ("after" = Option<u64>, Query),
+        ("Last-Event-ID" = Option<u64>, Header)
+    ),
     responses(
         (status = 200, body = String, content_type = "text/event-stream"),
         (status = 400, body = ErrorResponse),

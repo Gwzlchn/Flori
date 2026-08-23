@@ -284,6 +284,7 @@ mod tests {
         assert!(json.contains("^[0-9a-f]{64}$"));
         assert!(json.contains(r#""core.validate""#));
         assert!(!json.contains(r#""core_validate""#));
+        assert_eq!(json.matches("Last-Event-ID").count(), 2);
         let locator =
             serde_json::to_string(&schemas["EvidenceLocator"]).expect("serialize locator schema");
         assert_eq!(
