@@ -7,8 +7,9 @@ use axum::{
     routing::{get, post},
 };
 use flori_core::{
-    CreateJobRequest, CreateRemoteSource, CreatedJob, CreatedSource, ErrorCode, JobId, JobView,
-    PdfSetupView, RerunJobRequest, Sha256Digest, SourceId, SourceKind, SourceView,
+    CollectionView, CreateJobRequest, CreateRemoteSource, CreatedJob, CreatedSource, DomainView,
+    ErrorCode, JobId, JobView, PdfSetupView, RerunJobRequest, Sha256Digest, SourceId, SourceKind,
+    SourceView,
 };
 use flori_store::CreateSource;
 use sha2::{Digest, Sha256};
@@ -22,7 +23,9 @@ use crate::{
 pub(super) fn routes() -> Router<HttpState> {
     Router::new()
         .route("/api/v1/pdf/setup", get(pdf_setup))
-        .route("/api/v1/sources", post(create_source))
+        .route("/api/v1/domains", get(list_domains))
+        .route("/api/v1/collections", get(list_collections))
+        .route("/api/v1/sources", get(list_sources).post(create_source))
         .route(
             "/api/v1/sources/{source_id}",
             get(get_source).delete(delete_source),
@@ -31,6 +34,20 @@ pub(super) fn routes() -> Router<HttpState> {
         .route("/api/v1/jobs/{job_id}", get(get_job))
         .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{job_id}/rerun", post(rerun_job))
+}
+
+async fn list_domains(State(state): State<HttpState>) -> Result<Json<Vec<DomainView>>, HttpError> {
+    Ok(Json(state.store.list_domains().await?))
+}
+
+async fn list_collections(
+    State(state): State<HttpState>,
+) -> Result<Json<Vec<CollectionView>>, HttpError> {
+    Ok(Json(state.store.list_collections().await?))
+}
+
+async fn list_sources(State(state): State<HttpState>) -> Result<Json<Vec<SourceView>>, HttpError> {
+    Ok(Json(state.store.list_sources().await?))
 }
 
 async fn delete_source(

@@ -2,9 +2,9 @@
 #![allow(dead_code)]
 
 use crate::{
-    ArtifactId, ArtifactView, CreateJobRequest, CreateUploadSourceForm, CreatedJob, CreatedSource,
-    ErrorResponse, EvidenceId, EvidenceView, JobId, JobView, PdfSetupView, RerunJobRequest,
-    RunnerView, SearchHit, SourceId, SourceView, SystemView,
+    ArtifactId, ArtifactView, CollectionView, CreateJobRequest, CreateUploadSourceForm, CreatedJob,
+    CreatedSource, DomainView, ErrorResponse, EvidenceId, EvidenceView, JobId, JobView,
+    PdfSetupView, RerunJobRequest, RunnerView, SearchHit, SourceId, SourceView, SystemView,
 };
 
 #[utoipa::path(
@@ -66,6 +66,27 @@ pub(crate) fn pdf_setup() {}
     )
 )]
 pub(crate) fn upload_source() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/domains",
+    responses((status = 200, body = Vec<DomainView>), (status = 500, body = ErrorResponse))
+)]
+pub(crate) fn domains() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/collections",
+    responses((status = 200, body = Vec<CollectionView>), (status = 500, body = ErrorResponse))
+)]
+pub(crate) fn collections() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/sources",
+    responses((status = 200, body = Vec<SourceView>), (status = 500, body = ErrorResponse))
+)]
+pub(crate) fn sources() {}
 
 #[utoipa::path(
     get,

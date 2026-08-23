@@ -21,7 +21,11 @@ impl Store {
         .bind(source_id.to_string())
         .fetch_optional(&self.pool)
         .await?;
-        row.as_ref().map(parse_source).transpose()
+        let mut source = row.as_ref().map(parse_source).transpose()?;
+        if let Some(source) = &mut source {
+            source.collection_ids = self.source_collection_ids(source.source_id).await?;
+        }
+        Ok(source)
     }
 
     pub async fn get_job(&self, job_id: JobId) -> Result<Option<JobView>, StoreError> {
@@ -115,7 +119,7 @@ impl Store {
     }
 }
 
-fn parse_source(row: &SqliteRow) -> Result<SourceView, StoreError> {
+pub(super) fn parse_source(row: &SqliteRow) -> Result<SourceView, StoreError> {
     let source_id = parse_id(row, "id")?;
     let current_job_id = parse_optional_id(row, "current_job_id")?;
     let previous_job_id = parse_optional_id(row, "previous_job_id")?;
@@ -127,6 +131,7 @@ fn parse_source(row: &SqliteRow) -> Result<SourceView, StoreError> {
         canonical_ref: row.try_get("canonical_ref")?,
         title: row.try_get("title")?,
         domain_id: parse_id(row, "domain_id")?,
+        collection_ids: Vec::new(),
         current_job_id,
         previous_job_id,
     })
