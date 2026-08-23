@@ -1,6 +1,9 @@
 use std::str::FromStr;
 
-use flori_core::{CreateRunnerSlot, ErrorCode, RegisterRunnerRequest, RunnerId, Sha256Digest};
+use flori_core::{
+    CreateRunnerSlot, ErrorCode, JobEventPayload, RegisterRunnerRequest, RunnerChangedEvent,
+    RunnerId, RunnerState, Sha256Digest,
+};
 use sqlx::Row;
 
 use super::{
@@ -58,6 +61,17 @@ impl Store {
         .bind(now_ms)
         .bind(now_ms)
         .execute(&mut *transaction)
+        .await?;
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::RunnerChanged(RunnerChangedEvent {
+                runner_id,
+                state: RunnerState::Disabled,
+                online: false,
+                config_revision: 0,
+            }),
+            now_ms,
+        )
         .await?;
         transaction.commit().await?;
         Ok(runner_id)
@@ -138,8 +152,21 @@ impl Store {
             transaction.rollback().await?;
             return Err(StoreError::new(ErrorCode::CredentialUnavailable));
         }
+        let parsed =
+            RunnerId::from_str(&runner_id).map_err(|_| StoreError::new(ErrorCode::CorruptState))?;
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::RunnerChanged(RunnerChangedEvent {
+                runner_id: parsed,
+                state: RunnerState::Enabled,
+                online: true,
+                config_revision: 1,
+            }),
+            now_ms,
+        )
+        .await?;
         transaction.commit().await?;
-        RunnerId::from_str(&runner_id).map_err(|_| StoreError::new(ErrorCode::CorruptState))
+        Ok(parsed)
     }
 
     pub async fn authenticate_runner(

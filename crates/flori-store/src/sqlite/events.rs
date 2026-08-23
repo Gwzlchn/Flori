@@ -14,21 +14,10 @@ impl Store {
         if now_ms < 0 {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
         }
-        let (scope, scope_id, kind, data) = event_parts(payload)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let result = sqlx::query(
-            "INSERT INTO job_events(scope,scope_id,kind,payload_json,created_at_ms) VALUES(?,?,?,?,?)",
-        )
-        .bind(scope)
-        .bind(scope_id)
-        .bind(kind)
-        .bind(data)
-        .bind(now_ms)
-        .execute(&mut *transaction)
-        .await?;
-        prune_events(&mut transaction).await?;
+        let id = insert_event(&mut transaction, payload, now_ms).await?;
         transaction.commit().await?;
-        result.last_insert_rowid().try_into().map_err(|_| corrupt())
+        Ok(id)
     }
 
     pub async fn read_events(
@@ -142,6 +131,26 @@ impl Store {
             usage_final,
         })
     }
+}
+
+pub(crate) async fn insert_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    payload: &JobEventPayload,
+    now_ms: i64,
+) -> Result<u64, StoreError> {
+    let (scope, scope_id, kind, data) = event_parts(payload)?;
+    let result = sqlx::query(
+        "INSERT INTO job_events(scope,scope_id,kind,payload_json,created_at_ms) VALUES(?,?,?,?,?)",
+    )
+    .bind(scope)
+    .bind(scope_id)
+    .bind(kind)
+    .bind(data)
+    .bind(now_ms)
+    .execute(&mut **transaction)
+    .await?;
+    prune_events(transaction).await?;
+    result.last_insert_rowid().try_into().map_err(|_| corrupt())
 }
 
 async fn count(pool: &sqlx::SqlitePool, query: &'static str) -> Result<u64, StoreError> {

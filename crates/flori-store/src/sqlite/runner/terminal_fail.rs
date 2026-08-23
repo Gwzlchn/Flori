@@ -9,9 +9,9 @@ use crate::artifact::{NasArtifactStore, RecoveryAction, UploadRecord};
 use super::{
     super::{Store, StoreError},
     poll::server_log,
+    terminal_cleanup::cleanup_failed_uploads,
     terminal_common::{
-        cleanup_failed_uploads, commit_uploads, exact_moved, load_attempt_uploads, manifest_digest,
-        required_present,
+        commit_uploads, exact_moved, load_attempt_uploads, manifest_digest, required_present,
     },
     upload::active_attempt,
     upload_rule::{declaration, retention},

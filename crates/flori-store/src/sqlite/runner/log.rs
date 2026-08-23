@@ -1,7 +1,8 @@
 use std::fmt::Write;
 
 use flori_core::{
-    AttemptId, CompiledTaskSpec, ErrorCode, LogCursor, LogFrame, RunnerId, TaskLogEvent,
+    AttemptId, CompiledTaskSpec, ErrorCode, JobEventPayload, LogCursor, LogFrame, RunnerId,
+    TaskLogEvent,
 };
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -100,7 +101,12 @@ impl Store {
             attempt_id,
             last_sequence: frame.sequence,
         };
-        insert_event(&mut transaction, &job_id, &event, now_ms).await?;
+        super::super::events::insert_event(
+            &mut transaction,
+            &JobEventPayload::LogCursor(event),
+            now_ms,
+        )
+        .await?;
         let updated = sqlx::query(
             "UPDATE attempts SET last_log_sequence=? WHERE id=? AND last_log_sequence=?",
         )
@@ -238,24 +244,6 @@ fn validate_frame(frame: &LogFrame, credential_value: Option<&str>) -> Result<()
     {
         return Err(StoreError::new(ErrorCode::CredentialUnavailable));
     }
-    Ok(())
-}
-
-async fn insert_event(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    job_id: &str,
-    event: &TaskLogEvent,
-    now_ms: i64,
-) -> Result<(), StoreError> {
-    sqlx::query(
-        "INSERT INTO job_events(scope,scope_id,kind,payload_json,created_at_ms) \
-         VALUES('job',?,'log_cursor',?,?)",
-    )
-    .bind(job_id)
-    .bind(serde_json::to_string(event).map_err(|_| corrupt())?)
-    .bind(now_ms)
-    .execute(&mut **transaction)
-    .await?;
     Ok(())
 }
 

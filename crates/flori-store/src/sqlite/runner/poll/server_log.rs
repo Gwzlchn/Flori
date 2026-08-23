@@ -1,8 +1,9 @@
 use std::fmt::Write;
 
 use flori_core::{
-    ArtifactId, ArtifactKind, AttemptId, CompiledTaskSpec, ErrorCode, Sha256Digest, SourceId,
-    TaskLogLine, UploadId, UploadState,
+    ArtifactId, ArtifactKind, AttemptId, CompiledTaskSpec, ErrorCode, JobEventPayload, JobState,
+    JobStateEvent, Sha256Digest, SourceId, TaskLogLine, TaskState, TaskStateEvent, UploadId,
+    UploadState,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
@@ -83,7 +84,30 @@ pub(super) async fn start_attempt(
         spec,
         now_ms,
     )
-    .await
+    .await?;
+    super::super::super::events::insert_event(
+        transaction,
+        &JobEventPayload::JobState(JobStateEvent {
+            job_id: job_id.parse().map_err(|_| corrupt())?,
+            state: JobState::Running,
+            error_code: None,
+        }),
+        now_ms,
+    )
+    .await?;
+    super::super::super::events::insert_event(
+        transaction,
+        &JobEventPayload::TaskState(TaskStateEvent {
+            job_id: job_id.parse().map_err(|_| corrupt())?,
+            task_id: task_id.parse().map_err(|_| corrupt())?,
+            state: TaskState::Leased,
+            attempt_id: Some(exec_id),
+            error_code: None,
+        }),
+        now_ms,
+    )
+    .await?;
+    Ok(())
 }
 
 pub(in crate::sqlite::runner) async fn load_pending(

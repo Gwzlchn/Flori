@@ -6,6 +6,7 @@ mod poll;
 mod registration;
 mod resolve;
 mod terminal;
+mod terminal_cleanup;
 mod terminal_common;
 mod terminal_fail;
 mod upload;
