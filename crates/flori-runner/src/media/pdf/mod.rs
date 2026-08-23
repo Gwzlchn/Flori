@@ -8,6 +8,7 @@ mod process;
 mod scan;
 mod scholarly;
 mod scholarly_fetch;
+mod scholarly_html;
 mod upload;
 
 pub use acquire::{PdfAcquireConfig, acquire_pdf};

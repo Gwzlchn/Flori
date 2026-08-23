@@ -1,14 +1,16 @@
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use flori_core::{
     ArtifactKind, ArtifactManifestEntry, ErrorCode, JobId, ResolvedSource,
-    SCHOLARLY_HTML_MAX_BYTES, ScholarlyFile, ScholarlyHtmlSnapshot, ScholarlyHtmlSnapshotSchema,
-    ScholarlyProvider, SourceKind, TaskClaim,
+    SCHOLARLY_HTML_MAX_BYTES, SCHOLARLY_MAX_RESOURCES, SCHOLARLY_RESOURCE_MAX_BYTES,
+    SCHOLARLY_RESOURCE_TOTAL_MAX_BYTES, ScholarlyFile, ScholarlyHtmlSnapshot,
+    ScholarlyHtmlSnapshotSchema, ScholarlyProvider, ScholarlyResource, ScholarlyResourceKind,
+    SourceKind, TaskClaim,
 };
-use lol_html::{RewriteStrSettings, element, rewrite_str};
+use sha2::{Digest, Sha256};
 use tokio::fs;
 
-use super::{claim, network, scholarly_fetch, upload};
+use super::{claim, network, scholarly_fetch, scholarly_html, upload};
 use crate::RunnerClient;
 
 pub(super) async fn capture(
@@ -37,8 +39,8 @@ pub(super) async fn capture(
         ),
     ] {
         if let Ok(captured) = capture_provider(task.job_id, provider, &url, timeout).await {
-            persist(root, captured).await?;
-            return Ok(vec![
+            persist(root, &captured).await?;
+            let mut entries = vec![
                 upload::file(
                     client,
                     task,
@@ -57,7 +59,24 @@ pub(super) async fn capture(
                     &root.join("snapshot.json"),
                 )
                 .await?,
-            ]);
+            ];
+            let declaration = claim::exact(task, ArtifactKind::ScholarlyResource)?;
+            for resource in &captured.snapshot.resources {
+                entries.push(
+                    upload::file(
+                        client,
+                        task,
+                        declaration,
+                        resource.artifact_name.clone(),
+                        &resource.media_type,
+                        &root
+                            .join("resources")
+                            .join(basename(&resource.artifact_name)?),
+                    )
+                    .await?,
+                );
+            }
+            return Ok(entries);
         }
     }
     Ok(vec![])
@@ -66,6 +85,7 @@ pub(super) async fn capture(
 struct Captured {
     html: String,
     snapshot: ScholarlyHtmlSnapshot,
+    files: Vec<Vec<u8>>,
 }
 
 async fn capture_provider(
@@ -85,7 +105,47 @@ async fn capture_provider(
     if !lower.contains("ltx_document") || !lower.contains("</body>") || !lower.contains("</html>") {
         return Err(ErrorCode::UnsupportedSource);
     }
-    let html = sanitize(&source)?;
+    let image_urls = scholarly_html::image_urls(&source, &final_url, provider)?;
+    if image_urls.len() > SCHOLARLY_MAX_RESOURCES {
+        return Err(ErrorCode::ArtifactTooLarge);
+    }
+    let mut fetched = Vec::with_capacity(image_urls.len());
+    let mut rewrites = BTreeMap::new();
+    let mut total = 0_u64;
+    for request_url in image_urls {
+        let (bytes, source_url, media_type) =
+            scholarly_fetch::fetch(request_url.clone(), SCHOLARLY_RESOURCE_MAX_BYTES, timeout)
+                .await?;
+        if !scholarly_fetch::provider_url(provider, &source_url) {
+            return Err(ErrorCode::UnsupportedSource);
+        }
+        let extension = scholarly_fetch::image_extension(&media_type, &bytes)?;
+        total = total
+            .checked_add(u64::try_from(bytes.len()).map_err(|_| ErrorCode::ArtifactTooLarge)?)
+            .filter(|total| *total <= SCHOLARLY_RESOURCE_TOTAL_MAX_BYTES)
+            .ok_or(ErrorCode::ArtifactTooLarge)?;
+        let artifact_name = resource_name(&request_url, &bytes, extension);
+        rewrites.insert(request_url.to_string(), artifact_name.clone());
+        fetched.push((
+            ScholarlyResource {
+                artifact_name,
+                kind: ScholarlyResourceKind::Image,
+                request_url: request_url.to_string(),
+                source_url: source_url.to_string(),
+                media_type,
+                size_bytes: u64::try_from(bytes.len()).map_err(|_| ErrorCode::ArtifactTooLarge)?,
+                sha256: scholarly_fetch::digest(&bytes)?,
+            },
+            bytes,
+        ));
+    }
+    fetched.sort_by(|left, right| left.0.artifact_name.cmp(&right.0.artifact_name));
+    let (resources, files) = fetched.into_iter().unzip();
+    let html = scholarly_html::sanitize(&source, &final_url, provider, &rewrites)?;
+    let html_bytes = u64::try_from(html.len()).map_err(|_| ErrorCode::ArtifactTooLarge)?;
+    if html_bytes > SCHOLARLY_HTML_MAX_BYTES {
+        return Err(ErrorCode::ArtifactTooLarge);
+    }
     let snapshot = ScholarlyHtmlSnapshot {
         schema: ScholarlyHtmlSnapshotSchema::V1,
         job_id,
@@ -94,21 +154,25 @@ async fn capture_provider(
         html: ScholarlyFile {
             artifact_name: "scholarly_html".into(),
             media_type: "text/html".into(),
-            size_bytes: u64::try_from(html.len()).map_err(|_| ErrorCode::ArtifactTooLarge)?,
+            size_bytes: html_bytes,
             sha256: scholarly_fetch::digest(html.as_bytes())?,
         },
         stylesheets: vec![],
-        resources: vec![],
+        resources,
     };
     snapshot.validate().map_err(|_| ErrorCode::CorruptState)?;
-    Ok(Captured { html, snapshot })
+    Ok(Captured {
+        html,
+        snapshot,
+        files,
+    })
 }
 
-async fn persist(root: &Path, captured: Captured) -> Result<(), ErrorCode> {
+async fn persist(root: &Path, captured: &Captured) -> Result<(), ErrorCode> {
     fs::create_dir_all(root)
         .await
         .map_err(|_| ErrorCode::StorageUnavailable)?;
-    fs::write(root.join("document.html"), captured.html)
+    fs::write(root.join("document.html"), &captured.html)
         .await
         .map_err(|_| ErrorCode::StorageUnavailable)?;
     let snapshot_bytes = serde_json::to_vec(&captured.snapshot).map_err(|_| ErrorCode::Internal)?;
@@ -118,70 +182,39 @@ async fn persist(root: &Path, captured: Captured) -> Result<(), ErrorCode> {
     fs::write(root.join("snapshot.json"), snapshot_bytes)
         .await
         .map_err(|_| ErrorCode::StorageUnavailable)?;
+    if !captured.files.is_empty() {
+        fs::create_dir(root.join("resources"))
+            .await
+            .map_err(|_| ErrorCode::StorageUnavailable)?;
+    }
+    for (resource, bytes) in captured.snapshot.resources.iter().zip(&captured.files) {
+        fs::write(
+            root.join("resources")
+                .join(basename(&resource.artifact_name)?),
+            bytes,
+        )
+        .await
+        .map_err(|_| ErrorCode::StorageUnavailable)?;
+    }
     Ok(())
 }
 
-fn sanitize(html: &str) -> Result<String, ErrorCode> {
-    rewrite_str(
-        html,
-        RewriteStrSettings::new()
-            .append_element_content_handler(element!(
-                "script,iframe,frame,object,embed,form,input,button,textarea,select,option,link,style,base,meta,svg,canvas,audio,video,source,img",
-                |element| {
-                    element.remove();
-                    Ok(())
-                }
-            ))
-            .append_element_content_handler(element!("*", |element| {
-                let names = element
-                    .attributes()
-                    .iter()
-                    .map(|attribute| attribute.name())
-                    .collect::<Vec<_>>();
-                for name in names {
-                    let lower = name.to_ascii_lowercase();
-                    if lower.starts_with("on")
-                        || matches!(
-                            lower.as_str(),
-                            "style" | "srcset" | "srcdoc" | "action" | "formaction" | "nonce"
-                                | "integrity" | "crossorigin" | "referrerpolicy" | "xlink:href"
-                        )
-                    {
-                        element.remove_attribute(&name);
-                    }
-                }
-                Ok(())
-            }))
-            .append_element_content_handler(element!("a[href]", |element| {
-                if element
-                    .get_attribute("href")
-                    .is_some_and(|href| !href.starts_with('#'))
-                {
-                    element.remove_attribute("href");
-                }
-                Ok(())
-            })),
-    )
-    .map_err(|_| ErrorCode::UnsupportedSource)
+fn resource_name(url: &reqwest::Url, bytes: &[u8], extension: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(url.as_str().as_bytes());
+    digest.update([0]);
+    digest.update(bytes);
+    let name = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("scholarly_resources/{name}.{extension}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sanitizer_removes_active_and_remote_content() {
-        let input = r##"<!doctype html><html><body class="ltx_document"><script>alert(1)</script><form><input></form><a href="https://evil.example">leave</a><img src="figure.png" onerror="steal()" style="width:1px"></body></html>"##;
-        let output = sanitize(input).expect("sanitize");
-        for forbidden in [
-            "<script",
-            "<form",
-            "<img",
-            "onerror",
-            "style=",
-            "evil.example",
-        ] {
-            assert!(!output.contains(forbidden));
-        }
-    }
+fn basename(name: &str) -> Result<&str, ErrorCode> {
+    claim::basename(
+        name.strip_prefix("scholarly_resources/")
+            .unwrap_or_default(),
+    )
 }
