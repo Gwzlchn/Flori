@@ -10,7 +10,7 @@ use axum::{
     },
     routing::get,
 };
-use flori_core::{ErrorCode, JobEvent, JobEventPayload, JobId, SystemHealthEvent, SystemView};
+use flori_core::{ErrorCode, JobEvent, JobEventPayload, JobId, SystemView};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -37,22 +37,12 @@ async fn system(State(state): State<HttpState>) -> Result<Json<SystemView>, Http
     let now_ms = super::runner::now_ms()?;
     let online_after =
         now_ms.saturating_sub(i64::try_from(state.lease_ms.saturating_mul(2)).unwrap_or(i64::MAX));
-    let view = state
-        .store
-        .system_view(&state.artifacts, online_after)
-        .await?;
     state
         .store
-        .append_event(
-            &JobEventPayload::SystemHealth(SystemHealthEvent {
-                status: view.status,
-                queue_depth: view.queue_depth,
-                disk_free_bytes: view.disk_free_bytes,
-            }),
-            now_ms,
-        )
-        .await?;
-    Ok(Json(view))
+        .system_view(&state.artifacts, online_after)
+        .await
+        .map(Json)
+        .map_err(Into::into)
 }
 
 async fn events(
