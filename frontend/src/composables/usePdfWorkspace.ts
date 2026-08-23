@@ -66,6 +66,14 @@ export function usePdfWorkspace() {
     history.replaceState(null, "", url);
   }
 
+  function rememberView(view: "content" | "library", sourceId = ""): void {
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", view);
+    if (sourceId) url.searchParams.set("source_id", sourceId);
+    else url.searchParams.delete("source_id");
+    history.replaceState(null, "", url);
+  }
+
   function resetEvidence(): void {
     evidence.value = undefined;
     activeEvidenceId.value = "";
@@ -136,7 +144,10 @@ export function usePdfWorkspace() {
   async function loadSource(sourceId: string): Promise<void> {
     if (source.value?.source_id === sourceId) return;
     const result = await apiClient.GET("/api/v1/sources/{source_id}", { params: { path: { source_id: sourceId } } });
-    if (result.data) source.value = result.data;
+    if (result.data) {
+      source.value = result.data;
+      rememberView("content", result.data.source_id);
+    }
     else notice.value = apiError(result.error, "source_read_failed: 无法读取来源。");
   }
 
@@ -162,9 +173,20 @@ export function usePdfWorkspace() {
     clearArtifacts();
     resetEvidence();
     jobId.value = id;
+    rememberView("content");
     remember("job_id", id);
     await refreshJob();
     if (evidenceId) await selectEvidence(evidenceId);
+  }
+
+  function closeJob(): void {
+    clearArtifacts();
+    resetEvidence();
+    job.value = undefined;
+    source.value = undefined;
+    jobId.value = "";
+    remember("job_id", "");
+    rememberView("library");
   }
 
   async function submit(): Promise<void> {
@@ -226,6 +248,6 @@ export function usePdfWorkspace() {
   return {
     setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
     textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
-    chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob,
+    chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob, closeJob,
   };
 }

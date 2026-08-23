@@ -13,13 +13,25 @@ export function useKnowledgeNavigation() {
   const selectedDomain = computed(() => domains.value.find((item) => item.domain_id === selectedDomainId.value));
   const selectedCollection = computed(() => collections.value.find((item) => item.collection_id === selectedCollectionId.value));
 
-  function select(domainId: string, collectionId = ""): void {
+  function remember(domainId: string, collectionId: string, library: boolean): void {
+    const url = new URL(window.location.href);
+    if (library) url.searchParams.set("view", "library");
+    url.searchParams.set("domain_id", domainId);
+    if (collectionId) url.searchParams.set("collection_id", collectionId);
+    else url.searchParams.delete("collection_id");
+    history.replaceState(null, "", url);
+  }
+
+  function select(domainId: string, collectionId = "", persist = true): void {
     selectedDomainId.value = domainId;
     selectedCollectionId.value = collectionId;
+    if (persist) remember(domainId, collectionId, true);
   }
 
   function selectSource(source: components["schemas"]["SourceView"]): void {
-    select(source.domain_id, source.collection_ids[0] ?? "");
+    const collectionId = source.collection_ids[0] ?? "";
+    select(source.domain_id, collectionId, false);
+    remember(source.domain_id, collectionId, false);
   }
 
   async function refresh(): Promise<void> {
@@ -40,7 +52,13 @@ export function useKnowledgeNavigation() {
       domains.value = domainResult.data;
       collections.value = collectionResult.data;
       sources.value = sourceResult.data;
-      if (!selectedDomainId.value && domains.value[0]) select(domains.value[0].domain_id);
+      const params = new URL(window.location.href).searchParams;
+      const requestedDomain = params.get("domain_id");
+      const domain = domains.value.find((item) => item.domain_id === requestedDomain) ?? domains.value[0];
+      const requestedCollection = params.get("collection_id");
+      const collection = collections.value.find((item) => item.collection_id === requestedCollection
+        && item.domain_id === domain?.domain_id);
+      if (domain) select(domain.domain_id, collection?.collection_id ?? "", false);
       status.value = `${domains.value.length} 个领域 · ${sources.value.length} 项内容`;
     } catch {
       status.value = "network_temporary: 无法连接知识库。";

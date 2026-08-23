@@ -2,6 +2,7 @@
 import { computed, watch } from "vue";
 
 import KnowledgeSidebar from "./components/KnowledgeSidebar.vue";
+import LibraryWorkspace from "./components/LibraryWorkspace.vue";
 import DocumentHeader from "./components/DocumentHeader.vue";
 import PdfReader from "./components/PdfReader.vue";
 import RerunPanel from "./components/RerunPanel.vue";
@@ -14,7 +15,7 @@ const library = useKnowledgeNavigation();
 const {
   setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
   textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
-  chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob,
+  chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob, closeJob,
 } = workspace;
 const {
   domains, collections, sources, selectedDomainId, selectedCollectionId, selectedDomain,
@@ -32,11 +33,12 @@ const showNotice = computed(() => !job.value || job.value.state !== "succeeded" 
 function chooseContext(domainId: string, collectionId = ""): void {
   selectContext(domainId, collectionId);
   setUploadContext(domainId, collectionId);
+  closeJob();
 }
 
 function startSubmission(): void {
-  if (job.value) window.location.assign(window.location.pathname);
-  else document.querySelector("#upload")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  closeJob();
+  requestAnimationFrame(() => document.querySelector("#upload")?.scrollIntoView({ behavior: "smooth", block: "start" }));
 }
 
 watch(source, (current) => {
@@ -86,16 +88,15 @@ watch(source, (current) => {
           :collection-names="collectionNames"
           @refresh="refreshJob"
         />
-        <section
+        <LibraryWorkspace
           v-else
-          class="welcome"
-        >
-          <p class="eyebrow">
-            Flori research workspace
-          </p>
-          <h1>把论文变成可检索、可回到原文的研究笔记</h1>
-          <p>上传数字版 PDF，Flori 会提取结构与图表、生成中文笔记，并由 Rust 校验每条证据。</p>
-        </section>
+          :domain="selectedDomain"
+          :collection="selectedCollection"
+          :collections="collections"
+          :sources="sources"
+          @open="openJob"
+          @select="chooseContext"
+        />
 
         <details
           v-if="!job"
