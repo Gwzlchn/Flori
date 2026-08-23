@@ -249,3 +249,51 @@ async fn registration_rejects_default_capability_and_duplicate_inventory_drift()
         ErrorCode::InvalidRequest
     );
 }
+
+#[tokio::test]
+async fn runner_views_are_canonical_and_online_is_derived() {
+    let database = TestDatabase::new();
+    let store = Store::open(&database.path).await.expect("store");
+    let pool = database.pool().await;
+    let registration = digest("view-registration");
+    let runner_id = store
+        .create_runner_slot(
+            &slot("runner-view", &["ai"], 2, Some(("gpt-5.6", "high"))),
+            &registration,
+            1_000,
+            1,
+        )
+        .await
+        .expect("slot");
+    store
+        .register_runner(&registration, &digest("view-long"), &capabilities(), 50)
+        .await
+        .expect("register");
+
+    let runners = store.list_runners(100, 50).await.expect("runner views");
+    assert_eq!(runners.len(), 1);
+    let runner = &runners[0];
+    assert_eq!(runner.runner_id, runner_id);
+    assert_eq!(runner.name, "runner-view");
+    assert!(runner.online);
+    assert_eq!(runner.config_revision, 1);
+    assert_eq!(runner.max_concurrency, 2);
+    assert_eq!(runner.active_attempts, 0);
+    assert_eq!(runner.tags, ["ai"]);
+    assert_eq!(runner.ai_models[0].efforts, ["high", "medium"]);
+    assert!(!store.list_runners(101, 50).await.expect("offline")[0].online);
+
+    sqlx::query("UPDATE runners SET tags_json='[\"z\",\"a\"]' WHERE id=?")
+        .bind(runner_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("corrupt tags");
+    assert_eq!(
+        store
+            .list_runners(100, 50)
+            .await
+            .expect_err("noncanonical inventory")
+            .code(),
+        ErrorCode::CorruptState
+    );
+}
