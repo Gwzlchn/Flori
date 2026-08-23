@@ -52,7 +52,7 @@ Artifact kind 首版只有：
 source_original | document_structure | figure | table_region | translation
 subtitle | transcript | keyframe | danmaku | parts_manifest | subscription_manifest
 mechanical_note | smart_note | summary | terms | evidence
-task_log | ai_audit
+task_log | ai_audit | scholarly_html | scholarly_html_snapshot | scholarly_resource
 ```
 
 Table 只使用 `table_region`，不增加 cell/row/column Artifact 或数据库模型。
@@ -199,6 +199,7 @@ Rust core 为下列结构定义唯一 Serde 类型；JSON都带精确 `schema=fl
 
 | kind | 必填内容与不变量 |
 |---|---|
+| `scholarly_html_snapshot` | `schema=flori.scholarly_html_snapshot.v1`、provider、规范化document URL、HTML逻辑名和SHA-256、ordered静态资源；资源只允许stylesheet/image/font，逻辑名与URL唯一，media type、size和SHA-256精确，数量与总字节受限 |
 | `document_structure` | `source_artifact_id`、`language`、pages尺寸、ordered sections和其ordered `{page,bbox,text}` blocks、figures和tables；Figure含ID/page/bbox/caption/Artifact逻辑名，Table含ID/page/bbox/caption/text/截图逻辑名，不含cells |
 | `parts_manifest` | 一个逻辑视频的ordered parts；每项含index/title/duration和原视频、字幕、弹幕Artifact逻辑名，引用可缺但不能指向未声明输出 |
 | `subscription_manifest` | newest-first items；每项只有平台视频kind、canonical_ref、title、published_at_ms，去重且数量不超过Collection fanout |
@@ -214,7 +215,7 @@ Rust core 为下列结构定义唯一 Serde 类型；JSON都带精确 `schema=fl
 
 ### 保留
 
-- `source_original`、acquire得到的 `subtitle`/`danmaku` 和 `source_inputs` 位于 `retained`/`inputs`，保留到删除整个 Source。
+- `source_original`、acquire得到的学术HTML根文档/快照/静态资源、`subtitle`/`danmaku` 和 `source_inputs` 位于 `retained`/`inputs`，保留到删除整个 Source。
 - 完整成功成果只展示并保留 current、previous。
 - 失败详情只保留最近一个失败 Job 的 `task_log` 和 `ai_audit`。
 - 更早 Job 保留 SQLite 状态、错误和可聚合 `ai_usage`；无活跃materialize ledger引用后，其它文件与 Artifact 行按 Job 目录原子移入 `.trash/jobs` 后清理。
@@ -223,6 +224,7 @@ Rust core 为下列结构定义唯一 Serde 类型；JSON都带精确 `schema=fl
 ## canonical evidence 和发布
 
 - PDF locator 使用 1-based page 与左上角原点 point 坐标，满足 `0 <= x1 < x2 <= width`、`0 <= y1 < y2 <= height`。
+- 学术HTML不增加EvidenceLocator。Server只能在已验证快照中对canonical quote得到唯一安全目标后生成临时阅读锚点；零匹配、多匹配、摘要或资源闭包漂移都回退PDF页码与bbox，不写第二份evidence真相。
 - 视频 locator 满足 `0 <= start_ms < end_ms <= duration_ms`；关键帧时间落在区间或距离边界不超过一帧。
 - quote 必须能在对应结构化文本或字幕中规范化匹配。
 - PDF `core.validate` 的 `source` 输入是 `document.extract` 的完整 ArtifactSet，`notes` 输入是 `ai.document_note` 的完整 ArtifactSet。它严格解析 `document_structure`、`smart_note`、`summary` 和 `terms`，确认结构绑定的 `source_artifact_id` 是同Job上游PDF，逐项校验候选页码、bbox、quote、Markdown标记和术语引用，再把相同 `EvidenceEntry` 写成唯一 `evidence` Artifact。Runner候选不是发布真相。
@@ -279,6 +281,7 @@ Rust 类型生成唯一 OpenAPI；前端不得重写下表 DTO。会产生 Sourc
 | `POST /api/v1/sources` | `CreateRemoteSource {request_key, kind, canonical_ref, title?, domain_id, collection_ids, credential_id?}`；Domain必填 |
 | `POST /api/v1/sources/uploads` | multipart：严格 `CreateUploadSource {request_key,kind,title?,domain_id,collection_ids,file_sha256}` JSON + 单一 `file`；仅 `pdf_upload`/`local_video` |
 | `GET /api/v1/sources[/{id}]` | Source 列表/详情、current/previous 和最近 Job |
+| `GET /api/v1/sources/{id}/document` | current学术HTML阅读投影；可带 `evidence_id` 请求经quote验证的临时目标，无法安全映射时明确返回PDF fallback |
 | `DELETE /api/v1/sources/{id}` | 无 body；唯一删除入口，目标已不存在也返回成功 |
 | `POST /api/v1/sources/{id}/jobs` | `CreateJob {request_key, pipeline_id, inputs:{translate}}` |
 | `GET /api/v1/jobs[/{id}]` | 过滤列表或完整 DAG、Attempt、声明 Artifact |
@@ -318,10 +321,11 @@ MCP 合入 `flori-server` 的 `/mcp`，使用独立 bearer token，只提供 cur
 ## 下载与输入安全
 
 - 通用 PDF 下载只接受 `http`/`https`，每次解析和重定向都拒绝 loopback、private、link-local、multicast 和保留地址；连接使用已校验地址，最多5次重定向。
+- arXiv学术HTML只允许从规范化arXiv ID生成官方HTML URL并回退到固定ar5iv host；每次重定向和静态资源URL都执行同一网络边界，禁止脚本、表单、iframe、跨provider资源和动态请求。只有根文档、snapshot和全部声明资源的size/SHA都验证成功才提交整组Artifact。
 - Bilibili/YouTube executor 只接受规范化平台 ID生成的 URL；CLI 使用参数数组，不拼 shell命令。
 - 下载和上传都流式执行，边读边限制部署配置中的最大 byte、超时和摘要；声明 media type 与 magic不符即失败。
 - PDF 在 extractor 前探测页数和文本层。若每一页去空白后都少于32个 Unicode字符，返回 `unsupported_scanned_pdf`；不调用 OCR。
-- Archive、HTML、audio 和未列入 SourceKind 的输入在创建 Source 时拒绝，不进入 Pipeline。
+- Archive、用户提供的HTML、audio和未列入SourceKind的输入在创建Source时拒绝；学术HTML只能由`document.acquire`从arXiv Source派生，不能成为独立输入。
 
 ## 删除 Source
 

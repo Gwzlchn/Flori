@@ -148,7 +148,7 @@ publish:
 
 | executor | 责任 | 允许的业务输出 kind |
 |---|---|---|
-| `document.acquire` | 安全下载 arXiv/PDF 或读取上传 PDF；扫描检测在此完成 | `source_original` |
+| `document.acquire` | 安全下载arXiv/PDF或读取上传PDF；arXiv按官方HTML、ar5iv、PDF顺序生成可选完整阅读快照；扫描检测在此完成 | `source_original`、`scholarly_html`、`scholarly_html_snapshot`、`scholarly_resource` |
 | `document.extract` | 结构、章节、Figure/caption、Table 页面区域 | `document_structure`、`figure`、`table_region` |
 | `ai.document_translate` | 可选全文翻译 | `translation` |
 | `ai.document_note` | 中文智能笔记、摘要、关键名词 | `smart_note`、`summary`、`terms` |
@@ -161,7 +161,7 @@ publish:
 | `core.validate` | 校验 PDF/视频 locator、quote 和关键帧引用 | `evidence` |
 | `core.publish` | 原子 current/previous、FTS 和知识投影 | 无业务 Artifact |
 
-所有 Runner executor 还可输出已声明的 `task_log`；`ai.*` 还必须声明 `ai_audit`。`core.*` 由 Home Core 内部执行，不经过 poll，不使用 tags/model/effort，也不能访问 cookie。
+所有 Runner executor 还可输出已声明的 `task_log`；`ai.*` 还必须声明 `ai_audit`。学术HTML三类输出只允许`document.acquire`为arXiv Source整组产生，任一声明资源缺失或漂移都不得提交该组，PDF `source_original`仍为必填。`core.*` 由 Home Core内部执行，不经过poll，不使用tags/model/effort，也不能访问cookie。
 
 不得把场景检测、断句、图片去重、分P合并或 OCR 建成 executor。它们分别是现有 media executor 的内部算法；视频 OCR 在 v1 不存在。
 

@@ -11,8 +11,9 @@ Flori 是单用户、家庭存储优先的个人知识库。核心价值只有�
 ### PDF 与 arXiv
 
 ```text
-安全下载或上传 digital PDF
-  -> PDF 结构、Figure、caption、页坐标和 Table 区域
+安全下载或上传 digital PDF，并为 arXiv 尝试完整学术 HTML 快照
+  -> HTML 优先阅读，PDF 结构、页坐标和 canonical evidence 兜底
+  -> Figure、caption 和 Table 区域
   -> 可选全文翻译
   -> AI 生成中文笔记、摘要、关键名词与解释
   -> Rust 校验 canonical evidence
@@ -20,10 +21,12 @@ Flori 是单用户、家庭存储优先的个人知识库。核心价值只有�
 ```
 
 - 支持 arXiv URL、直接 PDF URL和本地 PDF 上传。
+- arXiv 始终保留PDF；阅读表示依次尝试官方HTML、ar5iv HTML，只有根文档与受限静态资源全部验证并闭包后才发布HTML，否则回退PDF。
+- 学术HTML只服务arXiv阅读，不接受普通网页URL、脚本、表单、iframe或任意外链资源。
 - 扫描 PDF 在检测阶段明确失败；vNext 不做 PDF OCR。
-- Figure 保留图像、caption 和 PDF locator。
-- Table 只保留页面区域截图或普通文本，不建立单元格模型。
-- 不做普通 HTML、学术 HTML、网页资产闭包和 book TOC。
+- Figure和Table优先使用已验证HTML中的完整DOM内容；没有可靠HTML映射时使用PDF图像、caption和locator。Table不建立单元格数据库模型。
+- PDF页码、bbox和quote仍是唯一canonical evidence；HTML锚点只是服务端按同一quote验证得到的阅读投影，不能匹配或不唯一时回退PDF。
+- 不做普通HTML摄入、任意网页资产闭包和book TOC。
 
 ### 视频与订阅
 
@@ -98,8 +101,8 @@ Bilibili、YouTube 或本地视频
 
 | 组 | 已冻结边界 | 权威位置 |
 |---|---|---|
-| A 内容入口 | PDF/arXiv、Bilibili/YouTube、本地视频保留；HTML/audio/RSS/book 删除 | 本文“保留的用户路径” |
-| B 文档链 | digital PDF、Figure、Table 区域、翻译、笔记和 evidence | 本文“PDF 与 arXiv” |
+| A 内容入口 | PDF/arXiv、Bilibili/YouTube、本地视频保留；仅arXiv学术HTML可作为阅读表示，普通HTML/audio/RSS/book删除 | 本文“保留的用户路径” |
+| B 文档链 | HTML优先阅读、digital PDF canonical evidence、Figure、Table区域、翻译和笔记 | 本文“PDF 与 arXiv” |
 | C 视频链 | 字幕/Whisper、关键帧、机械与智能笔记、弹幕原文件 | 本文“视频与订阅” |
 | D 产品面 | DAG、知识库、MCP、Prompt、Runner、usage 保留；Ask/Radar/Study 删除 | 本文“知识库与管理面” |
 | E AI | 仅 QoderCLI 与 CodexCLI Runner，无 fallback | 本文“AI 执行” |
