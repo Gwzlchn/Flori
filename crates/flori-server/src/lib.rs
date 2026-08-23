@@ -9,6 +9,8 @@ mod runner;
 mod runner_content;
 mod runner_upload;
 mod runner_view;
+mod source_document;
+mod source_document_html;
 mod source_job;
 mod source_upload;
 mod system_http;

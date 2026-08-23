@@ -526,6 +526,7 @@ dependencies = [
  "flori-pipeline",
  "flori-runner",
  "flori-store",
+ "lol_html",
  "serde",
  "serde_json",
  "sha2 0.11.0",
