@@ -1,8 +1,8 @@
 use std::{fs, path::PathBuf};
 
 use flori_core::{
-    AiTool, AiUsageId, AttemptId, DomainId, ErrorCode, JobId, PipelineId, PipelineRevisionId,
-    RunnerId, SourceId, TaskId, UsageOrigin,
+    AiTool, AiUsageId, ArtifactId, AttemptId, DomainId, ErrorCode, JobId, PipelineId,
+    PipelineRevisionId, RunnerId, SourceId, TaskId, UsageOrigin,
 };
 use flori_store::{FinalAiUsage, StartAiUsage, Store};
 use sqlx::{Connection, Executor, SqliteConnection, SqlitePool, sqlite::SqliteConnectOptions};
@@ -185,6 +185,38 @@ async fn empty_directory_creates_exact_current_schema_and_reopens() {
 
     pool.close().await;
     drop(store);
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&database.path)
+            .foreign_keys(false),
+    )
+    .await
+    .expect("open schema probe");
+    for (kind, media_type) in [
+        ("scholarly_html", "text/html"),
+        ("scholarly_html_snapshot", "application/json"),
+        ("scholarly_resource", "image/png"),
+    ] {
+        sqlx::query("INSERT INTO artifacts(id,source_id,job_id,task_id,origin,name,kind,media_type,file_name,size_bytes,sha256,relative_path,retention,created_at_ms) VALUES(?,?,?,?,'materialized',?,?,?,?,1,?,?,'source',0)")
+            .bind(ArtifactId::generate().to_string())
+            .bind(SourceId::generate().to_string())
+            .bind(JobId::generate().to_string())
+            .bind(TaskId::generate().to_string())
+            .bind(kind)
+            .bind(kind)
+            .bind(media_type)
+            .bind("artifact.bin")
+            .bind("a".repeat(64))
+            .bind("fixture")
+            .execute(&mut connection)
+            .await
+            .expect("scholarly artifact kind must persist");
+    }
+    sqlx::query("DELETE FROM artifacts")
+        .execute(&mut connection)
+        .await
+        .expect("remove schema probes");
+    connection.close().await.expect("close schema probe");
     Store::open(&database.path)
         .await
         .expect("reopen unchanged v1 store");

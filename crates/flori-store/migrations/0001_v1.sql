@@ -101,7 +101,7 @@ CREATE TABLE artifacts(
   origin TEXT NOT NULL CHECK(origin IN ('produced','materialized')),
   materialized_from_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('source_original','document_structure','figure','table_region','translation','subtitle','transcript','keyframe','danmaku','parts_manifest','subscription_manifest','mechanical_note','smart_note','summary','terms','evidence','task_log','ai_audit')),
+  kind TEXT NOT NULL CHECK(kind IN ('source_original','scholarly_html','scholarly_html_snapshot','scholarly_resource','document_structure','figure','table_region','translation','subtitle','transcript','keyframe','danmaku','parts_manifest','subscription_manifest','mechanical_note','smart_note','summary','terms','evidence','task_log','ai_audit')),
   media_type TEXT NOT NULL, file_name TEXT NOT NULL, size_bytes INTEGER NOT NULL CHECK(size_bytes>=0),
   sha256 TEXT NOT NULL, relative_path TEXT NOT NULL,
   retention TEXT NOT NULL CHECK(retention IN ('source','published','failed_audit')),
