@@ -1,9 +1,9 @@
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    ArtifactDeclaration, ArtifactId, ArtifactKind, ArtifactWhen, AttemptId, CollectionId,
-    CompiledTaskSpec, DomainId, ErrorCode, ErrorResponse, Executor, JobId, PipelineId,
-    PipelineRevisionId, PromptSnapshotId, RunnerId, SourceId, TaskId,
+    AiUsageId, ArtifactDeclaration, ArtifactId, ArtifactKind, ArtifactWhen, AttemptId,
+    CollectionId, CompiledTaskSpec, DomainId, ErrorCode, ErrorResponse, Executor, JobId,
+    PipelineId, PipelineRevisionId, PromptSnapshotId, RunnerId, SourceId, TaskId,
 };
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -201,6 +201,10 @@ async fn seed(pool: &SqlitePool) -> Seed {
         .execute(pool)
         .await
         .expect("current attempt");
+    sqlx::query("INSERT INTO ai_usage(id,job_id,task_id,attempt_id,invocation_key,state,tool,model,effort,origin,credits_micros,created_at_ms,finalized_at_ms) VALUES(?,?,?,?,'primary','final','qoder_cli','model-a','high','observed',1250000,1,2)")
+        .bind(AiUsageId::generate().to_string()).bind(current_job_id.to_string())
+        .bind(note_task_id.to_string()).bind(current_attempt_id.to_string())
+        .execute(pool).await.expect("usage");
     for (task_id, name, kind) in [
         (note_task_id, "smart_note", "smart_note"),
         (acquire_task_id, "source", "source_original"),

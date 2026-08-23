@@ -8,6 +8,7 @@ use crate::artifact::NasArtifactStore;
 use super::StoreError;
 
 mod detail;
+mod detail_usage;
 mod navigation;
 mod query;
 

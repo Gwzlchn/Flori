@@ -69,6 +69,10 @@ async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
             .collect::<Vec<_>>(),
         [1, 2]
     );
+    let usage = &job.tasks[1].attempts[1].usage[0];
+    assert_eq!(usage.invocation_key, "primary");
+    assert_eq!(usage.credits_micros, Some(1_250_000));
+    assert_eq!(usage.input_tokens, None);
     assert_eq!(job.artifacts.len(), 2);
     assert_eq!(job.artifacts[0].name, "source");
     assert_eq!(job.artifacts[1].name, "smart_note");

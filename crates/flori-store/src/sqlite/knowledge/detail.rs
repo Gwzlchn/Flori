@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use flori_core::{
-    ArtifactView, AttemptState, AttemptView, CompiledTaskSpec, ErrorCode, Executor, JobId,
-    JobInputs, JobState, JobTrigger, JobView, Sha256Digest, SourceId, SourceKind, SourceView,
-    TaskId, TaskState, TaskView,
+    AiUsageView, ArtifactView, AttemptId, AttemptState, AttemptView, CompiledTaskSpec, ErrorCode,
+    Executor, JobId, JobInputs, JobState, JobTrigger, JobView, Sha256Digest, SourceId, SourceKind,
+    SourceView, TaskId, TaskState, TaskView,
 };
 use sqlx::{Row, sqlite::SqliteRow};
 
@@ -39,7 +39,11 @@ impl Store {
         else {
             return Ok(None);
         };
-        let mut attempts = self.job_attempts(job_id).await?;
+        let mut usage = self.job_usage(job_id).await?;
+        let mut attempts = self.job_attempts(job_id, &mut usage).await?;
+        if !usage.is_empty() {
+            return Err(StoreError::new(ErrorCode::CorruptState));
+        }
         let task_rows = sqlx::query(
             "SELECT id,task_key,executor,state,spec_json,current_attempt_id,pinned_runner_id, \
              selected_model,selected_effort,runner_config_revision,attempt_limit,timeout_ms, \
@@ -85,6 +89,7 @@ impl Store {
     async fn job_attempts(
         &self,
         job_id: JobId,
+        usage: &mut BTreeMap<AttemptId, Vec<AiUsageView>>,
     ) -> Result<BTreeMap<TaskId, Vec<AttemptView>>, StoreError> {
         let rows = sqlx::query(
             "SELECT a.id,a.task_id,a.attempt_no,a.runner_id,a.state,a.model,a.effort, \
@@ -97,7 +102,8 @@ impl Store {
         .await?;
         let mut attempts = BTreeMap::new();
         for row in &rows {
-            let attempt = parse_attempt(row)?;
+            let mut attempt = parse_attempt(row)?;
+            attempt.usage = usage.remove(&attempt.attempt_id).unwrap_or_default();
             attempts
                 .entry(attempt.task_id)
                 .or_insert_with(Vec::new)
@@ -204,6 +210,7 @@ fn parse_attempt(row: &SqliteRow) -> Result<AttemptView, StoreError> {
         finished_at_ms: optional_u64(row, "finished_at_ms")?,
         error_code: parse_optional_error(row, "error_code")?,
         error_message: row.try_get("error_message")?,
+        usage: Vec::new(),
     })
 }
 

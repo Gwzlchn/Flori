@@ -2,10 +2,11 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    ArtifactId, ArtifactKind, AttemptId, AttemptState, CollectionId, CollectionKind,
-    CompiledTaskSpec, DomainId, ErrorCode, EvidenceId, EvidenceLocator, Executor, JobId, JobInputs,
-    JobState, JobTrigger, PipelineId, PipelineRevisionId, RunnerId, ScholarlyProvider,
-    SearchChunkId, Sha256Digest, SourceId, SourceKind, TaskId, TaskState,
+    AiTool, AiUsageId, AiUsageState, ArtifactId, ArtifactKind, AttemptId, AttemptState,
+    CollectionId, CollectionKind, CompiledTaskSpec, DomainId, ErrorCode, EvidenceId,
+    EvidenceLocator, Executor, JobId, JobInputs, JobState, JobTrigger, PipelineId,
+    PipelineRevisionId, RunnerId, ScholarlyProvider, SearchChunkId, Sha256Digest, SourceId,
+    SourceKind, TaskId, TaskState, UsageOrigin,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -72,6 +73,25 @@ pub struct AttemptView {
     pub finished_at_ms: Option<u64>,
     pub error_code: Option<ErrorCode>,
     pub error_message: Option<String>,
+    pub usage: Vec<AiUsageView>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AiUsageView {
+    pub usage_id: AiUsageId,
+    pub invocation_key: String,
+    pub state: AiUsageState,
+    pub tool: AiTool,
+    pub model: String,
+    pub effort: String,
+    pub origin: Option<UsageOrigin>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cost_micros: Option<u64>,
+    pub credits_micros: Option<u64>,
+    pub created_at_ms: u64,
+    pub finalized_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
