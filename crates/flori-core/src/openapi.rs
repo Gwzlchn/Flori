@@ -35,8 +35,10 @@ use crate::{
         crate::api_paths::pdf_setup,
         crate::api_paths::upload_source,
         crate::api_paths::source_detail,
+        crate::api_paths::delete_source,
         crate::api_paths::create_job,
         crate::api_paths::job_detail,
+        crate::api_paths::cancel_job,
         crate::api_paths::rerun_job,
         crate::api_paths::runners,
         crate::api_paths::artifact_detail,
@@ -221,9 +223,15 @@ mod tests {
 
         assert_eq!(document.info.title, "Flori API");
         assert_eq!(document.info.version, "flori.v1");
-        assert_eq!(document.paths.paths.len(), 11);
+        assert_eq!(document.paths.paths.len(), 12);
         assert!(document.paths.paths.contains_key("/api/v1/pdf/setup"));
         assert!(document.paths.paths.contains_key("/api/v1/jobs/{job_id}"));
+        assert!(
+            document
+                .paths
+                .paths
+                .contains_key("/api/v1/jobs/{job_id}/cancel")
+        );
         assert!(
             document
                 .paths

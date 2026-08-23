@@ -39,6 +39,19 @@ pub(crate) fn upload_source() {}
 pub(crate) fn source_detail() {}
 
 #[utoipa::path(
+    delete,
+    path = "/api/v1/sources/{source_id}",
+    params(("source_id" = SourceId, Path)),
+    responses(
+        (status = 204),
+        (status = 400, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+    )
+)]
+pub(crate) fn delete_source() {}
+
+#[utoipa::path(
     post,
     path = "/api/v1/sources/{source_id}/jobs",
     params(("source_id" = SourceId, Path)),
@@ -59,6 +72,18 @@ pub(crate) fn create_job() {}
     responses((status = 200, body = JobView), (status = 404, body = ErrorResponse))
 )]
 pub(crate) fn job_detail() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/{job_id}/cancel",
+    params(("job_id" = JobId, Path)),
+    responses(
+        (status = 204),
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+    )
+)]
+pub(crate) fn cancel_job() {}
 
 #[utoipa::path(
     post,
