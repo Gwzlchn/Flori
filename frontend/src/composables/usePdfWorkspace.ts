@@ -1,6 +1,6 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 
-import { apiClient, apiError, type components } from "../api/client";
+import { apiClient, apiError, type components, watchJobEvents } from "../api/client";
 
 const EVIDENCE_HINT = "点击笔记中的证据引用可跳到原文页。";
 const TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
@@ -34,7 +34,9 @@ export function usePdfWorkspace() {
   const documentHtml = ref<string>();
   const textContent = reactive(new Map<string, string>());
   const fileUrls = reactive(new Map<string, string>());
-  let pollTimer: number | undefined;
+  let eventController: AbortController | undefined;
+  let eventCursor = 0;
+  let eventRefreshTimer: number | undefined;
 
   function artifactOf(kind: components["schemas"]["ArtifactKind"]): components["schemas"]["ArtifactView"] | undefined {
     return job.value?.artifacts.find((artifact) => artifact.kind === kind);
@@ -132,6 +134,35 @@ export function usePdfWorkspace() {
     documentHtml.value = undefined;
   }
 
+  function stopEvents(): void {
+    eventController?.abort();
+    eventController = undefined;
+    window.clearTimeout(eventRefreshTimer);
+  }
+
+  function startEvents(id: string): void {
+    stopEvents();
+    eventCursor = 0;
+    eventController = new AbortController();
+    const controller = eventController;
+    void (async () => {
+      while (!controller.signal.aborted && jobId.value === id) {
+        const result = await watchJobEvents(id, eventCursor, controller.signal, (cursor) => {
+          eventCursor = cursor;
+          window.clearTimeout(eventRefreshTimer);
+          eventRefreshTimer = window.setTimeout(() => void refreshJob(), 80);
+        });
+        if (result === "expired") {
+          eventCursor = 0;
+          await refreshJob();
+        }
+        if (controller.signal.aborted || job.value?.state === "succeeded"
+          || job.value?.state === "failed" || job.value?.state === "canceled") break;
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+    })();
+  }
+
   async function loadArtifact(artifact: components["schemas"]["ArtifactView"]): Promise<void> {
       if (TEXT_KINDS.has(artifact.kind) && !textContent.has(artifact.artifact_id)) {
         const result = await apiClient.GET("/api/v1/artifacts/{artifact_id}/content", {
@@ -186,7 +217,6 @@ export function usePdfWorkspace() {
   }
 
   async function refreshJob(): Promise<void> {
-    window.clearTimeout(pollTimer);
     if (!jobId.value) return;
     try {
       const result = await apiClient.GET("/api/v1/jobs/{job_id}", { params: { path: { job_id: jobId.value } } });
@@ -198,9 +228,7 @@ export function usePdfWorkspace() {
       notice.value = `Job ${result.data.state}`;
       await Promise.all([loadSource(result.data.source_id), loadArtifacts(result.data.artifacts)]);
       await loadDocument();
-      if (result.data.state === "queued" || result.data.state === "running") {
-        pollTimer = window.setTimeout(() => void refreshJob(), 2000);
-      }
+      if (result.data.state !== "queued" && result.data.state !== "running") stopEvents();
     } catch { notice.value = "network_temporary: 无法连接 Flori，请手动刷新状态。"; }
   }
 
@@ -211,10 +239,12 @@ export function usePdfWorkspace() {
     rememberView("content");
     remember("job_id", id);
     await refreshJob();
+    if (job.value?.state === "queued" || job.value?.state === "running") startEvents(id);
     if (evidenceId) await selectEvidence(evidenceId);
   }
 
   function closeJob(): void {
+    stopEvents();
     clearArtifacts();
     resetEvidence();
     job.value = undefined;
@@ -278,7 +308,7 @@ export function usePdfWorkspace() {
     const savedJob = params.get("job_id");
     if (savedJob) await openJob(savedJob, params.get("evidence_id") ?? "");
   });
-  onUnmounted(() => { window.clearTimeout(pollTimer); clearArtifacts(); });
+  onUnmounted(() => { stopEvents(); clearArtifacts(); });
 
   return {
     setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
