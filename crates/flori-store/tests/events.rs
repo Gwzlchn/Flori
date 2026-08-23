@@ -1,9 +1,8 @@
 use std::fs;
 
 use flori_core::{
-    DomainId, ErrorCode, JobEventPayload, JobId, JobState, JobStateEvent, PipelineId,
-    PipelineRevisionId, PromptSnapshotId, SourceChangedEvent, SourceId, SystemHealthEvent,
-    SystemHealthStatus,
+    DomainId, ErrorCode, JobId, JobState, JobStateEvent, PipelineId, PipelineRevisionId,
+    PromptSnapshotId, SourceChangedEvent, SourceId, SystemHealthStatus,
 };
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -24,33 +23,32 @@ async fn event_feed_is_strict_resumable_and_reports_real_health() {
     .expect("pool");
     let (source, job) = seed(&pool).await;
 
-    let first = store
-        .append_event(
-            &JobEventPayload::JobState(JobStateEvent {
-                job_id: job,
-                state: JobState::Succeeded,
-                error_code: None,
-            }),
-            1,
-        )
-        .await
-        .expect("job event");
+    let first = insert_event(
+        &pool,
+        "job",
+        Some(job.to_string()),
+        "job_state",
+        serde_json::to_string(&JobStateEvent {
+            job_id: job,
+            state: JobState::Succeeded,
+            error_code: None,
+        })
+        .expect("job event JSON"),
+        1,
+    )
+    .await;
+    insert_event(
+        &pool,
+        "source",
+        Some(source.to_string()),
+        "source_changed",
+        serde_json::to_string(&SourceChangedEvent { source_id: source })
+            .expect("source event JSON"),
+        2,
+    )
+    .await;
     store
-        .append_event(
-            &JobEventPayload::SourceChanged(SourceChangedEvent { source_id: source }),
-            2,
-        )
-        .await
-        .expect("source event");
-    store
-        .append_event(
-            &JobEventPayload::SystemHealth(SystemHealthEvent {
-                status: SystemHealthStatus::Healthy,
-                queue_depth: 0,
-                disk_free_bytes: 1,
-            }),
-            3,
-        )
+        .record_system_health(&artifacts, 0, 3)
         .await
         .expect("health event");
     assert_eq!(
@@ -63,8 +61,28 @@ async fn event_feed_is_strict_resumable_and_reports_real_health() {
         .expect("job events");
     assert_eq!(job_events.len(), 1);
     assert_eq!(job_events[0].id, first);
+    assert_eq!(
+        store
+            .read_events(Some(job), 2, 10)
+            .await
+            .expect_err("cursor from another feed")
+            .code(),
+        ErrorCode::EventCursorExpired
+    );
 
-    sqlx::query("DELETE FROM job_events WHERE id<=2")
+    sqlx::query("DELETE FROM job_events WHERE id=2")
+        .execute(&pool)
+        .await
+        .expect("expire non-prefix cursor fixture");
+    assert_eq!(
+        store
+            .read_events(None, 2, 10)
+            .await
+            .expect_err("expired non-prefix cursor")
+            .code(),
+        ErrorCode::EventCursorExpired
+    );
+    sqlx::query("DELETE FROM job_events WHERE id=1")
         .execute(&pool)
         .await
         .expect("expire cursor fixture");
@@ -99,6 +117,30 @@ async fn event_feed_is_strict_resumable_and_reports_real_health() {
         (0, 0, 0)
     );
     fs::remove_dir_all(root).expect("cleanup");
+}
+
+async fn insert_event(
+    pool: &SqlitePool,
+    scope: &str,
+    scope_id: Option<String>,
+    kind: &str,
+    payload_json: String,
+    now_ms: i64,
+) -> u64 {
+    sqlx::query(
+        "INSERT INTO job_events(scope,scope_id,kind,payload_json,created_at_ms) VALUES(?,?,?,?,?)",
+    )
+    .bind(scope)
+    .bind(scope_id)
+    .bind(kind)
+    .bind(payload_json)
+    .bind(now_ms)
+    .execute(pool)
+    .await
+    .expect("event fixture")
+    .last_insert_rowid()
+    .try_into()
+    .expect("event ID")
 }
 
 async fn seed(pool: &SqlitePool) -> (SourceId, JobId) {

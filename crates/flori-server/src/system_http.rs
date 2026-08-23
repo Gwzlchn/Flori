@@ -1,19 +1,20 @@
-use std::{convert::Infallible, time::Duration};
+use std::{fmt::Write as _, time::Duration};
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Query, State},
-    http::{HeaderMap, header::HeaderName},
-    response::{
-        IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
+    http::{
+        HeaderMap,
+        header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName},
     },
+    response::Response,
     routing::get,
 };
 use flori_core::{ErrorCode, JobEvent, JobEventPayload, JobId, SystemView};
 use serde::Deserialize;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
 
 use crate::{error::HttpError, protocol::StrictPath, runner::HttpState};
 
@@ -71,15 +72,13 @@ async fn event_stream(
     after: u64,
 ) -> Result<Response, HttpError> {
     let initial = state.store.read_events(job_id, after, BATCH_SIZE).await?;
-    let (sender, receiver) = mpsc::channel(64);
-    tokio::spawn(pump(state, job_id, after, initial, sender));
-    Ok(Sse::new(ReceiverStream::new(receiver))
-        .keep_alive(
-            KeepAlive::new()
-                .interval(Duration::from_secs(15))
-                .text("keep-alive"),
-        )
-        .into_response())
+    let (output, input) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(pump(state, job_id, after, initial, output));
+    Ok(Response::builder()
+        .header(CONTENT_TYPE, "text/event-stream")
+        .header(CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(ReaderStream::new(input)))
+        .expect("static SSE response is valid"))
 }
 
 async fn pump(
@@ -87,18 +86,29 @@ async fn pump(
     job_id: Option<JobId>,
     mut cursor: u64,
     mut batch: Vec<JobEvent>,
-    sender: mpsc::Sender<Result<Event, Infallible>>,
+    mut output: tokio::io::DuplexStream,
 ) {
+    let mut idle_seconds = 0_u8;
     loop {
         let full = batch.len() == usize::from(BATCH_SIZE);
+        if !batch.is_empty() {
+            idle_seconds = 0;
+        }
         for item in batch {
             cursor = item.id;
-            if sender.send(Ok(sse_event(item))).await.is_err() {
+            if output.write_all(&sse_event(item)).await.is_err() {
                 return;
             }
         }
         if !full {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            idle_seconds += 1;
+            if idle_seconds == 15 {
+                if output.write_all(b": keep-alive\n\n").await.is_err() {
+                    return;
+                }
+                idle_seconds = 0;
+            }
         }
         batch = match state.store.read_events(job_id, cursor, BATCH_SIZE).await {
             Ok(value) => value,
@@ -136,7 +146,7 @@ fn cursor(headers: &HeaderMap, query: Option<u64>) -> Result<u64, HttpError> {
     }
 }
 
-fn sse_event(item: JobEvent) -> Event {
+fn sse_event(item: JobEvent) -> Vec<u8> {
     let (kind, data) = match item.payload {
         JobEventPayload::SourceChanged(value) => ("source_changed", json(&value)),
         JobEventPayload::JobState(value) => ("job_state", json(&value)),
@@ -146,10 +156,10 @@ fn sse_event(item: JobEvent) -> Event {
         JobEventPayload::RunnerChanged(value) => ("runner_changed", json(&value)),
         JobEventPayload::SystemHealth(value) => ("system_health", json(&value)),
     };
-    Event::default()
-        .id(item.id.to_string())
-        .event(kind)
-        .data(data)
+    let mut output = String::new();
+    write!(output, "id: {}\nevent: {kind}\ndata: {data}\n\n", item.id)
+        .expect("writing to String cannot fail");
+    output.into_bytes()
 }
 
 fn json(value: &impl serde::Serialize) -> String {

@@ -1,4 +1,6 @@
-use flori_core::{ErrorCode, JobEvent, JobEventPayload, JobId, SystemHealthStatus, SystemView};
+use flori_core::{
+    ErrorCode, JobEvent, JobEventPayload, JobId, SystemHealthEvent, SystemHealthStatus, SystemView,
+};
 use sqlx::Row;
 
 use crate::artifact::NasArtifactStore;
@@ -6,20 +8,6 @@ use crate::artifact::NasArtifactStore;
 use super::{Store, StoreError};
 
 impl Store {
-    pub async fn append_event(
-        &self,
-        payload: &JobEventPayload,
-        now_ms: i64,
-    ) -> Result<u64, StoreError> {
-        if now_ms < 0 {
-            return Err(StoreError::new(ErrorCode::InvalidRequest));
-        }
-        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let id = insert_event(&mut transaction, payload, now_ms).await?;
-        transaction.commit().await?;
-        Ok(id)
-    }
-
     pub async fn read_events(
         &self,
         job_id: Option<JobId>,
@@ -31,31 +19,31 @@ impl Store {
         }
         let after_i64 = i64::try_from(after).map_err(|_| invalid())?;
         let scope_id = job_id.map(|id| id.to_string());
-        let minimum: Option<i64> = match &scope_id {
-            Some(id) => {
-                sqlx::query_scalar(
-                    "SELECT min(id) FROM job_events WHERE scope='job' AND scope_id=?",
-                )
-                .bind(id)
-                .fetch_one(&self.pool)
-                .await?
-            }
-            None => {
-                sqlx::query_scalar("SELECT min(id) FROM job_events")
-                    .fetch_one(&self.pool)
+        let mut transaction = self.pool.begin().await?;
+        let cursor_exists = if after_i64 == 0 {
+            true
+        } else {
+            match &scope_id {
+                Some(id) => {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS(SELECT 1 FROM job_events WHERE id=? AND scope='job' AND scope_id=?)",
+                    )
+                    .bind(after_i64)
+                    .bind(id)
+                    .fetch_one(&mut *transaction)
                     .await?
+                }
+                None => {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS(SELECT 1 FROM job_events WHERE id=?)",
+                    )
+                    .bind(after_i64)
+                    .fetch_one(&mut *transaction)
+                    .await?
+                }
             }
         };
-        let allocated: i64 = sqlx::query_scalar(
-            "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='job_events'),0)",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        if after_i64 > 0
-            && minimum.map_or(after_i64 <= allocated, |minimum| {
-                after_i64.saturating_add(1) < minimum
-            })
-        {
+        if !cursor_exists {
             return Err(StoreError::new(ErrorCode::EventCursorExpired));
         }
         let rows = match &scope_id {
@@ -67,7 +55,7 @@ impl Store {
                 .bind(id)
                 .bind(after_i64)
                 .bind(i64::from(limit))
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *transaction)
                 .await?
             }
             None => {
@@ -77,10 +65,11 @@ impl Store {
                 )
                 .bind(after_i64)
                 .bind(i64::from(limit))
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *transaction)
                 .await?
             }
         };
+        transaction.commit().await?;
         rows.into_iter().map(parse_event).collect()
     }
 
@@ -130,6 +119,27 @@ impl Store {
             usage_started,
             usage_final,
         })
+    }
+
+    pub async fn record_system_health(
+        &self,
+        artifacts: &NasArtifactStore,
+        online_after_ms: i64,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        if now_ms < 0 {
+            return Err(invalid());
+        }
+        let view = self.system_view(artifacts, online_after_ms).await?;
+        let payload = JobEventPayload::SystemHealth(SystemHealthEvent {
+            status: view.status,
+            queue_depth: view.queue_depth,
+            disk_free_bytes: view.disk_free_bytes,
+        });
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        insert_event(&mut transaction, &payload, now_ms).await?;
+        transaction.commit().await?;
+        Ok(())
     }
 }
 

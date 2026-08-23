@@ -83,8 +83,11 @@ async fn healthcheck(address: &str) -> Result<(), Box<dyn std::error::Error>> {
             .position(|window| window == marker)
             .map(|offset| &response[offset + marker.len()..])
             .ok_or_else(|| io::Error::other("readiness response has no body"))?;
-        serde_json::from_slice::<flori_core::SystemView>(body)
+        let view = serde_json::from_slice::<flori_core::SystemView>(body)
             .map_err(|_| io::Error::other("readiness response is invalid"))?;
+        if view.status != flori_core::SystemHealthStatus::Healthy {
+            return Err(io::Error::other("readiness endpoint is degraded"));
+        }
         Ok::<(), io::Error>(())
     };
     tokio::time::timeout(std::time::Duration::from_secs(5), check)
@@ -115,6 +118,12 @@ async fn serve(
             "embedded-rust-vnext",
             now_ms()?,
         )
+        .await?;
+    let current_ms = now_ms()?;
+    let online_after_ms =
+        current_ms.saturating_sub(i64::try_from(lease_ms.saturating_mul(2)).unwrap_or(i64::MAX));
+    store
+        .record_system_health(&artifacts, online_after_ms, current_ms)
         .await?;
     let app = flori_server::app(store, artifacts, artifact_download_base, lease_ms)
         .map_err(|code| io::Error::new(io::ErrorKind::InvalidInput, format!("{code:?}")))?;
@@ -178,6 +187,37 @@ mod tests {
             .expect("serve");
         });
         healthcheck(&address.to_string()).await.expect("healthy");
+        server.abort();
+        let _ = server.await;
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[tokio::test]
+    async fn readiness_rejects_degraded_system() {
+        let root = env::temp_dir().join(format!(
+            "flori-server-degraded-{}",
+            flori_core::RequestId::generate()
+        ));
+        fs::create_dir(&root).expect("test root");
+        let store = Arc::new(Store::open(root.join("flori.sqlite")).await.expect("store"));
+        let artifacts = Arc::new(
+            NasArtifactStore::new(root.join("artifacts"), u64::MAX).expect("artifact store"),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                flori_server::app(store, artifacts, "http://localhost/content".into(), 60_000)
+                    .expect("app"),
+            )
+            .await
+            .expect("serve");
+        });
+        let error = healthcheck(&address.to_string())
+            .await
+            .expect_err("degraded system must fail readiness");
+        assert!(error.to_string().contains("degraded"));
         server.abort();
         let _ = server.await;
         fs::remove_dir_all(root).expect("remove fixture");

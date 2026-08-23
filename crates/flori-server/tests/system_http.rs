@@ -1,8 +1,8 @@
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use flori_core::{
-    DomainId, ErrorCode, JobEventPayload, JobId, JobState, JobStateEvent, PipelineId,
-    PipelineRevisionId, PromptSnapshotId, SourceChangedEvent, SourceId, SystemView,
+    DomainId, ErrorCode, JobId, JobState, JobStateEvent, PipelineId, PipelineRevisionId,
+    PromptSnapshotId, SourceChangedEvent, SourceId, SystemView,
 };
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -34,24 +34,28 @@ impl Harness {
         .await
         .expect("pool");
         let (source_id, job_id) = seed(&pool).await;
-        store
-            .append_event(
-                &JobEventPayload::JobState(JobStateEvent {
-                    job_id,
-                    state: JobState::Succeeded,
-                    error_code: None,
-                }),
-                1,
-            )
-            .await
-            .expect("job event");
-        store
-            .append_event(
-                &JobEventPayload::SourceChanged(SourceChangedEvent { source_id }),
-                2,
-            )
-            .await
-            .expect("source event");
+        insert_event(
+            &pool,
+            "job",
+            Some(job_id.to_string()),
+            "job_state",
+            &JobStateEvent {
+                job_id,
+                state: JobState::Succeeded,
+                error_code: None,
+            },
+            1,
+        )
+        .await;
+        insert_event(
+            &pool,
+            "source",
+            Some(source_id.to_string()),
+            "source_changed",
+            &SourceChangedEvent { source_id },
+            2,
+        )
+        .await;
         let artifacts =
             Arc::new(NasArtifactStore::new(root.join("artifacts"), 1024).expect("artifact root"));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -106,6 +110,27 @@ impl Harness {
         .expect("bounded response");
         response
     }
+}
+
+async fn insert_event(
+    pool: &SqlitePool,
+    scope: &str,
+    scope_id: Option<String>,
+    kind: &str,
+    payload: &impl serde::Serialize,
+    now_ms: i64,
+) {
+    sqlx::query(
+        "INSERT INTO job_events(scope,scope_id,kind,payload_json,created_at_ms) VALUES(?,?,?,?,?)",
+    )
+    .bind(scope)
+    .bind(scope_id)
+    .bind(kind)
+    .bind(serde_json::to_string(payload).expect("event JSON"))
+    .bind(now_ms)
+    .execute(pool)
+    .await
+    .expect("event fixture");
 }
 
 impl Drop for Harness {
