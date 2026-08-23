@@ -29,6 +29,8 @@ WP01-WP11 已完成。PDF 上传、直接 URL 和 arXiv 使用同一 Pipeline；
 
 WP12-A 只完成本地三秒视频的离线黄金基线，包括锁版 FFmpeg 探测、字幕规范化、关键帧和机械笔记；尚无视频 Pipeline 或 product daemon。WP13-A 已完成 current-only evidence、FTS 和 Artifact 读取投影；MCP 与其余知识库管理面仍待后续切片。WP14-A 已完成 PDF 上传、Job、Artifact、智能笔记阅读、current-only FTS、整条 Pipeline 重跑、独立翻译和指定 AI Runner 重跑；搜索与重跑结果都复用同一 Job 阅读页，并可从 evidence 回到 PDF 页码与 bbox。前端只使用生成的 OpenAPI client。当前仍不是生产候选。
 
+WP15 已完成 Job 取消、Source 完整删除、旧 Job Artifact 保留清理、SSE、system health 和启动恢复。生产冷切换、现有数据删除、公网变更与旧 Python 退役仍只属于 WP16，必须单独授权。
+
 | 工作包 | 目标 | 产品代码 |
 |---|---|---|
 | WP01 | 建立本目录、精简协作规则 | 不允许 |
@@ -46,7 +48,7 @@ WP12-A 只完成本地三秒视频的离线黄金基线，包括锁版 FFmpeg �
 | WP13 | MCP 和其余知识库管理面 | 待后续切片 |
 | WP14-A | PDF 上传、Job、Artifact、搜索和 evidence 阅读 UI | 已完成 |
 | WP14 | 其余保留页面 | 待后续切片 |
-| WP15 | 删除、保留、观测和安全收口 | 待后续切片 |
+| WP15 | 删除、保留、观测和安全收口 | 已完成 |
 | WP16 | 生产冷切换与旧 Python 退役 | 单独授权 |
 
 WP05 之后的业务实现必须以已冻结的 `flori.v1` 契约为边界；发现缺口先修订唯一契约，不在实现层增加兼容字段。

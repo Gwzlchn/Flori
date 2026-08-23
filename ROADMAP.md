@@ -20,7 +20,7 @@ vNext 在同一仓库的 `rust-vnext` 分支开发。`main` 在 WP16 前仍是 P
 | WP13 知识库 | 开放 | current投影已完成；MCP和管理面待实现 |
 | WP14-A PDF UI | 完成 | 上传、Job DAG与Artifact读取闭环 |
 | WP14 其余UI | 开放 | 只消费生成契约，按页面垂直切片 |
-| WP15 安全收口 | 未开放 | 保留、删除、观测和部署边界完成后进入 |
+| WP15 安全收口 | 完成 | Job取消、Source删除、保留清理、SSE与readiness已闭环 |
 | WP16 冷切换 | 未开放 | 全部验收并获得生产授权 |
 
 ## 依赖
@@ -66,6 +66,8 @@ WP10已完成：QoderCLI与CodexCLI按固定版本执行，usage分别记录Qode
 WP11已完成：本地上传、直接PDF URL与arXiv共用同一Pipeline；扫描PDF在解析和AI前拒绝；digital PDF可形成Figure/Table区域、智能笔记、canonical evidence、FTS和current发布成果；整条重跑、翻译重跑与指定AI Runner重跑均生成新Job并维持current/previous边界。
 
 WP14-A已提供最小PDF产品页面：浏览器上传、Job DAG与Attempt状态、日志和发布Artifact读取全部走生成的OpenAPI client。它不包含完整知识库管理面。下一步可继续WP12完整视频链、WP13管理面或WP14其余页面；MCP明确暂缓。后续切片必须沿用现有Pipeline、Runner、Artifact和AI契约，不在实现层增加共享影子模型。
+
+WP15已完成：运行中Job可被原子取消并fence迟到Runner写入；Source是唯一完整删除边界，NAS通过`.trash/sources`与SQLite事务确定性收敛；旧Job目录通过`.trash/jobs`清理且只保留current、previous及最近失败审计；全局/Job SSE、system health和Compose readiness已闭环。生产切换、现有数据删除与公网变化仍只属于WP16单独授权。
 
 ## 工作包
 
