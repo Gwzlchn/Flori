@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use axum::{
     Json, Router,
     extract::State,
-    http::Uri,
+    http::{StatusCode, Uri},
     routing::{get, post},
 };
 use flori_core::{
@@ -23,10 +23,25 @@ pub(super) fn routes() -> Router<HttpState> {
     Router::new()
         .route("/api/v1/pdf/setup", get(pdf_setup))
         .route("/api/v1/sources", post(create_source))
-        .route("/api/v1/sources/{source_id}", get(get_source))
+        .route(
+            "/api/v1/sources/{source_id}",
+            get(get_source).delete(delete_source),
+        )
         .route("/api/v1/sources/{source_id}/jobs", post(create_job))
         .route("/api/v1/jobs/{job_id}", get(get_job))
+        .route("/api/v1/jobs/{job_id}/cancel", post(cancel_job))
         .route("/api/v1/jobs/{job_id}/rerun", post(rerun_job))
+}
+
+async fn delete_source(
+    State(state): State<HttpState>,
+    StrictPath(source_id): StrictPath<SourceId>,
+) -> Result<StatusCode, HttpError> {
+    state
+        .store
+        .delete_source(&state.artifacts, source_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn pdf_setup(State(state): State<HttpState>) -> Result<Json<PdfSetupView>, HttpError> {
@@ -72,6 +87,17 @@ async fn rerun_job(
         .rerun_requested_job(&state.artifacts, job_id, &request, super::runner::now_ms()?)
         .await?;
     Ok(Json(CreatedJob { job_id }))
+}
+
+async fn cancel_job(
+    State(state): State<HttpState>,
+    StrictPath(job_id): StrictPath<JobId>,
+) -> Result<StatusCode, HttpError> {
+    state
+        .store
+        .cancel_job(&state.artifacts, job_id, super::runner::now_ms()?)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_source(
