@@ -2,15 +2,17 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-    AiModels, AiTool, AiUsageId, AiUsageState, ArtifactManifestEntry, AttemptId, AttemptState,
-    ErrorCode, JobId, RequestId, RunnerId, RunnerTags, RunnerTools, Sha256Digest, TaskId,
-    TaskLogLevel, UploadId, UsageOrigin,
+    AiModelCapability, AiModels, AiTool, AiUsageId, AiUsageState, ArtifactManifestEntry, AttemptId,
+    AttemptState, ErrorCode, JobId, RequestId, RunnerId, RunnerState, RunnerTags,
+    RunnerToolCapability, RunnerTools, Sha256Digest, TaskId, TaskLogLevel, UploadId, UsageOrigin,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RegisterRunnerRequest {
+    #[schema(value_type = Vec<RunnerToolCapability>)]
     pub tools: RunnerTools,
+    #[schema(value_type = Vec<AiModelCapability>)]
     pub ai_models: AiModels,
 }
 
@@ -36,6 +38,27 @@ pub struct CreateRunnerSlot {
 pub struct CreateRunnerSlotResponse {
     pub runner_id: RunnerId,
     pub registration_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerView {
+    pub runner_id: RunnerId,
+    pub name: String,
+    pub state: RunnerState,
+    pub online: bool,
+    pub config_revision: u64,
+    pub max_concurrency: u16,
+    pub active_attempts: u16,
+    #[schema(value_type = Vec<String>)]
+    pub tags: RunnerTags,
+    #[schema(value_type = Vec<RunnerToolCapability>)]
+    pub tools: RunnerTools,
+    #[schema(value_type = Vec<AiModelCapability>)]
+    pub ai_models: AiModels,
+    pub default_model: Option<String>,
+    pub default_effort: Option<String>,
+    pub last_seen_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]

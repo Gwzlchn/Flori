@@ -3,8 +3,8 @@
 
 use crate::{
     ArtifactId, ArtifactView, CreateJobRequest, CreateUploadSourceForm, CreatedJob, CreatedSource,
-    ErrorResponse, EvidenceId, EvidenceView, JobId, JobView, PdfSetupView, SearchHit, SourceId,
-    SourceView,
+    ErrorResponse, EvidenceId, EvidenceView, JobId, JobView, PdfSetupView, RerunJobRequest,
+    RunnerView, SearchHit, SourceId, SourceView,
 };
 
 #[utoipa::path(
@@ -59,6 +59,27 @@ pub(crate) fn create_job() {}
     responses((status = 200, body = JobView), (status = 404, body = ErrorResponse))
 )]
 pub(crate) fn job_detail() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/{job_id}/rerun",
+    params(("job_id" = JobId, Path)),
+    request_body = RerunJobRequest,
+    responses(
+        (status = 200, body = CreatedJob),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+    )
+)]
+pub(crate) fn rerun_job() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/runners",
+    responses((status = 200, body = Vec<RunnerView>), (status = 500, body = ErrorResponse))
+)]
+pub(crate) fn runners() {}
 
 #[utoipa::path(
     get,

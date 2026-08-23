@@ -24,7 +24,7 @@ use crate::{
     error::HttpError,
     knowledge_http,
     protocol::{BearerToken, StrictBytes, StrictJson, StrictPath, require_v1},
-    runner_content, runner_upload, source_job, source_upload,
+    runner_content, runner_upload, runner_view, source_job, source_upload,
 };
 
 #[derive(Clone)]
@@ -32,7 +32,7 @@ pub(super) struct HttpState {
     pub(super) store: Arc<Store>,
     pub(super) artifacts: Arc<NasArtifactStore>,
     artifact_download_base: Arc<str>,
-    lease_ms: u64,
+    pub(super) lease_ms: u64,
 }
 
 pub(super) fn routes(
@@ -55,6 +55,7 @@ pub(super) fn routes(
         .merge(source_upload::routes())
         .merge(knowledge_http::routes())
         .merge(runner_content::routes())
+        .merge(runner_view::routes())
         .route("/runner/v1/register", post(register))
         .route(
             "/runner/v1/poll",

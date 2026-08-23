@@ -8,6 +8,7 @@ mod protocol;
 mod runner;
 mod runner_content;
 mod runner_upload;
+mod runner_view;
 mod source_job;
 mod source_upload;
 

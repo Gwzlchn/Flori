@@ -19,14 +19,14 @@ use crate::{
     PipelineRevisionId, PromptSnapshotId, QrSessionId, RegisterRunnerRequest,
     RegisterRunnerResponse, RenewLeaseResponse, RequestId, RerunJobRequest, RerunMode,
     ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource, ResolvedSourceInput,
-    ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool, RunnerToolCapability, SearchChunkId,
-    SearchHit, SecretCredential, SecretInputs, Sha256Digest, SourceId, SourceInputId, SourceKind,
-    SourceView, StartUploadRequest, StartUploadResponse, SubscriptionItem, SubscriptionManifest,
-    SubscriptionManifestSchema, SystemHealthStatus, TaskClaim, TaskId, TaskLogEvent, TaskLogLevel,
-    TaskLogLine, TaskState, TaskView, TermEntry, TermsManifest, TermsManifestSchema, TranscriptCue,
-    TranscriptManifest, TranscriptSchema, UploadCursor, UploadId, UploadOwnerKind, UploadState,
-    UsageAck, UsageOrigin, UsageUpdate, VerifyUploadRequest, VerifyUploadResponse, VideoKeyframe,
-    VideoPart,
+    ResolvedTaskInputs, RunnerId, RunnerState, RunnerTool, RunnerToolCapability, RunnerView,
+    SearchChunkId, SearchHit, SecretCredential, SecretInputs, Sha256Digest, SourceId,
+    SourceInputId, SourceKind, SourceView, StartUploadRequest, StartUploadResponse,
+    SubscriptionItem, SubscriptionManifest, SubscriptionManifestSchema, SystemHealthStatus,
+    TaskClaim, TaskId, TaskLogEvent, TaskLogLevel, TaskLogLine, TaskState, TaskView, TermEntry,
+    TermsManifest, TermsManifestSchema, TranscriptCue, TranscriptManifest, TranscriptSchema,
+    UploadCursor, UploadId, UploadOwnerKind, UploadState, UsageAck, UsageOrigin, UsageUpdate,
+    VerifyUploadRequest, VerifyUploadResponse, VideoKeyframe, VideoPart,
 };
 
 #[derive(OpenApi)]
@@ -37,6 +37,8 @@ use crate::{
         crate::api_paths::source_detail,
         crate::api_paths::create_job,
         crate::api_paths::job_detail,
+        crate::api_paths::rerun_job,
+        crate::api_paths::runners,
         crate::api_paths::artifact_detail,
         crate::api_paths::artifact_content,
         crate::api_paths::search,
@@ -174,6 +176,7 @@ use crate::{
         ArtifactView,
         SearchHit,
         EvidenceView,
+        RunnerView,
     ))
 )]
 struct ApiDoc;
@@ -218,9 +221,16 @@ mod tests {
 
         assert_eq!(document.info.title, "Flori API");
         assert_eq!(document.info.version, "flori.v1");
-        assert_eq!(document.paths.paths.len(), 9);
+        assert_eq!(document.paths.paths.len(), 11);
         assert!(document.paths.paths.contains_key("/api/v1/pdf/setup"));
         assert!(document.paths.paths.contains_key("/api/v1/jobs/{job_id}"));
+        assert!(
+            document
+                .paths
+                .paths
+                .contains_key("/api/v1/jobs/{job_id}/rerun")
+        );
+        assert!(document.paths.paths.contains_key("/api/v1/runners"));
         assert!(schemas.contains_key("SourceId"));
         assert!(schemas.contains_key("SourceKind"));
         assert!(schemas.contains_key("Executor"));
@@ -233,6 +243,7 @@ mod tests {
         assert!(schemas.contains_key("JobView"));
         assert!(schemas.contains_key("TaskView"));
         assert!(schemas.contains_key("AttemptView"));
+        assert!(schemas.contains_key("RunnerView"));
         assert!(schemas.contains_key("EvidenceLocator"));
         assert!(schemas.contains_key("Sha256Digest"));
         assert!(schemas.contains_key("TaskClaim"));

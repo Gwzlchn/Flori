@@ -12,3 +12,4 @@ mod upload;
 mod upload_io;
 pub(in crate::sqlite) mod upload_rule;
 mod usage_bridge;
+mod view;
