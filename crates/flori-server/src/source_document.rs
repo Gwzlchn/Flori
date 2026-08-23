@@ -3,14 +3,15 @@ use std::{collections::BTreeSet, io::Read};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Query, State, rejection::QueryRejection},
     http::{HeaderValue, Response, header},
     routing::get,
 };
 use flori_core::{
-    ArtifactKind, ArtifactView, DocumentRepresentationView, ErrorCode, ScholarlyHtmlSnapshot,
-    SourceId,
+    ArtifactKind, ArtifactView, DocumentRepresentationView, ErrorCode, EvidenceId, EvidenceLocator,
+    ScholarlyHtmlSnapshot, SourceId, SourceKind,
 };
+use serde::Deserialize;
 
 use crate::{
     error::HttpError,
@@ -18,6 +19,12 @@ use crate::{
     runner::HttpState,
     source_document_html,
 };
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DocumentQuery {
+    evidence_id: Option<EvidenceId>,
+}
 
 struct DocumentBundle {
     pdf: ArtifactView,
@@ -42,10 +49,29 @@ pub(super) fn routes() -> Router<HttpState> {
 async fn document(
     State(state): State<HttpState>,
     StrictPath(id): StrictPath<SourceId>,
+    query: Result<Query<DocumentQuery>, QueryRejection>,
     StrictBytes(body): StrictBytes,
 ) -> Result<Json<DocumentRepresentationView>, HttpError> {
     empty(&body)?;
+    let Query(query) = query.map_err(|_| HttpError::new(ErrorCode::InvalidRequest))?;
     let bundle = load(&state, id).await?;
+    let evidence = match query.evidence_id {
+        Some(evidence_id) => {
+            let evidence = state
+                .store
+                .get_current_evidence(evidence_id)
+                .await?
+                .filter(|evidence| {
+                    evidence.source_id == id
+                        && evidence.job_id == bundle.pdf.job_id
+                        && evidence.source_artifact_id == bundle.pdf.artifact_id
+                        && matches!(evidence.locator, EvidenceLocator::Pdf { .. })
+                })
+                .ok_or_else(|| HttpError::new(ErrorCode::NotFound))?;
+            Some(evidence)
+        }
+        None => None,
+    };
     let pdf_url = format!("/api/v1/artifacts/{}/content", bundle.pdf.artifact_id);
     let view = if let Some(html) = bundle.html {
         DocumentRepresentationView::ScholarlyHtml {
@@ -58,7 +84,16 @@ async fn document(
             content_url: format!("/api/v1/sources/{id}/document/content"),
             fallback_pdf_artifact_id: bundle.pdf.artifact_id,
             fallback_pdf_url: pdf_url,
-            crosswalk: None,
+            crosswalk: evidence
+                .map(|evidence| {
+                    source_document_html::crosswalk(
+                        evidence.evidence_id,
+                        &html.html,
+                        &evidence.quote,
+                    )
+                })
+                .transpose()
+                .map_err(HttpError::new)?,
         }
     } else {
         DocumentRepresentationView::Pdf {
@@ -124,11 +159,24 @@ async fn load(state: &HttpState, source_id: SourceId) -> Result<DocumentBundle, 
         .ok_or_else(|| HttpError::new(ErrorCode::CorruptState))?;
     let pdf = exact(&job.artifacts, ArtifactKind::SourceOriginal)?
         .ok_or_else(|| HttpError::new(ErrorCode::CorruptState))?;
+    if !matches!(
+        source.kind,
+        SourceKind::Arxiv | SourceKind::PdfUrl | SourceKind::PdfUpload
+    ) || pdf.name != "original"
+        || pdf.media_type != "application/pdf"
+    {
+        return Err(HttpError::new(ErrorCode::CorruptState));
+    }
     let html_artifact = exact(&job.artifacts, ArtifactKind::ScholarlyHtml)?;
     let snapshot_artifact = exact(&job.artifacts, ArtifactKind::ScholarlyHtmlSnapshot)?;
     let html = match (html_artifact, snapshot_artifact) {
         (None, None) => None,
         (Some(html_artifact), Some(snapshot_artifact)) => {
+            if snapshot_artifact.name != "scholarly_snapshot"
+                || snapshot_artifact.media_type != "application/json"
+            {
+                return Err(HttpError::new(ErrorCode::CorruptState));
+            }
             let snapshot_bytes = read(state, &snapshot_artifact, 1024 * 1024).await?;
             let snapshot: ScholarlyHtmlSnapshot = serde_json::from_slice(&snapshot_bytes)
                 .map_err(|_| HttpError::new(ErrorCode::CorruptState))?;
