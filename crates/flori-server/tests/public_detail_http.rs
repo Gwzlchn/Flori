@@ -2,7 +2,7 @@
 mod fixture;
 
 use fixture::{Harness, assert_error, body, status};
-use flori_core::{CollectionView, DomainView, ErrorCode, JobId, JobView, SourceView};
+use flori_core::{CollectionView, DomainId, DomainView, ErrorCode, JobId, JobView, SourceView};
 
 #[tokio::test]
 async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
@@ -173,6 +173,32 @@ async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
         .expect("corrupt collection state");
     assert_error(
         &harness.get("/api/v1/collections").await,
+        500,
+        ErrorCode::CorruptState,
+    );
+    sqlx::query("UPDATE collections SET enabled=1 WHERE id=?")
+        .bind(harness.collection_id.to_string())
+        .execute(&mut *connection)
+        .await
+        .expect("restore collection state");
+    let foreign_domain = DomainId::generate();
+    sqlx::query(
+        "INSERT INTO domains(id,slug,name,profile_text,created_at_ms,updated_at_ms) \
+         VALUES(?,?,'Foreign','',0,0)",
+    )
+    .bind(foreign_domain.to_string())
+    .bind(format!("d-{foreign_domain}"))
+    .execute(&mut *connection)
+    .await
+    .expect("foreign domain");
+    sqlx::query("UPDATE collections SET domain_id=? WHERE id=?")
+        .bind(foreign_domain.to_string())
+        .bind(harness.collection_id.to_string())
+        .execute(&mut *connection)
+        .await
+        .expect("cross-domain collection");
+    assert_error(
+        &harness.get("/api/v1/sources").await,
         500,
         ErrorCode::CorruptState,
     );

@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use flori_core::{
-    CollectionId, CollectionKind, CollectionView, DomainView, ErrorCode, SourceId, SourceView,
+    CollectionId, CollectionKind, CollectionView, DomainId, DomainView, ErrorCode, SourceId,
+    SourceView,
 };
 use sqlx::{Row, sqlite::SqliteRow};
 
@@ -25,10 +26,12 @@ impl Store {
 
     pub async fn list_collections(&self) -> Result<Vec<CollectionView>, StoreError> {
         let rows = sqlx::query(
-            "SELECT c.id,c.domain_id,c.name,c.kind,c.subscription_source_id,c.enabled, \
+            "SELECT c.id,c.domain_id,c.name,c.kind,c.subscription_source_id,s.domain_id \
+             AS subscription_domain_id,c.enabled, \
              c.fanout_limit,c.last_synced_at_ms,c.last_sync_error, \
              (SELECT count(*) FROM collection_sources cs WHERE cs.collection_id=c.id) \
-             AS source_count FROM collections c ORDER BY c.domain_id,lower(c.name),c.id",
+             AS source_count FROM collections c LEFT JOIN sources s ON s.id=c.subscription_source_id \
+             ORDER BY c.domain_id,lower(c.name),c.id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -80,13 +83,20 @@ impl Store {
         &self,
     ) -> Result<BTreeMap<SourceId, Vec<CollectionId>>, StoreError> {
         let rows = sqlx::query(
-            "SELECT source_id,collection_id FROM collection_sources \
-             ORDER BY source_id,collection_id",
+            "SELECT cs.source_id,cs.collection_id,s.domain_id AS source_domain_id, \
+             c.domain_id AS collection_domain_id FROM collection_sources cs \
+             JOIN sources s ON s.id=cs.source_id JOIN collections c ON c.id=cs.collection_id \
+             ORDER BY cs.source_id,cs.collection_id",
         )
         .fetch_all(&self.pool)
         .await?;
         let mut memberships = BTreeMap::new();
         for row in &rows {
+            if parse_id::<DomainId>(row, "source_domain_id")?
+                != parse_id::<DomainId>(row, "collection_domain_id")?
+            {
+                return Err(StoreError::new(ErrorCode::CorruptState));
+            }
             memberships
                 .entry(parse_id(row, "source_id")?)
                 .or_insert_with(Vec::new)
@@ -110,12 +120,20 @@ fn parse_domain(row: &SqliteRow) -> Result<DomainView, StoreError> {
 
 fn parse_collection(row: &SqliteRow) -> Result<CollectionView, StoreError> {
     let enabled = row.try_get::<i64, _>("enabled")?;
+    let domain_id = parse_id(row, "domain_id")?;
+    let subscription_source_id = parse_optional_id(row, "subscription_source_id")?;
+    let subscription_domain_id = parse_optional_id::<DomainId>(row, "subscription_domain_id")?;
+    if subscription_source_id.is_some() != subscription_domain_id.is_some()
+        || subscription_domain_id.is_some_and(|value| value != domain_id)
+    {
+        return Err(StoreError::new(ErrorCode::CorruptState));
+    }
     Ok(CollectionView {
         collection_id: parse_id(row, "id")?,
-        domain_id: parse_id(row, "domain_id")?,
+        domain_id,
         name: row.try_get("name")?,
         kind: parse_collection_kind(&row.try_get::<String, _>("kind")?)?,
-        subscription_source_id: parse_optional_id(row, "subscription_source_id")?,
+        subscription_source_id,
         enabled: match enabled {
             0 => false,
             1 => true,
