@@ -59,10 +59,15 @@ jobs:
              grep -Eq '^\| WP08 Job 调度 \| 完成 \|' ROADMAP.md && \
              grep -Eq '^\| WP09 Runner 协议 \| 完成 \|' ROADMAP.md; then
             FLORI_DIFF_MAX_LINES=17000 FLORI_DIFF_MAX_FILES=95 cargo xtask diff-budget "$BASE"
-          elif git show "$BASE:ROADMAP.md" | grep -Eq '^\| WP05-WP07 首批产品实现 \| 完成 \|'; then
-            cargo xtask diff-budget "$BASE"
           else
-            FLORI_DIFF_MAX_LINES=1800 FLORI_DIFF_MAX_FILES=20 cargo xtask diff-budget "$BASE"
+            head="$(git rev-parse HEAD)"
+            parent="$BASE"
+            while read -r commit; do
+              git checkout --detach "$commit"
+              cargo xtask diff-budget "$parent"
+              parent="$commit"
+            done < <(git rev-list --reverse "$BASE..$head")
+            git checkout --detach "$head"
           fi
       - run: cargo xtask check
       - name: Verify SQLx offline metadata
