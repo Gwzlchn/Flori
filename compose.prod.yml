@@ -9,6 +9,9 @@ services:
       - "${FLORI_EDGE_PORT:-8080}:80"
     environment:
       FLORI_API_UPSTREAM: ${FLORI_API_UPSTREAM:-server:8000}
+    depends_on:
+      server:
+        condition: service_healthy
     restart: unless-stopped
 
   server:
@@ -26,6 +29,12 @@ services:
       - ${FLORI_LEASE_MS:-60000}
     volumes:
       - ${FLORI_DATA_DIR:-./data}:/data
+    healthcheck:
+      test: ["CMD", "flori-server", "healthcheck", "localhost:8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   runner-media:

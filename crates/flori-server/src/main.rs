@@ -12,9 +12,12 @@ use std::{
 };
 
 use flori_store::{Store, artifact::NasArtifactStore};
-use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 
-const USAGE: &str = "usage:\n  flori-server export-openapi <output>\n  flori-server serve <listen> <sqlite> <artifact-root> <artifact-download-base> <max-artifact-bytes> <lease-ms>";
+const USAGE: &str = "usage:\n  flori-server export-openapi <output>\n  flori-server healthcheck <address>\n  flori-server serve <listen> <sqlite> <artifact-root> <artifact-download-base> <max-artifact-bytes> <lease-ms>";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -31,6 +34,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = env::args_os().skip(1).collect::<Vec<_>>();
     match args.as_slice() {
         [command, output] if command == "export-openapi" => export_openapi(Path::new(output)),
+        [command, address] if command == "healthcheck" => healthcheck(parse_text(address)?).await,
         [
             command,
             listen,
@@ -52,6 +56,41 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE).into()),
     }
+}
+
+async fn healthcheck(address: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if address.is_empty()
+        || address.len() > 253
+        || address.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE).into());
+    }
+    let check = async {
+        let mut stream = TcpStream::connect(address).await?;
+        stream
+            .write_all(
+                b"GET /api/v1/system HTTP/1.1\r\nHost: localhost\r\nX-Flori-Protocol: 1\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        let mut response = Vec::new();
+        (&mut stream).take(8193).read_to_end(&mut response).await?;
+        if response.len() > 8192 || !response.starts_with(b"HTTP/1.1 200 ") {
+            return Err(io::Error::other("readiness endpoint rejected request"));
+        }
+        let marker = b"\r\n\r\n";
+        let body = response
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .map(|offset| &response[offset + marker.len()..])
+            .ok_or_else(|| io::Error::other("readiness response has no body"))?;
+        serde_json::from_slice::<flori_core::SystemView>(body)
+            .map_err(|_| io::Error::other("readiness response is invalid"))?;
+        Ok::<(), io::Error>(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), check)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "readiness timed out"))??;
+    Ok(())
 }
 
 async fn serve(
@@ -116,6 +155,33 @@ fn now_ms() -> Result<i64, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn readiness_checks_the_real_system_endpoint() {
+        let root = env::temp_dir().join(format!(
+            "flori-server-health-{}",
+            flori_core::RequestId::generate()
+        ));
+        fs::create_dir(&root).expect("test root");
+        let store = Arc::new(Store::open(root.join("flori.sqlite")).await.expect("store"));
+        let artifacts =
+            Arc::new(NasArtifactStore::new(root.join("artifacts"), 1024).expect("artifact store"));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                flori_server::app(store, artifacts, "http://localhost/content".into(), 60_000)
+                    .expect("app"),
+            )
+            .await
+            .expect("serve");
+        });
+        healthcheck(&address.to_string()).await.expect("healthy");
+        server.abort();
+        let _ = server.await;
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
 
     #[tokio::test]
     async fn recovery_failure_happens_before_listen() {
