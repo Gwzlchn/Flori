@@ -8,6 +8,7 @@ type NotePart = { kind: "text" | "evidence"; value: string };
 const props = defineProps<{
   note: string | undefined;
   summary: string | undefined;
+  translation: string | undefined;
   pdfUrl: string | undefined;
   evidence: components["schemas"]["EvidenceView"] | undefined;
   activeEvidenceId: string;
@@ -34,6 +35,7 @@ function segments(text: string | undefined): NotePart[] {
 const readings = computed(() => [
   { title: "摘要", parts: segments(props.summary) },
   { title: "智能笔记", parts: segments(props.note) },
+  { title: "全文翻译", parts: segments(props.translation) },
 ].filter((reading) => reading.parts.length > 0));
 
 const locator = computed(() => {

@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import { apiClient, apiError, type components } from "./api/client";
 import JobPanel from "./components/JobPanel.vue";
 import PdfReader from "./components/PdfReader.vue";
+import RerunPanel from "./components/RerunPanel.vue";
 import SearchPanel from "./components/SearchPanel.vue";
 
 const setup = ref<components["schemas"]["PdfSetupView"]>();
@@ -46,6 +47,7 @@ const pdfUrl = computed(() => {
 });
 const noteText = computed(() => textOf("smart_note"));
 const summaryText = computed(() => textOf("summary"));
+const translationText = computed(() => textOf("translation"));
 
 function chooseFile(event: Event): void {
   if (event.currentTarget instanceof HTMLInputElement) {
@@ -159,6 +161,8 @@ async function refreshJob(): Promise<void> {
   }
 }
 
+async function openJob(id: string): Promise<void> { clearArtifacts(); resetEvidence(); rememberJob(id); await refreshJob(); }
+
 async function submit(): Promise<void> {
   const currentSetup = setup.value;
   const file = selectedFile.value;
@@ -266,11 +270,17 @@ onUnmounted(() => { window.clearTimeout(pollTimer); clearArtifacts(); });
       v-if="job"
       :note="noteText"
       :summary="summaryText"
+      :translation="translationText"
       :pdf-url="pdfUrl"
       :evidence="evidence"
       :active-evidence-id="activeEvidenceId"
       :status="evidenceStatus"
       @select="selectEvidence"
+    />
+    <RerunPanel
+      v-if="job"
+      :job="job"
+      @created="openJob"
     />
     <JobPanel
       v-if="job"

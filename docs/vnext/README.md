@@ -27,7 +27,7 @@
 
 WP01-WP11 已完成。PDF 上传、直接 URL 和 arXiv 使用同一 Pipeline；digital PDF 可经 media Runner 生成结构、Figure、Table 区域和严格 evidence，再由 QoderCLI 或 CodexCLI 生成并发布 current 成果。扫描 PDF 在 extractor 和 AI 前拒绝。真实 Qoder 验收已在单独授权下完成；它不构成生产部署授权。
 
-WP12-A 只完成本地三秒视频的离线黄金基线，包括锁版 FFmpeg 探测、字幕规范化、关键帧和机械笔记；尚无视频 Pipeline 或 product daemon。WP13-A 已完成 current-only evidence、FTS 和 Artifact 读取投影；MCP 与其余知识库管理面仍待后续切片。WP14-A 已完成 PDF 上传、Job、Artifact、智能笔记阅读和 current-only FTS；搜索结果可打开对应 Job，并从 evidence 回到 PDF 页码与 bbox。前端只使用生成的 OpenAPI client。当前仍不是生产候选。
+WP12-A 只完成本地三秒视频的离线黄金基线，包括锁版 FFmpeg 探测、字幕规范化、关键帧和机械笔记；尚无视频 Pipeline 或 product daemon。WP13-A 已完成 current-only evidence、FTS 和 Artifact 读取投影；MCP 与其余知识库管理面仍待后续切片。WP14-A 已完成 PDF 上传、Job、Artifact、智能笔记阅读、current-only FTS、整条 Pipeline 重跑、独立翻译和指定 AI Runner 重跑；搜索与重跑结果都复用同一 Job 阅读页，并可从 evidence 回到 PDF 页码与 bbox。前端只使用生成的 OpenAPI client。当前仍不是生产候选。
 
 | 工作包 | 目标 | 产品代码 |
 |---|---|---|
