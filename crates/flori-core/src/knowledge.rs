@@ -4,8 +4,8 @@ use utoipa::ToSchema;
 use crate::{
     ArtifactId, ArtifactKind, AttemptId, AttemptState, CollectionId, CollectionKind,
     CompiledTaskSpec, DomainId, ErrorCode, EvidenceId, EvidenceLocator, Executor, JobId, JobInputs,
-    JobState, JobTrigger, PipelineId, PipelineRevisionId, RunnerId, SearchChunkId, Sha256Digest,
-    SourceId, SourceKind, TaskId, TaskState,
+    JobState, JobTrigger, PipelineId, PipelineRevisionId, RunnerId, ScholarlyProvider,
+    SearchChunkId, Sha256Digest, SourceId, SourceKind, TaskId, TaskState,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
@@ -144,6 +144,45 @@ pub struct EvidenceView {
     pub quote: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HtmlPdfCrosswalkStatus {
+    Verified,
+    QuoteMissing,
+    QuoteAmbiguous,
+    AnchorMissing,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HtmlPdfCrosswalk {
+    pub evidence_id: EvidenceId,
+    pub status: HtmlPdfCrosswalkStatus,
+    pub html_anchor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(tag = "representation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DocumentRepresentationView {
+    ScholarlyHtml {
+        source_id: SourceId,
+        job_id: JobId,
+        provider: ScholarlyProvider,
+        html_artifact_id: ArtifactId,
+        snapshot_artifact_id: ArtifactId,
+        content_url: String,
+        fallback_pdf_artifact_id: ArtifactId,
+        fallback_pdf_url: String,
+        crosswalk: Option<HtmlPdfCrosswalk>,
+    },
+    Pdf {
+        source_id: SourceId,
+        job_id: JobId,
+        pdf_artifact_id: ArtifactId,
+        content_url: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +217,14 @@ mod tests {
             ArtifactId::generate(),
         );
         serde_json::from_str::<SearchHit>(&json).expect_err("unknown search field");
+
+        let representation = format!(
+            r#"{{"representation":"pdf","source_id":"{}","job_id":"{}","pdf_artifact_id":"{}","content_url":"/content","extra":true}}"#,
+            SourceId::generate(),
+            JobId::generate(),
+            ArtifactId::generate(),
+        );
+        serde_json::from_str::<DocumentRepresentationView>(&representation)
+            .expect_err("unknown representation field");
     }
 }

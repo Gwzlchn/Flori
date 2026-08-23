@@ -3,8 +3,9 @@
 
 use crate::{
     ArtifactId, ArtifactView, CollectionView, CreateJobRequest, CreateUploadSourceForm, CreatedJob,
-    CreatedSource, DomainView, ErrorResponse, EvidenceId, EvidenceView, JobId, JobView,
-    PdfSetupView, RerunJobRequest, RunnerView, SearchHit, SourceId, SourceView, SystemView,
+    CreatedSource, DocumentRepresentationView, DomainView, ErrorResponse, EvidenceId, EvidenceView,
+    JobId, JobView, PdfSetupView, RerunJobRequest, RunnerView, SearchHit, SourceId, SourceView,
+    SystemView,
 };
 
 #[utoipa::path(
@@ -95,6 +96,31 @@ pub(crate) fn sources() {}
     responses((status = 200, body = SourceView), (status = 404, body = ErrorResponse))
 )]
 pub(crate) fn source_detail() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/sources/{source_id}/document",
+    params(("source_id" = SourceId, Path), ("evidence_id" = Option<EvidenceId>, Query)),
+    responses(
+        (status = 200, body = DocumentRepresentationView),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+    )
+)]
+pub(crate) fn source_document() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/sources/{source_id}/document/content",
+    params(("source_id" = SourceId, Path)),
+    responses(
+        (status = 200, body = String, content_type = "text/html"),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+    )
+)]
+pub(crate) fn source_document_content() {}
 
 #[utoipa::path(
     delete,

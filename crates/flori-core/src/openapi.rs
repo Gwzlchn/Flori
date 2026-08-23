@@ -10,13 +10,14 @@ use crate::{
     AttemptView, CollectionId, CollectionKind, CollectionView, CompleteAttemptRequest,
     ConceptOccurrenceId, CreateJobRequest, CreateRemoteSource, CreateRunnerSlot,
     CreateRunnerSlotResponse, CreateUploadSource, CreatedJob, CreatedSource, CredentialId,
-    CredentialKind, DocumentFigure, DocumentPage, DocumentSection, DocumentStructure,
-    DocumentStructureSchema, DocumentTable, DocumentTextBlock, DomainId, DomainView, ErrorBody,
-    ErrorCode, ErrorResponse, EvidenceEntry, EvidenceId, EvidenceLocator, EvidenceLocatorKind,
-    EvidenceManifest, EvidenceManifestSchema, EvidenceView, Executor, FailAttemptRequest,
-    GlossaryTermId, GlossaryTermState, JobEvent, JobEventKind, JobEventPayload, JobEventScope,
-    JobId, JobInputs, JobState, JobStateEvent, JobTrigger, JobView, LogCursor, LogFrame,
-    PartsManifest, PartsManifestSchema, PdfRect, PdfSetupView, PendingSourceCommit, PipelineId,
+    CredentialKind, DocumentFigure, DocumentPage, DocumentRepresentationView, DocumentSection,
+    DocumentStructure, DocumentStructureSchema, DocumentTable, DocumentTextBlock, DomainId,
+    DomainView, ErrorBody, ErrorCode, ErrorResponse, EvidenceEntry, EvidenceId, EvidenceLocator,
+    EvidenceLocatorKind, EvidenceManifest, EvidenceManifestSchema, EvidenceView, Executor,
+    FailAttemptRequest, GlossaryTermId, GlossaryTermState, HtmlPdfCrosswalk,
+    HtmlPdfCrosswalkStatus, JobEvent, JobEventKind, JobEventPayload, JobEventScope, JobId,
+    JobInputs, JobState, JobStateEvent, JobTrigger, JobView, LogCursor, LogFrame, PartsManifest,
+    PartsManifestSchema, PdfRect, PdfSetupView, PendingSourceCommit, PipelineId,
     PipelineRevisionId, PromptSnapshotId, QrSessionId, RegisterRunnerRequest,
     RegisterRunnerResponse, RenewLeaseResponse, RequestId, RerunJobRequest, RerunMode,
     ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource, ResolvedSourceInput,
@@ -45,6 +46,8 @@ use crate::{
         crate::api_paths::collections,
         crate::api_paths::sources,
         crate::api_paths::source_detail,
+        crate::api_paths::source_document,
+        crate::api_paths::source_document_content,
         crate::api_paths::delete_source,
         crate::api_paths::create_job,
         crate::api_paths::job_detail,
@@ -196,6 +199,9 @@ use crate::{
         ArtifactView,
         SearchHit,
         EvidenceView,
+        HtmlPdfCrosswalkStatus,
+        HtmlPdfCrosswalk,
+        DocumentRepresentationView,
         RunnerView,
         SourceChangedEvent,
         JobStateEvent,
@@ -250,7 +256,7 @@ mod tests {
 
         assert_eq!(document.info.title, "Flori API");
         assert_eq!(document.info.version, "flori.v1");
-        assert_eq!(document.paths.paths.len(), 18);
+        assert_eq!(document.paths.paths.len(), 20);
         assert!(document.paths.paths.contains_key("/api/v1/system"));
         assert!(document.paths.paths.contains_key("/api/v1/events"));
         assert!(
@@ -263,6 +269,18 @@ mod tests {
         assert!(document.paths.paths.contains_key("/api/v1/domains"));
         assert!(document.paths.paths.contains_key("/api/v1/collections"));
         assert!(document.paths.paths.contains_key("/api/v1/sources"));
+        assert!(
+            document
+                .paths
+                .paths
+                .contains_key("/api/v1/sources/{source_id}/document")
+        );
+        assert!(
+            document
+                .paths
+                .paths
+                .contains_key("/api/v1/sources/{source_id}/document/content")
+        );
         assert!(document.paths.paths.contains_key("/api/v1/jobs/{job_id}"));
         assert!(
             document
@@ -293,6 +311,7 @@ mod tests {
         assert!(schemas.contains_key("AttemptView"));
         assert!(schemas.contains_key("RunnerView"));
         assert!(schemas.contains_key("EvidenceLocator"));
+        assert!(schemas.contains_key("DocumentRepresentationView"));
         assert!(schemas.contains_key("Sha256Digest"));
         assert!(schemas.contains_key("TaskClaim"));
         assert!(schemas.contains_key("CompleteAttemptRequest"));
