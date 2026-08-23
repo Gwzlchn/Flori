@@ -13,6 +13,7 @@ const SCHEMA: &str = include_str!("../migrations/0001_v1.sql");
 mod bootstrap;
 mod knowledge;
 mod lease;
+mod lifecycle;
 mod reconcile;
 mod runner;
 mod scheduler;

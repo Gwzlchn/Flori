@@ -9,6 +9,7 @@ use flori_core::{ErrorCode, UploadState};
 use sha2::{Digest, Sha256};
 
 mod content;
+mod delete;
 mod path;
 mod record;
 mod recovery;
