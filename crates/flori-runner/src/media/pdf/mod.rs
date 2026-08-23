@@ -6,6 +6,8 @@ mod log;
 mod network;
 mod process;
 mod scan;
+mod scholarly;
+mod scholarly_fetch;
 mod upload;
 
 pub use acquire::{PdfAcquireConfig, acquire_pdf};

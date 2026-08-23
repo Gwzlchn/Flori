@@ -11,7 +11,9 @@ use tokio::{fs, sync::watch};
 
 use crate::{RunnerClient, manifest_sha256};
 
-use super::{PdfAcquireConfig, PdfExtractConfig, acquire_pdf, claim, extract_pdf, log, upload};
+use super::{
+    PdfAcquireConfig, PdfExtractConfig, acquire_pdf, claim, extract_pdf, log, scholarly, upload,
+};
 
 pub struct PdfDaemonConfig {
     pub work_root: PathBuf,
@@ -154,7 +156,7 @@ async fn run_task(
             let path = workspace.join("source.pdf");
             acquire_pdf(client, source, &path, &config.acquire).await?;
             let declaration = claim::exact(claim, ArtifactKind::SourceOriginal)?;
-            Ok(vec![
+            let mut entries = vec![
                 upload::file(
                     client,
                     claim,
@@ -164,7 +166,18 @@ async fn run_task(
                     &path,
                 )
                 .await?,
-            ])
+            ];
+            entries.extend(
+                scholarly::capture(
+                    client,
+                    claim,
+                    source,
+                    &workspace.join("scholarly"),
+                    config.acquire.timeout,
+                )
+                .await?,
+            );
+            Ok(entries)
         }
         ResolvedTaskInputs::DocumentExtract { pdf } => {
             let input = workspace.join("source.pdf");

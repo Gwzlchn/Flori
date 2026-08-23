@@ -29,6 +29,7 @@ required-features = ["codex"]
 
 [dependencies]
 flori-core.workspace = true
+lol_html.workspace = true
 reqwest.workspace = true
 rustix.workspace = true
 serde.workspace = true
