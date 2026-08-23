@@ -40,12 +40,20 @@ const selectedTask = computed(() => props.job.tasks.find((task) => task.task_key
 const selectedArtifacts = computed(() => props.job.artifacts.filter((artifact) =>
   artifact.task_id === selectedTask.value?.task_id,
 ));
+const taskLabels: Record<string, string> = {
+  acquire: "获取 PDF", extract: "解析文档", note: "生成智能笔记", translate: "全文翻译",
+  validate: "校验证据", publish: "发布成果",
+};
+const stateLabels: Record<components["schemas"]["TaskState"], string> = {
+  pending: "等待", ready: "就绪", leased: "执行中", succeeded: "完成", failed: "失败", skipped: "复用", canceled: "取消",
+};
 
 watch(() => props.job.job_id, () => { selectedTaskKey.value = orderedTasks.value[0]?.task_key ?? ""; }, { immediate: true });
 
 function sizeLabel(bytes: number): string {
   return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
+function taskLabel(key: string): string { return taskLabels[key] ?? key; }
 </script>
 
 <template>
@@ -58,9 +66,12 @@ function sizeLabel(bytes: number): string {
       <div>
         <p class="eyebrow">
           Execution graph
-        </p><h3 id="pipeline-title">
-          Pipeline 运行状态
-        </h3>
+        </p><h2 id="pipeline-title">
+          Pipeline 流程
+        </h2>
+        <p class="meta">
+          点击任一步骤，查看执行器、声明产物、实际产物和 Attempt。
+        </p>
       </div>
       <button
         type="button"
@@ -85,7 +96,7 @@ function sizeLabel(bytes: number): string {
         :key="index"
         class="dag-level"
       >
-        <span class="dag-level-label">{{ index + 1 }}</span>
+        <span class="dag-level-label">阶段 {{ index + 1 }}</span>
         <button
           v-for="task in level"
           :key="task.task_id"
@@ -94,7 +105,7 @@ function sizeLabel(bytes: number): string {
           :class="[{ 'is-active': selectedTask?.task_id === task.task_id }, `state-${task.state}`]"
           @click="selectedTaskKey = task.task_key"
         >
-          <b>{{ task.task_key }}</b><small>{{ task.executor }}</small><span>{{ task.state }}</span>
+          <b>{{ taskLabel(task.task_key) }}</b><small>{{ task.executor }}</small><span>{{ stateLabels[task.state] }}</span>
         </button>
       </div>
     </div>
@@ -106,12 +117,12 @@ function sizeLabel(bytes: number): string {
         <div>
           <p class="eyebrow">
             Selected step
-          </p><h3>{{ selectedTask.task_key }}</h3>
+          </p><h2>{{ taskLabel(selectedTask.task_key) }}</h2>
         </div>
         <span
           class="status-pill"
           :class="`state-${selectedTask.state}`"
-        >{{ selectedTask.state }}</span>
+        >{{ stateLabels[selectedTask.state] }}</span>
       </header>
       <p class="meta">
         {{ selectedTask.executor }} · 依赖 {{ selectedTask.spec.needs.join(", ") || "无" }} · timeout {{ selectedTask.spec.timeout_ms }}ms
@@ -124,7 +135,7 @@ function sizeLabel(bytes: number): string {
       </p>
       <div class="step-columns">
         <section>
-          <h3>声明产物</h3><ul class="compact-list">
+          <h3>声明产物</h3><ul class="compact-list declaration-list">
             <li
               v-for="artifact in selectedTask.spec.artifacts"
               :key="artifact.name"
@@ -134,19 +145,32 @@ function sizeLabel(bytes: number): string {
           </ul>
         </section>
         <section>
-          <h3>实际产物</h3><ul class="compact-list">
-            <li
+          <h3>实际产物</h3><div class="step-artifacts">
+            <details
               v-for="artifact in selectedArtifacts"
               :key="artifact.artifact_id"
+              class="step-artifact"
             >
-              <b>{{ artifact.name }}</b><span>{{ artifact.kind }} · {{ sizeLabel(artifact.size_bytes) }}</span>
-            </li><li
+              <summary><span><b>{{ artifact.name }}</b><small>{{ artifact.kind }} · {{ sizeLabel(artifact.size_bytes) }}</small></span><span>查看</span></summary>
+              <img
+                v-if="(artifact.kind === 'figure' || artifact.kind === 'table_region') && fileUrls.get(artifact.artifact_id)"
+                :src="fileUrls.get(artifact.artifact_id)"
+                :alt="artifact.name"
+              >
+              <pre v-else-if="textContent.has(artifact.artifact_id)">{{ textContent.get(artifact.artifact_id) }}</pre>
+              <p
+                v-else
+                class="meta"
+              >
+                此产物没有可内嵌预览。
+              </p>
+            </details><p
               v-if="!selectedArtifacts.length"
               class="meta"
             >
               尚无产物
-            </li>
-          </ul>
+            </p>
+          </div>
         </section>
       </div>
       <details
@@ -160,6 +184,7 @@ function sizeLabel(bytes: number): string {
             :key="attempt.attempt_id"
           >
             #{{ attempt.attempt_no }} {{ attempt.state }}<span v-if="attempt.runner_id"> · Runner {{ attempt.runner_id.slice(0, 8) }}</span>
+            <span v-if="attempt.model"> · {{ attempt.model }} / {{ attempt.effort }}</span>
             <span
               v-if="attempt.error_code"
               class="error-text"
