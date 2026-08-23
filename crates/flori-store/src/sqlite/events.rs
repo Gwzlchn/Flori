@@ -63,7 +63,9 @@ impl Store {
         .fetch_one(&self.pool)
         .await?;
         if after_i64 > 0
-            && minimum.map_or(after_i64 <= allocated, |minimum| after_i64 + 1 < minimum)
+            && minimum.map_or(after_i64 <= allocated, |minimum| {
+                after_i64.saturating_add(1) < minimum
+            })
         {
             return Err(StoreError::new(ErrorCode::EventCursorExpired));
         }

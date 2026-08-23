@@ -10,8 +10,6 @@ use crate::{
 #[serde(deny_unknown_fields)]
 pub struct SourceChangedEvent {
     pub source_id: SourceId,
-    pub current_job_id: Option<JobId>,
-    pub previous_job_id: Option<JobId>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
