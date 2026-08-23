@@ -24,7 +24,7 @@ use crate::{
     error::HttpError,
     knowledge_http,
     protocol::{BearerToken, StrictBytes, StrictJson, StrictPath, require_v1},
-    runner_content, runner_upload, runner_view, source_job, source_upload,
+    runner_content, runner_upload, runner_view, source_job, source_upload, system_http,
 };
 
 #[derive(Clone)]
@@ -56,6 +56,7 @@ pub(super) fn routes(
         .merge(knowledge_http::routes())
         .merge(runner_content::routes())
         .merge(runner_view::routes())
+        .merge(system_http::routes())
         .route("/runner/v1/register", post(register))
         .route(
             "/runner/v1/poll",

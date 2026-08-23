@@ -33,6 +33,9 @@ use crate::{
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        crate::api_paths::system,
+        crate::api_paths::events,
+        crate::api_paths::job_events,
         crate::api_paths::pdf_setup,
         crate::api_paths::upload_source,
         crate::api_paths::source_detail,
@@ -233,7 +236,15 @@ mod tests {
 
         assert_eq!(document.info.title, "Flori API");
         assert_eq!(document.info.version, "flori.v1");
-        assert_eq!(document.paths.paths.len(), 12);
+        assert_eq!(document.paths.paths.len(), 15);
+        assert!(document.paths.paths.contains_key("/api/v1/system"));
+        assert!(document.paths.paths.contains_key("/api/v1/events"));
+        assert!(
+            document
+                .paths
+                .paths
+                .contains_key("/api/v1/jobs/{job_id}/events")
+        );
         assert!(document.paths.paths.contains_key("/api/v1/pdf/setup"));
         assert!(document.paths.paths.contains_key("/api/v1/jobs/{job_id}"));
         assert!(

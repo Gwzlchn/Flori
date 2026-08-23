@@ -11,6 +11,7 @@ mod runner_upload;
 mod runner_view;
 mod source_job;
 mod source_upload;
+mod system_http;
 
 use std::sync::Arc;
 

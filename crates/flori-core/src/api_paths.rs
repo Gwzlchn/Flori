@@ -4,8 +4,38 @@
 use crate::{
     ArtifactId, ArtifactView, CreateJobRequest, CreateUploadSourceForm, CreatedJob, CreatedSource,
     ErrorResponse, EvidenceId, EvidenceView, JobId, JobView, PdfSetupView, RerunJobRequest,
-    RunnerView, SearchHit, SourceId, SourceView,
+    RunnerView, SearchHit, SourceId, SourceView, SystemView,
 };
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/system",
+    responses((status = 200, body = SystemView), (status = 500, body = ErrorResponse))
+)]
+pub(crate) fn system() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/events",
+    params(("after" = Option<u64>, Query)),
+    responses(
+        (status = 200, body = String, content_type = "text/event-stream"),
+        (status = 400, body = ErrorResponse),
+    )
+)]
+pub(crate) fn events() {}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs/{job_id}/events",
+    params(("job_id" = JobId, Path), ("after" = Option<u64>, Query)),
+    responses(
+        (status = 200, body = String, content_type = "text/event-stream"),
+        (status = 400, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+    )
+)]
+pub(crate) fn job_events() {}
 
 #[utoipa::path(
     get,
