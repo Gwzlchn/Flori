@@ -129,7 +129,6 @@ impl Harness {
             schema: ScholarlyHtmlSnapshotSchema::V1,
             job_id,
             provider: ScholarlyProvider::Arxiv,
-            document_url: "https://arxiv.org/html/1706.03762".into(),
             html: ScholarlyFile {
                 artifact_name: "scholarly_html".into(),
                 media_type: "text/html".into(),

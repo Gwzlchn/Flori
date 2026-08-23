@@ -146,7 +146,6 @@ async fn capture_provider(
         schema: ScholarlyHtmlSnapshotSchema::V1,
         job_id,
         provider,
-        document_url: final_url.to_string(),
         html: ScholarlyFile {
             artifact_name: "scholarly_html".into(),
             media_type: "text/html".into(),

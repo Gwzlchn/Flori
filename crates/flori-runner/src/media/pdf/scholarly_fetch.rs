@@ -11,7 +11,7 @@ pub(super) async fn fetch(
     timeout: Duration,
 ) -> Result<(Vec<u8>, Url, String), ErrorCode> {
     for redirects in 0..=network::MAX_REDIRECTS {
-        if !safe_url(&url) {
+        if url.scheme() != "https" || network::parse_http_url(url.as_str()).is_err() {
             return Err(ErrorCode::UnsupportedSource);
         }
         let client = network::pinned_client(&url, timeout).await?;
@@ -75,7 +75,7 @@ pub(super) async fn fetch(
 }
 
 pub(super) fn provider_url(provider: ScholarlyProvider, url: &Url) -> bool {
-    if !safe_url(url) {
+    if url.scheme() != "https" || network::parse_http_url(url.as_str()).is_err() {
         return false;
     }
     let host = url.host_str().unwrap_or_default();
@@ -85,14 +85,6 @@ pub(super) fn provider_url(provider: ScholarlyProvider, url: &Url) -> bool {
             matches!(host, "ar5iv.labs.arxiv.org" | "ar5iv.org" | "www.ar5iv.org")
         }
     }
-}
-
-fn safe_url(url: &Url) -> bool {
-    url.scheme() == "https"
-        && url.host_str().is_some()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.fragment().is_none()
 }
 
 pub(super) fn image_extension(media: &str, bytes: &[u8]) -> Result<&'static str, ErrorCode> {

@@ -172,15 +172,13 @@ pub struct ScholarlyHtmlSnapshot {
     pub schema: ScholarlyHtmlSnapshotSchema,
     pub job_id: JobId,
     pub provider: ScholarlyProvider,
-    pub document_url: String,
     pub html: ScholarlyFile,
     pub resources: Vec<ScholarlyFile>,
 }
 
 impl ScholarlyHtmlSnapshot {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if !valid_document_url(self.provider, &self.document_url)
-            || self.html.artifact_name != "scholarly_html"
+        if self.html.artifact_name != "scholarly_html"
             || self.html.media_type != "text/html"
             || self.html.size_bytes == 0
             || self.html.size_bytes > SCHOLARLY_HTML_MAX_BYTES
@@ -212,28 +210,6 @@ impl ScholarlyHtmlSnapshot {
         }
         Ok(())
     }
-}
-
-fn valid_document_url(provider: ScholarlyProvider, value: &str) -> bool {
-    let prefixes: &[&str] = match provider {
-        ScholarlyProvider::Arxiv => &["https://arxiv.org/html/", "https://www.arxiv.org/html/"],
-        ScholarlyProvider::Ar5iv => &[
-            "https://ar5iv.labs.arxiv.org/html/",
-            "https://ar5iv.org/html/",
-            "https://www.ar5iv.org/html/",
-        ],
-    };
-    prefixes.iter().any(|prefix| value.starts_with(prefix)) && valid_https_url(value)
-}
-
-fn valid_https_url(value: &str) -> bool {
-    value
-        .strip_prefix("https://")
-        .and_then(|rest| rest.split(['/', '?']).next())
-        .is_some_and(|authority| !authority.is_empty())
-        && value.len() <= 8192
-        && !value.contains(['@', '#', '\\'])
-        && !value.chars().any(char::is_control)
 }
 
 fn valid_scholarly_name(value: &str) -> bool {
@@ -322,7 +298,6 @@ mod tests {
             schema: ScholarlyHtmlSnapshotSchema::V1,
             job_id: JobId::generate(),
             provider: ScholarlyProvider::Arxiv,
-            document_url: "https://arxiv.org/html/1706.03762".into(),
             html: ScholarlyFile {
                 artifact_name: "scholarly_html".into(),
                 media_type: "text/html".into(),
