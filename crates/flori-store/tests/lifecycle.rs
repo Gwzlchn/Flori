@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use flori_core::{
     AiTool, AiUsageId, AttemptId, CompleteAttemptRequest, DomainId, ErrorCode, JobId, LogFrame,
     PipelineId, PipelineRevisionId, PromptSnapshotId, RunnerId, Sha256Digest, SourceId,
-    SourceInputId, TaskId, UploadId, UsageOrigin, UsageUpdate,
+    SourceInputId, StartUploadRequest, TaskId, UploadId, UsageOrigin, UsageUpdate,
 };
 use flori_store::{StartAiUsage, Store, artifact::NasArtifactStore};
 use sha2::{Digest, Sha256};
@@ -192,6 +192,25 @@ async fn cancel_fences_attempt_and_only_allows_existing_usage_to_finish() {
     );
     assert_eq!(
         store
+            .start_attempt_upload(
+                &artifacts,
+                seed.runner,
+                seed.attempt,
+                &StartUploadRequest {
+                    name: "late".into(),
+                    media_type: "application/json".into(),
+                    size_bytes: 0,
+                    sha256: digest(""),
+                },
+                3,
+            )
+            .await
+            .expect_err("upload")
+            .code(),
+        ErrorCode::StaleAttempt
+    );
+    assert_eq!(
+        store
             .start_ai_usage(
                 StartAiUsage {
                     id: AiUsageId::generate(),
@@ -228,6 +247,27 @@ async fn cancel_fences_attempt_and_only_allows_existing_usage_to_finish() {
         .await
         .expect("late final");
     assert_eq!(ack.usage_id, usage_id);
+
+    for (job_state, task_state, attempt_state) in [
+        ("succeeded", "succeeded", "succeeded"),
+        ("failed", "failed", "failed"),
+    ] {
+        let terminal = crate::seed(&pool, job_state, task_state).await;
+        sqlx::query("UPDATE attempts SET state=?,finished_at_ms=2 WHERE id=?")
+            .bind(attempt_state)
+            .bind(terminal.attempt.to_string())
+            .execute(&pool)
+            .await
+            .expect("terminal attempt");
+        assert_eq!(
+            store
+                .cancel_job(&artifacts, terminal.job, 3)
+                .await
+                .expect_err("terminal cancel")
+                .code(),
+            ErrorCode::Conflict
+        );
+    }
 }
 
 #[tokio::test]
