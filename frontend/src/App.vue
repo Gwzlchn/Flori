@@ -2,6 +2,7 @@
 import { computed, watch } from "vue";
 
 import KnowledgeSidebar from "./components/KnowledgeSidebar.vue";
+import DocumentHeader from "./components/DocumentHeader.vue";
 import PdfReader from "./components/PdfReader.vue";
 import RerunPanel from "./components/RerunPanel.vue";
 import SearchPanel from "./components/SearchPanel.vue";
@@ -26,10 +27,16 @@ const collectionNames = computed(() => source.value?.collection_ids
 const activeDomainName = computed(() => domains.value.find((item) => item.domain_id === source.value?.domain_id)?.name
   ?? selectedDomain.value?.name ?? "知识库");
 const activeCollectionName = computed(() => collectionNames.value[0] ?? selectedCollection.value?.name);
+const showNotice = computed(() => !job.value || job.value.state !== "succeeded" || !notice.value.startsWith("Job succeeded"));
 
 function chooseContext(domainId: string, collectionId = ""): void {
   selectContext(domainId, collectionId);
   setUploadContext(domainId, collectionId);
+}
+
+function startSubmission(): void {
+  if (job.value) window.location.assign(window.location.pathname);
+  else document.querySelector("#upload")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 watch(source, (current) => {
@@ -39,7 +46,6 @@ watch(source, (current) => {
   void refreshLibrary();
 });
 
-function shortId(value: string): string { return `${value.slice(0, 8)}…${value.slice(-4)}`; }
 </script>
 
 <template>
@@ -54,6 +60,7 @@ function shortId(value: string): string { return `${value.slice(0, 8)}…${value
       :status="libraryStatus"
       @open="openJob"
       @select="chooseContext"
+      @submit="startSubmission"
     />
 
     <div class="app-main">
@@ -70,34 +77,15 @@ function shortId(value: string): string { return `${value.slice(0, 8)}…${value
         id="workspace"
         class="page"
       >
-        <section
+        <DocumentHeader
           v-if="job"
-          class="document-head card"
-        >
-          <div class="document-icon">
-            ▤
-          </div>
-          <div class="document-copy">
-            <p class="eyebrow">
-              {{ source?.kind ?? "PDF" }} · {{ job.trigger }}
-            </p>
-            <h1>{{ sourceTitle }}</h1>
-            <p class="meta">
-              Job {{ job.job_id }} · revision {{ shortId(job.pipeline_revision_id) }}
-            </p>
-          </div>
-          <span
-            class="status-pill"
-            :class="`state-${job.state}`"
-          >{{ job.state }}</span>
-          <button
-            type="button"
-            class="btn secondary"
-            @click="refreshJob"
-          >
-            刷新
-          </button>
-        </section>
+          :job="job"
+          :source="source"
+          :title="sourceTitle"
+          :domain-name="activeDomainName"
+          :collection-names="collectionNames"
+          @refresh="refreshJob"
+        />
         <section
           v-else
           class="welcome"
@@ -110,6 +98,7 @@ function shortId(value: string): string { return `${value.slice(0, 8)}…${value
         </section>
 
         <details
+          v-if="!job"
           id="upload"
           class="upload-card card"
           :open="!job"
@@ -146,6 +135,7 @@ function shortId(value: string): string { return `${value.slice(0, 8)}…${value
         </details>
 
         <p
+          v-if="showNotice"
           class="notice-bar"
           aria-live="polite"
         >

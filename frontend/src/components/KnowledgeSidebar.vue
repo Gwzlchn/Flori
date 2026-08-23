@@ -2,6 +2,9 @@
 import { computed } from "vue";
 
 import type { components } from "../api/client";
+import UiIcon from "./UiIcon.vue";
+
+const floriLogo = new URL("../assets/flori-logo.png", import.meta.url).href;
 
 const props = defineProps<{
   domains: components["schemas"]["DomainView"][];
@@ -15,6 +18,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   open: [jobId: string];
   select: [domainId: string, collectionId?: string];
+  submit: [];
 }>();
 
 function collectionsOf(domainId: string): components["schemas"]["CollectionView"][] {
@@ -35,11 +39,29 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
       href="#workspace"
       aria-label="Flori 知识库"
     >
-      <span class="brand-mark">✦</span>
+      <span class="brand-mark"><img
+        :src="floriLogo"
+        alt=""
+      ></span>
       <span><strong>Flori</strong><small>Knowledge base</small></span>
     </a>
+    <div class="sidebar-primary">
+      <button
+        type="button"
+        @click="emit('submit')"
+      >
+        <UiIcon name="send" />投递内容
+      </button>
+      <span title="当前发布成果"><UiIcon
+        name="archive"
+        :size="17"
+      /></span>
+    </div>
     <div class="library-heading">
-      <span>知识库</span><small>{{ status }}</small>
+      <span><UiIcon
+        name="book"
+        :size="15"
+      />知识库</span><small>{{ status }}</small>
     </div>
     <nav
       class="library-tree"
@@ -56,7 +78,10 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
           :class="{ 'is-active': selectedDomainId === domain.domain_id && !selectedCollectionId }"
           @click="emit('select', domain.domain_id)"
         >
-          <span>▾</span><b>{{ domain.name }}</b><small>{{ domain.source_count }}</small>
+          <UiIcon
+            name="chevron"
+            :size="13"
+          /><b>{{ domain.name }}</b><small>{{ domain.source_count }}</small>
         </button>
         <div
           v-for="collection in collectionsOf(domain.domain_id)"
@@ -69,7 +94,10 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
             :class="{ 'is-active': selectedCollectionId === collection.collection_id }"
             @click="emit('select', domain.domain_id, collection.collection_id)"
           >
-            <span>▤</span><b>{{ collection.name }}</b><small>{{ collection.source_count }}</small>
+            <UiIcon
+              name="folder"
+              :size="14"
+            /><b>{{ collection.name }}</b><small>{{ collection.source_count }}</small>
           </button>
           <button
             v-for="source in sourcesOf(domain.domain_id, collection.collection_id)"
@@ -80,7 +108,10 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
             :disabled="!source.current_job_id"
             @click="source.current_job_id && emit('open', source.current_job_id)"
           >
-            <span>◦</span><b>{{ source.title ?? source.canonical_ref }}</b>
+            <UiIcon
+              name="file"
+              :size="13"
+            /><b>{{ source.title ?? source.canonical_ref }}</b>
           </button>
         </div>
         <div
@@ -93,7 +124,10 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
             :class="{ 'is-active': selectedDomainId === domain.domain_id && !selectedCollectionId }"
             @click="emit('select', domain.domain_id)"
           >
-            <span>⌂</span><b>未归分类</b><small>{{ sourcesOf(domain.domain_id).length }}</small>
+            <UiIcon
+              name="folder"
+              :size="14"
+            /><b>未归分类</b><small>{{ sourcesOf(domain.domain_id).length }}</small>
           </button>
           <button
             v-for="source in sourcesOf(domain.domain_id)"
@@ -104,17 +138,26 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
             :disabled="!source.current_job_id"
             @click="source.current_job_id && emit('open', source.current_job_id)"
           >
-            <span>◦</span><b>{{ source.title ?? source.canonical_ref }}</b>
+            <UiIcon
+              name="file"
+              :size="13"
+            /><b>{{ source.title ?? source.canonical_ref }}</b>
           </button>
         </div>
       </section>
     </nav>
-    <a
+    <button
       class="sidebar-upload"
-      href="#upload"
-    ><span>＋</span>投递到 {{ selectedLabel }}</a>
+      type="button"
+      @click="emit('submit')"
+    >
+      <UiIcon
+        name="send"
+        :size="14"
+      />投递到 {{ selectedLabel }}
+    </button>
     <footer class="side-footer">
-      <span class="health-dot" /> vNext · current only
+      <span class="health-dot" /> Home Core 已连接
     </footer>
   </aside>
 </template>
