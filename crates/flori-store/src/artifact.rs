@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 mod content;
 mod delete;
 mod path;
+mod prune;
 mod record;
 mod recovery;
 

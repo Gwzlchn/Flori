@@ -145,7 +145,7 @@ fn create_checked(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
     }
 }
 
-fn checked_directory(path: &std::path::Path) -> Result<Option<()>, ArtifactStoreError> {
+pub(super) fn checked_directory(path: &std::path::Path) -> Result<Option<()>, ArtifactStoreError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(Some(())),
         Ok(_) => Err(invalid()),
@@ -154,7 +154,7 @@ fn checked_directory(path: &std::path::Path) -> Result<Option<()>, ArtifactStore
     }
 }
 
-fn reject_existing(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
+pub(super) fn reject_existing(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Ok(_) => Err(invalid()),
@@ -162,16 +162,16 @@ fn reject_existing(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
     }
 }
 
-fn sync_parent(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
+pub(super) fn sync_parent(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
     let parent = path.parent().ok_or_else(invalid)?;
     sync_directory(parent)
 }
 
-fn sync_directory(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
+pub(super) fn sync_directory(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
     fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 
-fn invalid() -> ArtifactStoreError {
+pub(super) fn invalid() -> ArtifactStoreError {
     ArtifactStoreError::with_code(ErrorCode::ArtifactInvalidPath)
 }
