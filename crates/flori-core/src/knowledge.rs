@@ -170,6 +170,7 @@ pub enum DocumentRepresentationView {
         provider: ScholarlyProvider,
         html_artifact_id: ArtifactId,
         snapshot_artifact_id: ArtifactId,
+        resources: Vec<ArtifactView>,
         content_url: String,
         fallback_pdf_artifact_id: ArtifactId,
         fallback_pdf_url: String,
