@@ -60,6 +60,9 @@ pub(super) fn rewritten_bytes(
             rewrite(artifact.kind, &source_id_map(pending), &source)?
         }
         ArtifactKind::SourceOriginal
+        | ArtifactKind::ScholarlyHtml
+        | ArtifactKind::ScholarlyHtmlSnapshot
+        | ArtifactKind::ScholarlyResource
         | ArtifactKind::Figure
         | ArtifactKind::TableRegion
         | ArtifactKind::Translation

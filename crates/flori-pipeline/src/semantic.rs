@@ -190,14 +190,16 @@ fn allowed_output(executor: Executor, kind: ArtifactKind) -> bool {
         || kind == ArtifactKind::AiAudit && is_ai(executor)
         || matches!(
             (executor, kind),
-            (Executor::DocumentAcquire, ArtifactKind::SourceOriginal)
-                | (
-                    Executor::DocumentExtract,
-                    ArtifactKind::DocumentStructure
-                        | ArtifactKind::Figure
-                        | ArtifactKind::TableRegion
-                )
-                | (Executor::AiDocumentTranslate, ArtifactKind::Translation)
+            (
+                Executor::DocumentAcquire,
+                ArtifactKind::SourceOriginal
+                    | ArtifactKind::ScholarlyHtml
+                    | ArtifactKind::ScholarlyHtmlSnapshot
+                    | ArtifactKind::ScholarlyResource
+            ) | (
+                Executor::DocumentExtract,
+                ArtifactKind::DocumentStructure | ArtifactKind::Figure | ArtifactKind::TableRegion
+            ) | (Executor::AiDocumentTranslate, ArtifactKind::Translation)
                 | (
                     Executor::AiDocumentNote | Executor::AiVideoNote,
                     ArtifactKind::SmartNote | ArtifactKind::Summary | ArtifactKind::Terms

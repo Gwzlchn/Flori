@@ -27,7 +27,7 @@ string_enums! {
     ArtifactKind {
         SourceOriginal, DocumentStructure, Figure, TableRegion, Translation, Subtitle, Transcript,
         Keyframe, Danmaku, PartsManifest, SubscriptionManifest, MechanicalNote, SmartNote, Summary,
-        Terms, Evidence, TaskLog, AiAudit
+        Terms, Evidence, TaskLog, AiAudit, ScholarlyHtml, ScholarlyHtmlSnapshot, ScholarlyResource
     }
     UploadOwnerKind { Source, Attempt, Materialize }
     UploadState { Receiving, Verified, Moved }

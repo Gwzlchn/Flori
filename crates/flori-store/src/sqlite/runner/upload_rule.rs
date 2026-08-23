@@ -36,6 +36,9 @@ fn safe_basename(value: &str) -> bool {
 pub(super) const fn retention(kind: ArtifactKind) -> &'static str {
     match kind {
         ArtifactKind::SourceOriginal
+        | ArtifactKind::ScholarlyHtml
+        | ArtifactKind::ScholarlyHtmlSnapshot
+        | ArtifactKind::ScholarlyResource
         | ArtifactKind::Subtitle
         | ArtifactKind::Danmaku
         | ArtifactKind::PartsManifest
@@ -63,6 +66,9 @@ mod tests {
     fn every_artifact_kind_has_the_frozen_retention() {
         for kind in [
             ArtifactKind::SourceOriginal,
+            ArtifactKind::ScholarlyHtml,
+            ArtifactKind::ScholarlyHtmlSnapshot,
+            ArtifactKind::ScholarlyResource,
             ArtifactKind::Subtitle,
             ArtifactKind::Danmaku,
             ArtifactKind::PartsManifest,
