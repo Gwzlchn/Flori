@@ -104,7 +104,7 @@ async fn register(
 ) -> Result<Json<RegisterRunnerResponse>, HttpError> {
     let now_ms = now_ms()?;
     let registration_digest = token_digest(token.expose())?;
-    let long_token = new_token();
+    let long_token = format!("{}{}", RequestId::generate(), RequestId::generate());
     let long_digest = token_digest(&long_token)?;
     let runner_id = state
         .store
@@ -239,10 +239,6 @@ pub(super) fn now_ms() -> Result<i64, HttpError> {
         .map_err(|_| HttpError::new(ErrorCode::Internal))?
         .as_millis();
     i64::try_from(milliseconds).map_err(|_| HttpError::new(ErrorCode::Internal))
-}
-
-fn new_token() -> String {
-    format!("{}{}", RequestId::generate(), RequestId::generate())
 }
 
 fn token_digest(token: &str) -> Result<Sha256Digest, HttpError> {
