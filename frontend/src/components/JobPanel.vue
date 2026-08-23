@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { components } from "../api/client";
+import { computed, ref } from "vue";
+import { apiClient, apiError, type components } from "../api/client";
 
 const props = defineProps<{
   job: components["schemas"]["JobView"];
   textContent: ReadonlyMap<string, string>;
   fileUrls: ReadonlyMap<string, string>;
 }>();
-defineEmits<{ refresh: [] }>();
+const emit = defineEmits<{ refresh: [] }>();
+const lifecycleBusy = ref(false);
+const lifecycleStatus = ref("");
 
 const orderedTasks = computed(() => {
   const remaining = [...props.job.tasks];
@@ -26,6 +28,34 @@ const orderedTasks = computed(() => {
 function sizeLabel(bytes: number): string {
   return bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
+
+async function cancelJob(): Promise<void> {
+  if (!window.confirm("确定取消这个 Job？正在运行的 Attempt 会立即失效。")) return;
+  lifecycleBusy.value = true;
+  try {
+    const result = await apiClient.POST("/api/v1/jobs/{job_id}/cancel", {
+      params: { path: { job_id: props.job.job_id } },
+    });
+    lifecycleStatus.value = result.response.ok
+      ? "Job 已取消。"
+      : apiError(result.error, "cancel_failed: 无法取消 Job。");
+    if (result.response.ok) emit("refresh");
+  } catch { lifecycleStatus.value = "network_temporary: 取消请求未完成。"; }
+  finally { lifecycleBusy.value = false; }
+}
+
+async function deleteSource(): Promise<void> {
+  if (!window.confirm("确定完整删除这个 Source 及全部历史成果？此操作不可撤销。")) return;
+  lifecycleBusy.value = true;
+  try {
+    const result = await apiClient.DELETE("/api/v1/sources/{source_id}", {
+      params: { path: { source_id: props.job.source_id } },
+    });
+    if (result.response.ok) window.location.assign(window.location.pathname);
+    else lifecycleStatus.value = apiError(result.error, "delete_failed: 无法删除 Source。");
+  } catch { lifecycleStatus.value = "network_temporary: 删除请求未完成。"; }
+  finally { lifecycleBusy.value = false; }
+}
 </script>
 
 <template>
@@ -41,19 +71,43 @@ function sizeLabel(bytes: number): string {
           解析状态：{{ job.state }}
         </h2>
       </div>
-      <button
-        type="button"
-        class="secondary"
-        @click="$emit('refresh')"
-      >
-        刷新状态
-      </button>
+      <div class="actions">
+        <button
+          type="button"
+          class="secondary"
+          @click="$emit('refresh')"
+        >
+          刷新状态
+        </button>
+        <button
+          v-if="job.state === 'queued' || job.state === 'running'"
+          type="button"
+          :disabled="lifecycleBusy"
+          @click="cancelJob"
+        >
+          取消 Job
+        </button>
+        <button
+          type="button"
+          :disabled="lifecycleBusy"
+          @click="deleteSource"
+        >
+          删除 Source
+        </button>
+      </div>
     </div>
     <p
       v-if="job.error_code"
       class="error"
     >
       {{ job.error_code }}: {{ job.error_message }}
+    </p>
+    <p
+      v-if="lifecycleStatus"
+      class="notice"
+      aria-live="polite"
+    >
+      {{ lifecycleStatus }}
     </p>
     <ol class="timeline">
       <li
@@ -116,3 +170,7 @@ function sizeLabel(bytes: number): string {
     </article>
   </section>
 </template>
+
+<style scoped>
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+</style>
