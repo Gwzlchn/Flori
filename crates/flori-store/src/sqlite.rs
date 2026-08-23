@@ -11,6 +11,7 @@ use sqlx::{
 const SCHEMA: &str = include_str!("../migrations/0001_v1.sql");
 
 mod bootstrap;
+mod events;
 mod knowledge;
 mod lease;
 mod lifecycle;

@@ -81,6 +81,20 @@ impl NasArtifactStore {
         })
     }
 
+    pub(crate) fn disk_free_bytes(&self) -> Result<u64, ArtifactStoreError> {
+        let root = File::open(&self.root)?;
+        let status = rustix::fs::fstatvfs(&root)
+            .map_err(|error| std::io::Error::from_raw_os_error(error.raw_os_error()))?;
+        status
+            .f_bavail
+            .checked_mul(status.f_frsize)
+            .ok_or_else(|| ArtifactStoreError::with_code(ErrorCode::CorruptState))
+    }
+
+    pub(crate) const fn max_size_bytes(&self) -> u64 {
+        self.max_size_bytes
+    }
+
     pub fn append(
         &self,
         upload: &mut UploadRecord,
