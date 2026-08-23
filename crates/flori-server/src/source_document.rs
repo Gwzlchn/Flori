@@ -8,8 +8,8 @@ use axum::{
     routing::get,
 };
 use flori_core::{
-    ArtifactKind, ArtifactView, DocumentRepresentationView, ErrorCode, EvidenceId, EvidenceLocator,
-    ScholarlyHtmlSnapshot, SourceId, SourceKind,
+    ArtifactKind, ArtifactView, DocumentRepresentationView, DocumentStructure, ErrorCode,
+    EvidenceId, EvidenceLocator, ScholarlyHtmlSnapshot, SourceId, SourceKind, SourceView,
 };
 use serde::Deserialize;
 
@@ -27,7 +27,9 @@ struct DocumentQuery {
 }
 
 struct DocumentBundle {
+    source: SourceView,
     pdf: ArtifactView,
+    structure: DocumentStructure,
     html: Option<HtmlBundle>,
 }
 
@@ -73,11 +75,15 @@ async fn document(
         None => None,
     };
     let pdf_url = format!("/api/v1/artifacts/{}/content", bundle.pdf.artifact_id);
+    let metadata =
+        crate::source_document_metadata::metadata(&bundle.source, &bundle.pdf, &bundle.structure);
     let view = if let Some(html) = bundle.html {
         DocumentRepresentationView::ScholarlyHtml {
             source_id: id,
             job_id: bundle.pdf.job_id,
             provider: html.snapshot.provider,
+            metadata,
+            structure: bundle.structure,
             html_artifact_id: html.html_artifact.artifact_id,
             snapshot_artifact_id: html.snapshot_artifact.artifact_id,
             resources: html.resources,
@@ -99,6 +105,8 @@ async fn document(
         DocumentRepresentationView::Pdf {
             source_id: id,
             job_id: bundle.pdf.job_id,
+            metadata,
+            structure: bundle.structure,
             pdf_artifact_id: bundle.pdf.artifact_id,
             content_url: pdf_url,
         }
@@ -220,7 +228,24 @@ async fn load(state: &HttpState, source_id: SourceId) -> Result<DocumentBundle, 
         }
         _ => return Err(HttpError::new(ErrorCode::CorruptState)),
     };
-    Ok(DocumentBundle { pdf, html })
+    let structure_artifact = exact(&job.artifacts, ArtifactKind::DocumentStructure)?
+        .ok_or_else(|| HttpError::new(ErrorCode::CorruptState))?;
+    if structure_artifact.name != "structure" || structure_artifact.media_type != "application/json"
+    {
+        return Err(HttpError::new(ErrorCode::CorruptState));
+    }
+    let structure_bytes = read(state, &structure_artifact, 52_428_800).await?;
+    let structure: DocumentStructure = serde_json::from_slice(&structure_bytes)
+        .map_err(|_| HttpError::new(ErrorCode::CorruptState))?;
+    if structure.source_artifact_id != pdf.artifact_id || structure.validate().is_err() {
+        return Err(HttpError::new(ErrorCode::CorruptState));
+    }
+    Ok(DocumentBundle {
+        source,
+        pdf,
+        structure,
+        html,
+    })
 }
 
 async fn read(state: &HttpState, artifact: &ArtifactView, max: u64) -> Result<Vec<u8>, HttpError> {

@@ -1,9 +1,10 @@
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    DocumentRepresentationView, ErrorCode, ErrorResponse, EvidenceId, HtmlPdfCrosswalkStatus,
-    JobId, ScholarlyFile, ScholarlyHtmlSnapshot, ScholarlyHtmlSnapshotSchema, ScholarlyProvider,
-    Sha256Digest, SourceId, TaskId,
+    DocumentPage, DocumentRepresentationView, DocumentStructure, DocumentStructureSchema,
+    ErrorCode, ErrorResponse, EvidenceId, HtmlPdfCrosswalkStatus, JobId, ScholarlyFile,
+    ScholarlyHtmlSnapshot, ScholarlyHtmlSnapshotSchema, ScholarlyProvider, Sha256Digest, SourceId,
+    TaskId,
 };
 use flori_store::{
     Store,
@@ -29,6 +30,8 @@ async fn current_scholarly_document_is_verified_sanitized_and_crosswalked() {
     let view: DocumentRepresentationView = serde_json::from_slice(body(&response)).expect("view");
     let DocumentRepresentationView::ScholarlyHtml {
         provider,
+        metadata,
+        structure,
         resources,
         crosswalk,
         ..
@@ -37,6 +40,9 @@ async fn current_scholarly_document_is_verified_sanitized_and_crosswalked() {
         panic!("HTML representation");
     };
     assert_eq!(provider, ScholarlyProvider::Arxiv);
+    assert_eq!(metadata.arxiv_id.as_deref(), Some("1706.03762"));
+    assert_eq!(metadata.page_count, 1);
+    assert_eq!(structure.language, "en");
     assert_eq!(resources.len(), 1);
     let crosswalk = crosswalk.expect("crosswalk");
     assert_eq!(crosswalk.status, HtmlPdfCrosswalkStatus::Verified);
@@ -122,9 +128,26 @@ impl Harness {
         let image_id = "018f0000-0000-7000-8000-00000000000c"
             .parse()
             .expect("image ID");
+        let structure_id = "018f0000-0000-7000-8000-00000000000d"
+            .parse()
+            .expect("structure ID");
         let html = br#"<html><head></head><body class="ltx_document"><script>bad()</script><p id="sec-transformer">The Transformer uses attention.</p><a href="https://evil.example">leave</a><img src="https://evil.example/x" data-flori-resource="scholarly_resources/figure.png"></body></html>"#;
         let pdf = b"%PDF-1.7\nfixture";
         let image = b"\x89PNG\r\n\x1a\nfixture";
+        let structure = serde_json::to_vec(&DocumentStructure {
+            schema: DocumentStructureSchema::V1,
+            source_artifact_id: pdf_id,
+            language: "en".into(),
+            pages: vec![DocumentPage {
+                page: 1,
+                width_pt: 100.0,
+                height_pt: 100.0,
+            }],
+            sections: vec![],
+            figures: vec![],
+            tables: vec![],
+        })
+        .expect("structure");
         let snapshot = ScholarlyHtmlSnapshot {
             schema: ScholarlyHtmlSnapshotSchema::V1,
             job_id,
@@ -180,6 +203,14 @@ impl Harness {
                 "image/png",
                 "figure.png",
                 image.as_slice(),
+            ),
+            (
+                structure_id,
+                "structure",
+                "document_structure",
+                "application/json",
+                "document.json",
+                structure.as_slice(),
             ),
         ] {
             let relative = retained_artifact_path(source_id, id, file).expect("artifact path");

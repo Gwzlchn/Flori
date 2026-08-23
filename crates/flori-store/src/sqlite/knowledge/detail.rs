@@ -30,7 +30,8 @@ impl Store {
 
     pub async fn get_job(&self, job_id: JobId) -> Result<Option<JobView>, StoreError> {
         let Some(row) = sqlx::query(
-            "SELECT id,source_id,pipeline_revision_id,trigger,state,inputs_json,error_code, \
+            "SELECT id,source_id,pipeline_revision_id,trigger,state,inputs_json, \
+             prompt_snapshot_sha256,created_at_ms,started_at_ms,finished_at_ms,error_code, \
              error_message FROM jobs WHERE id=?",
         )
         .bind(job_id.to_string())
@@ -79,6 +80,13 @@ impl Store {
             trigger: parse_job_trigger(&row.try_get::<String, _>("trigger")?)?,
             state: parse_job_state(&row.try_get::<String, _>("state")?)?,
             inputs: parse_job_inputs(&row.try_get::<String, _>("inputs_json")?)?,
+            prompt_snapshot_sha256: Sha256Digest::parse(
+                row.try_get::<String, _>("prompt_snapshot_sha256")?,
+            )
+            .map_err(|_| StoreError::new(ErrorCode::CorruptState))?,
+            created_at_ms: required_u64(&row, "created_at_ms")?,
+            started_at_ms: optional_u64(&row, "started_at_ms")?,
+            finished_at_ms: optional_u64(&row, "finished_at_ms")?,
             error_code: parse_optional_error(&row, "error_code")?,
             error_message: row.try_get("error_message")?,
             tasks,

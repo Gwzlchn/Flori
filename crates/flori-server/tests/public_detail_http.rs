@@ -48,6 +48,10 @@ async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
     let job: JobView = serde_json::from_slice(body(&response)).expect("job detail");
     assert_eq!(job.source_id, harness.source_id);
     assert!(!job.inputs.translate);
+    assert_eq!(job.created_at_ms, 0);
+    assert_eq!(job.started_at_ms, Some(0));
+    assert_eq!(job.finished_at_ms, Some(1));
+    assert_eq!(job.prompt_snapshot_sha256.as_str(), "2".repeat(64));
     assert_eq!(job.tasks.len(), 2);
     assert_eq!(job.tasks[0].task_key, "acquire");
     assert_eq!(job.tasks[1].task_key, "note");

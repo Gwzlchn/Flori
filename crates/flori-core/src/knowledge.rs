@@ -3,8 +3,8 @@ use utoipa::ToSchema;
 
 use crate::{
     AiTool, AiUsageId, AiUsageState, ArtifactId, ArtifactKind, AttemptId, AttemptState,
-    CollectionId, CollectionKind, CompiledTaskSpec, DomainId, ErrorCode, EvidenceId,
-    EvidenceLocator, Executor, JobId, JobInputs, JobState, JobTrigger, PipelineId,
+    CollectionId, CollectionKind, CompiledTaskSpec, DocumentStructure, DomainId, ErrorCode,
+    EvidenceId, EvidenceLocator, Executor, JobId, JobInputs, JobState, JobTrigger, PipelineId,
     PipelineRevisionId, RunnerId, ScholarlyProvider, SearchChunkId, Sha256Digest, SourceId,
     SourceKind, TaskId, TaskState, UsageOrigin,
 };
@@ -121,6 +121,10 @@ pub struct JobView {
     pub trigger: JobTrigger,
     pub state: JobState,
     pub inputs: JobInputs,
+    pub prompt_snapshot_sha256: Sha256Digest,
+    pub created_at_ms: u64,
+    pub started_at_ms: Option<u64>,
+    pub finished_at_ms: Option<u64>,
     pub error_code: Option<ErrorCode>,
     pub error_message: Option<String>,
     pub tasks: Vec<TaskView>,
@@ -182,12 +186,29 @@ pub struct HtmlPdfCrosswalk {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentMetadataView {
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+    pub abstract_text: Option<String>,
+    pub published_at_ms: Option<u64>,
+    pub language: String,
+    pub page_count: u32,
+    pub arxiv_id: Option<String>,
+    pub arxiv_version: Option<u32>,
+    pub original_url: Option<String>,
+    pub original_size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, ToSchema)]
 #[serde(tag = "representation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DocumentRepresentationView {
     ScholarlyHtml {
         source_id: SourceId,
         job_id: JobId,
         provider: ScholarlyProvider,
+        metadata: DocumentMetadataView,
+        structure: DocumentStructure,
         html_artifact_id: ArtifactId,
         snapshot_artifact_id: ArtifactId,
         resources: Vec<ArtifactView>,
@@ -199,6 +220,8 @@ pub enum DocumentRepresentationView {
     Pdf {
         source_id: SourceId,
         job_id: JobId,
+        metadata: DocumentMetadataView,
+        structure: DocumentStructure,
         pdf_artifact_id: ArtifactId,
         content_url: String,
     },
