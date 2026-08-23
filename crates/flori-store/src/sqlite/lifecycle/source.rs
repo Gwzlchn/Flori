@@ -46,16 +46,16 @@ impl Store {
             transaction.rollback().await?;
             return Err(StoreError::new(ErrorCode::SourceBusy));
         }
-        let rows_exist: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM source_inputs WHERE source_id=? \
-             UNION ALL SELECT 1 FROM artifacts WHERE source_id=?)",
+        let paths: Vec<String> = sqlx::query_scalar(
+            "SELECT relative_path FROM source_inputs WHERE source_id=? \
+             UNION ALL SELECT relative_path FROM artifacts WHERE source_id=? ORDER BY 1",
         )
         .bind(&id)
         .bind(&id)
-        .fetch_one(&mut *transaction)
+        .fetch_all(&mut *transaction)
         .await?;
         let staged = artifacts
-            .stage_source_delete(source_id, rows_exist)
+            .stage_source_delete(source_id, &paths)
             .map_err(|error| StoreError::new(error.code()))?;
         let outcome = delete_rows(&mut transaction, &id).await;
         if let Err(error) = outcome {

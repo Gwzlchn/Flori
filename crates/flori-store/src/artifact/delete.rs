@@ -1,14 +1,14 @@
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use flori_core::{ErrorCode, SourceId};
 
-use super::{ArtifactStoreError, NasArtifactStore};
+use super::{ArtifactStoreError, NasArtifactStore, path::validate_final_path};
 
 impl NasArtifactStore {
     pub(crate) fn stage_source_delete(
         &self,
         source_id: SourceId,
-        rows_exist: bool,
+        expected_paths: &[String],
     ) -> Result<bool, ArtifactStoreError> {
         let source = self.root.join("sources").join(source_id.to_string());
         let trash_root = self.trash_root("sources")?;
@@ -16,12 +16,18 @@ impl NasArtifactStore {
         reject_existing(&trash)?;
         match checked_directory(&source)? {
             Some(()) => {
+                let expected = expected_source_paths(source_id, expected_paths)?;
+                let mut actual = BTreeSet::new();
+                collect_files(&self.root, &source, &mut actual)?;
+                if actual != expected {
+                    return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState));
+                }
                 fs::rename(&source, &trash)?;
                 sync_parent(&source)?;
                 sync_directory(&trash_root)?;
                 Ok(true)
             }
-            None if !rows_exist => Ok(false),
+            None if expected_paths.is_empty() => Ok(false),
             None => Err(ArtifactStoreError::with_code(ErrorCode::CorruptState)),
         }
     }
@@ -79,6 +85,52 @@ impl NasArtifactStore {
         create_checked(&root)?;
         Ok(root)
     }
+}
+
+fn expected_source_paths(
+    source_id: SourceId,
+    paths: &[String],
+) -> Result<BTreeSet<String>, ArtifactStoreError> {
+    let prefix = format!("sources/{source_id}/");
+    let mut expected = BTreeSet::new();
+    for path in paths {
+        validate_final_path(path)?;
+        if !path.starts_with(&prefix) || !expected.insert(path.clone()) {
+            return Err(ArtifactStoreError::with_code(ErrorCode::CorruptState));
+        }
+    }
+    Ok(expected)
+}
+
+fn collect_files(
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    files: &mut BTreeSet<String>,
+) -> Result<(), ArtifactStoreError> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid());
+        }
+        if metadata.is_dir() {
+            collect_files(root, &entry.path(), files)?;
+        } else if metadata.is_file() {
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .map_err(|_| invalid())?
+                .to_str()
+                .ok_or_else(invalid)?
+                .to_owned();
+            if !files.insert(relative) {
+                return Err(invalid());
+            }
+        } else {
+            return Err(invalid());
+        }
+    }
+    Ok(())
 }
 
 fn create_checked(path: &std::path::Path) -> Result<(), ArtifactStoreError> {
