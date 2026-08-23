@@ -1,11 +1,13 @@
 use std::{fs, path::PathBuf};
 
 use flori_core::{
-    AttemptId, DomainId, ErrorCode, JobId, PipelineId, PipelineRevisionId, PromptSnapshotId,
-    RunnerId, SourceId, SourceInputId, TaskId, UploadId,
+    AiTool, AiUsageId, AttemptId, CompleteAttemptRequest, DomainId, ErrorCode, JobId, LogFrame,
+    PipelineId, PipelineRevisionId, PromptSnapshotId, RunnerId, Sha256Digest, SourceId,
+    SourceInputId, TaskId, UploadId, UsageOrigin, UsageUpdate,
 };
-use flori_store::{Store, artifact::NasArtifactStore};
-use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
+use flori_store::{StartAiUsage, Store, artifact::NasArtifactStore};
+use sha2::{Digest, Sha256};
+use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
 
 struct Fixture {
     root: PathBuf,
@@ -40,6 +42,9 @@ impl Drop for Fixture {
 struct Seed {
     source: SourceId,
     job: JobId,
+    task: TaskId,
+    attempt: AttemptId,
+    runner: RunnerId,
 }
 
 async fn seed(pool: &SqlitePool, job_state: &str, task_state: &str) -> Seed {
@@ -90,7 +95,131 @@ async fn seed(pool: &SqlitePool, job_state: &str, task_state: &str) -> Seed {
         .execute(pool)
         .await
         .expect("lease task");
-    Seed { source, job }
+    Seed {
+        source,
+        job,
+        task,
+        attempt,
+        runner,
+    }
+}
+
+#[tokio::test]
+async fn cancel_fences_attempt_and_only_allows_existing_usage_to_finish() {
+    let (_fixture, store, pool, artifacts) = Fixture::new().await;
+    let seed = seed(&pool, "running", "leased").await;
+    let usage_id = AiUsageId::generate();
+    store
+        .start_ai_usage(
+            StartAiUsage {
+                id: usage_id,
+                job_id: seed.job,
+                task_id: seed.task,
+                attempt_id: seed.attempt,
+                invocation_key: "primary",
+                tool: AiTool::QoderCli,
+                model: "Ultimate",
+                effort: "high",
+                created_at_ms: 1,
+            },
+            1,
+        )
+        .await
+        .expect("usage started");
+    store
+        .cancel_job(&artifacts, seed.job, 2)
+        .await
+        .expect("cancel");
+    store
+        .cancel_job(&artifacts, seed.job, 3)
+        .await
+        .expect("replay");
+    let states = sqlx::query("SELECT j.state job,t.state task,a.state attempt FROM jobs j JOIN tasks t ON t.job_id=j.id JOIN attempts a ON a.task_id=t.id WHERE j.id=?")
+        .bind(seed.job.to_string()).fetch_one(&pool).await.expect("states");
+    assert_eq!(
+        (
+            states.get::<String, _>("job"),
+            states.get::<String, _>("task"),
+            states.get::<String, _>("attempt")
+        ),
+        ("canceled".into(), "canceled".into(), "canceled".into())
+    );
+    assert_eq!(
+        store
+            .renew_lease(seed.attempt, seed.runner, 3, 1001)
+            .await
+            .expect_err("renew")
+            .code(),
+        ErrorCode::StaleAttempt
+    );
+    let line = r#"{"timestamp_ms":3,"level":"info","message":"late"}"#;
+    let frame = LogFrame {
+        sequence: 1,
+        sha256: digest(line),
+        line: line.into(),
+    };
+    assert_eq!(
+        store
+            .append_log_frames(&artifacts, seed.runner, seed.attempt, &[frame], 3)
+            .await
+            .expect_err("log")
+            .code(),
+        ErrorCode::StaleAttempt
+    );
+    assert_eq!(
+        store
+            .complete_authenticated_attempt(
+                &artifacts,
+                seed.runner,
+                seed.attempt,
+                &CompleteAttemptRequest {
+                    manifest_sha256: digest("")
+                },
+                3
+            )
+            .await
+            .expect_err("complete")
+            .code(),
+        ErrorCode::StaleAttempt
+    );
+    assert_eq!(
+        store
+            .start_ai_usage(
+                StartAiUsage {
+                    id: AiUsageId::generate(),
+                    job_id: seed.job,
+                    task_id: seed.task,
+                    attempt_id: seed.attempt,
+                    invocation_key: "late",
+                    tool: AiTool::QoderCli,
+                    model: "Ultimate",
+                    effort: "high",
+                    created_at_ms: 3
+                },
+                3
+            )
+            .await
+            .expect_err("new usage")
+            .code(),
+        ErrorCode::StaleAttempt
+    );
+    let ack = store
+        .apply_usage_update(
+            seed.runner,
+            seed.attempt,
+            &UsageUpdate::Final {
+                invocation_key: "primary".into(),
+                origin: UsageOrigin::Observed,
+                input_tokens: None,
+                output_tokens: None,
+                cost_micros: None,
+                credits_micros: Some(7),
+            },
+            3,
+        )
+        .await
+        .expect("late final");
+    assert_eq!(ack.usage_id, usage_id);
 }
 
 #[tokio::test]
@@ -246,4 +375,14 @@ async fn delete_source_is_atomic_idempotent_and_recovers_both_crash_sides() {
         .await
         .expect("finish delete");
     assert!(!trash.join(restored.source.to_string()).exists());
+}
+
+fn digest(value: &str) -> Sha256Digest {
+    let bytes = Sha256::digest(value.as_bytes());
+    let mut encoded = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("digest");
+    }
+    Sha256Digest::parse(encoded).expect("digest")
 }
