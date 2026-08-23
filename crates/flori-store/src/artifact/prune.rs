@@ -22,7 +22,7 @@ impl NasArtifactStore {
         if !retained.is_subset(&all) {
             return Err(corrupt());
         }
-        let job = self.root.join(prefix.trim_end_matches('/'));
+        let job = self.safe_path(Path::new(prefix.trim_end_matches('/')), false)?;
         let trash_root = self.root.join(".trash/jobs");
         checked_create(&self.root.join(".trash"))?;
         checked_create(&trash_root)?;
@@ -69,7 +69,7 @@ impl NasArtifactStore {
     ) -> Result<(), ArtifactStoreError> {
         let prefix = job_prefix(source_id, job_id);
         let expected = expected_paths(&prefix, database_paths)?;
-        let job = self.root.join(prefix.trim_end_matches('/'));
+        let job = self.safe_path(Path::new(prefix.trim_end_matches('/')), false)?;
         let trash = self.root.join(".trash/jobs").join(job_id.to_string());
         if checked_directory(&trash)?.is_none() {
             return Ok(());

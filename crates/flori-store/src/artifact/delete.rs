@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, fs, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use flori_core::{ErrorCode, SourceId};
 
@@ -10,7 +14,8 @@ impl NasArtifactStore {
         source_id: SourceId,
         expected_paths: &[String],
     ) -> Result<bool, ArtifactStoreError> {
-        let source = self.root.join("sources").join(source_id.to_string());
+        let relative = Path::new("sources").join(source_id.to_string());
+        let source = self.safe_path(&relative, false)?;
         let trash_root = self.trash_root("sources")?;
         let trash = trash_root.join(source_id.to_string());
         reject_existing(&trash)?;
@@ -36,7 +41,8 @@ impl NasArtifactStore {
         &self,
         source_id: SourceId,
     ) -> Result<(), ArtifactStoreError> {
-        let source = self.root.join("sources").join(source_id.to_string());
+        let relative = Path::new("sources").join(source_id.to_string());
+        let source = self.safe_path(&relative, false)?;
         let trash_root = self.trash_root("sources")?;
         let trash = trash_root.join(source_id.to_string());
         if checked_directory(&trash)?.is_none() {
@@ -55,7 +61,8 @@ impl NasArtifactStore {
         &self,
         source_id: SourceId,
     ) -> Result<(), ArtifactStoreError> {
-        let source = self.root.join("sources").join(source_id.to_string());
+        let relative = Path::new("sources").join(source_id.to_string());
+        let source = self.safe_path(&relative, false)?;
         reject_existing(&source)?;
         let trash_root = self.trash_root("sources")?;
         let trash = trash_root.join(source_id.to_string());
@@ -176,4 +183,53 @@ pub(super) fn sync_directory(path: &std::path::Path) -> Result<(), ArtifactStore
 
 pub(super) fn invalid() -> ArtifactStoreError {
     ArtifactStoreError::with_code(ErrorCode::ArtifactInvalidPath)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use flori_core::{ArtifactId, JobId, TaskId};
+
+    use super::*;
+
+    #[test]
+    fn deletion_rejects_symlinked_source_parent() {
+        let token = flori_core::RequestId::generate();
+        let root = std::env::temp_dir().join(format!("flori-delete-root-{token}"));
+        let outside = std::env::temp_dir().join(format!("flori-delete-outside-{token}"));
+        let source = SourceId::generate();
+        let job = JobId::generate();
+        let task = TaskId::generate();
+        let artifact = ArtifactId::generate();
+        let relative = format!("sources/{source}/jobs/{job}/tasks/{task}/{artifact}/item.json");
+        let outside_file = outside
+            .join(source.to_string())
+            .join("jobs")
+            .join(job.to_string())
+            .join("tasks")
+            .join(task.to_string())
+            .join(artifact.to_string())
+            .join("item.json");
+        fs::create_dir_all(outside_file.parent().expect("outside parent")).expect("outside dirs");
+        fs::write(&outside_file, b"outside").expect("outside file");
+        let store = NasArtifactStore::new(&root, 1024).expect("store");
+        symlink(&outside, root.join("sources")).expect("source parent symlink");
+
+        for result in [
+            store.stage_source_delete(source, std::slice::from_ref(&relative)),
+            store.stage_job_prune(source, job, std::slice::from_ref(&relative), &[]),
+        ] {
+            assert_eq!(
+                result.expect_err("parent symlink").code(),
+                ErrorCode::ArtifactInvalidPath
+            );
+        }
+        assert_eq!(
+            fs::read(&outside_file).expect("outside preserved"),
+            b"outside"
+        );
+        fs::remove_dir_all(root).expect("cleanup root");
+        fs::remove_dir_all(outside).expect("cleanup outside");
+    }
 }
