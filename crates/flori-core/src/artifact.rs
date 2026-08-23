@@ -28,19 +28,7 @@ impl ArtifactKind {
             Self::ScholarlyHtmlSnapshot => media_type == "application/json",
             Self::ScholarlyResource => matches!(
                 media_type,
-                "text/css"
-                    | "font/woff"
-                    | "font/woff2"
-                    | "font/ttf"
-                    | "font/otf"
-                    | "application/font-woff"
-                    | "application/x-font-ttf"
-                    | "application/x-font-opentype"
-                    | "image/avif"
-                    | "image/gif"
-                    | "image/jpeg"
-                    | "image/png"
-                    | "image/webp"
+                "image/avif" | "image/gif" | "image/jpeg" | "image/png" | "image/webp"
             ),
             Self::DocumentStructure
             | Self::PartsManifest
@@ -171,30 +159,10 @@ pub enum ScholarlyProvider {
     Ar5iv,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ScholarlyResourceKind {
-    Stylesheet,
-    Image,
-    Font,
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScholarlyFile {
     pub artifact_name: String,
-    pub media_type: String,
-    pub size_bytes: u64,
-    pub sha256: Sha256Digest,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ScholarlyResource {
-    pub artifact_name: String,
-    pub kind: ScholarlyResourceKind,
-    pub request_url: String,
-    pub source_url: String,
     pub media_type: String,
     pub size_bytes: u64,
     pub sha256: Sha256Digest,
@@ -208,8 +176,7 @@ pub struct ScholarlyHtmlSnapshot {
     pub provider: ScholarlyProvider,
     pub document_url: String,
     pub html: ScholarlyFile,
-    pub stylesheets: Vec<String>,
-    pub resources: Vec<ScholarlyResource>,
+    pub resources: Vec<ScholarlyFile>,
 }
 
 impl ScholarlyHtmlSnapshot {
@@ -220,33 +187,25 @@ impl ScholarlyHtmlSnapshot {
             || self.html.size_bytes == 0
             || self.html.size_bytes > SCHOLARLY_HTML_MAX_BYTES
             || self.resources.len() > SCHOLARLY_MAX_RESOURCES
-            || self.stylesheets.len() > 32
         {
             return Err("invalid scholarly HTML snapshot");
         }
         let mut names = BTreeSet::new();
-        let mut urls = BTreeSet::new();
         let mut total_bytes = 0_u64;
         let mut previous_name = "";
         for resource in &self.resources {
             if !valid_scholarly_name(&resource.artifact_name)
                 || resource.artifact_name.as_str() <= previous_name
-                || !valid_https_url(&resource.request_url)
-                || !valid_https_url(&resource.source_url)
                 || resource.size_bytes == 0
                 || resource.size_bytes > SCHOLARLY_RESOURCE_MAX_BYTES
-                || !resource_media_matches(resource.kind, &resource.media_type)
+                || !matches!(
+                    resource.media_type.as_str(),
+                    "image/avif" | "image/gif" | "image/jpeg" | "image/png" | "image/webp"
+                )
                 || !names.insert(resource.artifact_name.as_str())
             {
                 return Err("invalid scholarly resource");
             }
-            let aliases = [resource.request_url.as_str(), resource.source_url.as_str()]
-                .into_iter()
-                .collect::<BTreeSet<_>>();
-            if aliases.iter().any(|url| urls.contains(url)) {
-                return Err("duplicate scholarly resource URL");
-            }
-            urls.extend(aliases);
             total_bytes = total_bytes
                 .checked_add(resource.size_bytes)
                 .ok_or("scholarly resource size overflow")?;
@@ -254,17 +213,6 @@ impl ScholarlyHtmlSnapshot {
                 return Err("scholarly resource total exceeds limit");
             }
             previous_name = &resource.artifact_name;
-        }
-        let mut stylesheet_names = BTreeSet::new();
-        for name in &self.stylesheets {
-            if !stylesheet_names.insert(name.as_str())
-                || !self.resources.iter().any(|resource| {
-                    resource.artifact_name == *name
-                        && resource.kind == ScholarlyResourceKind::Stylesheet
-                })
-            {
-                return Err("invalid scholarly stylesheet reference");
-            }
         }
         Ok(())
     }
@@ -301,26 +249,6 @@ fn valid_scholarly_name(value: &str) -> bool {
                 && !name.starts_with('.')
                 && !name.contains(['/', '\\', '\0'])
         })
-}
-
-fn resource_media_matches(kind: ScholarlyResourceKind, media_type: &str) -> bool {
-    match kind {
-        ScholarlyResourceKind::Stylesheet => media_type == "text/css",
-        ScholarlyResourceKind::Image => matches!(
-            media_type,
-            "image/avif" | "image/gif" | "image/jpeg" | "image/png" | "image/webp"
-        ),
-        ScholarlyResourceKind::Font => matches!(
-            media_type,
-            "font/woff"
-                | "font/woff2"
-                | "font/ttf"
-                | "font/otf"
-                | "application/font-woff"
-                | "application/x-font-ttf"
-                | "application/x-font-opentype"
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -383,7 +311,7 @@ mod tests {
             (ArtifactKind::AiAudit, "application/json"),
             (ArtifactKind::ScholarlyHtml, "text/html"),
             (ArtifactKind::ScholarlyHtmlSnapshot, "application/json"),
-            (ArtifactKind::ScholarlyResource, "text/css"),
+            (ArtifactKind::ScholarlyResource, "image/png"),
         ] {
             assert!(kind.accepts_media_type(media_type));
             if kind != ArtifactKind::ScholarlyHtml {
@@ -405,13 +333,9 @@ mod tests {
                 size_bytes: 10,
                 sha256: Sha256Digest::parse("a".repeat(64)).expect("digest"),
             },
-            stylesheets: vec!["scholarly_resources/a.css".into()],
-            resources: vec![ScholarlyResource {
-                artifact_name: "scholarly_resources/a.css".into(),
-                kind: ScholarlyResourceKind::Stylesheet,
-                request_url: "https://arxiv.org/html/1706.03762/a.css".into(),
-                source_url: "https://arxiv.org/html/1706.03762/a.css?v=1".into(),
-                media_type: "text/css".into(),
+            resources: vec![ScholarlyFile {
+                artifact_name: "scholarly_resources/a.png".into(),
+                media_type: "image/png".into(),
                 size_bytes: 10,
                 sha256: Sha256Digest::parse("b".repeat(64)).expect("digest"),
             }],
@@ -425,7 +349,7 @@ mod tests {
         .expect_err("unknown field must fail");
 
         let mut invalid = snapshot;
-        invalid.resources[0].source_url = "http://127.0.0.1/style.css".into();
+        invalid.resources[0].media_type = "text/css".into();
         assert!(invalid.validate().is_err());
     }
 }

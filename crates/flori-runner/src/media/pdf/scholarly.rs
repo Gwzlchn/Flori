@@ -4,8 +4,7 @@ use flori_core::{
     ArtifactKind, ArtifactManifestEntry, ErrorCode, JobId, ResolvedSource,
     SCHOLARLY_HTML_MAX_BYTES, SCHOLARLY_MAX_RESOURCES, SCHOLARLY_RESOURCE_MAX_BYTES,
     SCHOLARLY_RESOURCE_TOTAL_MAX_BYTES, ScholarlyFile, ScholarlyHtmlSnapshot,
-    ScholarlyHtmlSnapshotSchema, ScholarlyProvider, ScholarlyResource, ScholarlyResourceKind,
-    SourceKind, TaskClaim,
+    ScholarlyHtmlSnapshotSchema, ScholarlyProvider, SourceKind, TaskClaim,
 };
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -127,14 +126,11 @@ async fn capture_provider(
         let artifact_name = resource_name(&request_url, &bytes, extension);
         rewrites.insert(request_url.to_string(), artifact_name.clone());
         fetched.push((
-            ScholarlyResource {
+            ScholarlyFile {
                 artifact_name,
-                kind: ScholarlyResourceKind::Image,
-                request_url: request_url.to_string(),
-                source_url: source_url.to_string(),
                 media_type,
                 size_bytes: u64::try_from(bytes.len()).map_err(|_| ErrorCode::ArtifactTooLarge)?,
-                sha256: scholarly_fetch::digest(&bytes)?,
+                sha256: crate::digest::sha256(&bytes).map_err(|_| ErrorCode::Internal)?,
             },
             bytes,
         ));
@@ -155,9 +151,8 @@ async fn capture_provider(
             artifact_name: "scholarly_html".into(),
             media_type: "text/html".into(),
             size_bytes: html_bytes,
-            sha256: scholarly_fetch::digest(html.as_bytes())?,
+            sha256: crate::digest::sha256(html.as_bytes()).map_err(|_| ErrorCode::Internal)?,
         },
-        stylesheets: vec![],
         resources,
     };
     snapshot.validate().map_err(|_| ErrorCode::CorruptState)?;

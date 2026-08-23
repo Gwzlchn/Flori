@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use flori_core::{ErrorCode, ScholarlyProvider, Sha256Digest};
+use flori_core::{ErrorCode, ScholarlyProvider};
 use reqwest::{StatusCode, Url, header};
-use sha2::{Digest, Sha256};
 
 use super::network;
 
@@ -94,16 +93,6 @@ fn safe_url(url: &Url) -> bool {
         && url.username().is_empty()
         && url.password().is_none()
         && url.fragment().is_none()
-}
-
-pub(super) fn digest(bytes: &[u8]) -> Result<Sha256Digest, ErrorCode> {
-    Sha256Digest::parse(
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-    )
-    .map_err(|_| ErrorCode::Internal)
 }
 
 pub(super) fn image_extension(media: &str, bytes: &[u8]) -> Result<&'static str, ErrorCode> {

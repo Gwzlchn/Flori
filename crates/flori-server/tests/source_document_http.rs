@@ -3,7 +3,7 @@ use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 use flori_core::{
     DocumentRepresentationView, ErrorCode, ErrorResponse, EvidenceId, HtmlPdfCrosswalkStatus,
     JobId, ScholarlyFile, ScholarlyHtmlSnapshot, ScholarlyHtmlSnapshotSchema, ScholarlyProvider,
-    ScholarlyResource, ScholarlyResourceKind, Sha256Digest, SourceId, TaskId,
+    Sha256Digest, SourceId, TaskId,
 };
 use flori_store::{
     Store,
@@ -136,12 +136,8 @@ impl Harness {
                 size_bytes: html.len() as u64,
                 sha256: digest(html),
             },
-            stylesheets: vec![],
-            resources: vec![ScholarlyResource {
+            resources: vec![ScholarlyFile {
                 artifact_name: "scholarly_resources/figure.png".into(),
-                kind: ScholarlyResourceKind::Image,
-                request_url: "https://arxiv.org/html/1706.03762/figure.png".into(),
-                source_url: "https://arxiv.org/html/1706.03762/figure.png".into(),
                 media_type: "image/png".into(),
                 size_bytes: image.len() as u64,
                 sha256: digest(image),

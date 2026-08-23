@@ -192,7 +192,7 @@ async fn load(state: &HttpState, source_id: SourceId) -> Result<DocumentBundle, 
                 .map(|frozen| {
                     job.artifacts
                         .iter()
-                        .find(|item| matches_resource(item, frozen))
+                        .find(|item| matches_file(item, frozen))
                         .cloned()
                         .ok_or_else(|| HttpError::new(ErrorCode::CorruptState))
                 })
@@ -257,13 +257,6 @@ fn exact(items: &[ArtifactView], kind: ArtifactKind) -> Result<Option<ArtifactVi
 }
 
 fn matches_file(item: &ArtifactView, frozen: &flori_core::ScholarlyFile) -> bool {
-    item.name == frozen.artifact_name
-        && item.media_type == frozen.media_type
-        && item.size_bytes == frozen.size_bytes
-        && item.sha256 == frozen.sha256
-}
-
-fn matches_resource(item: &ArtifactView, frozen: &flori_core::ScholarlyResource) -> bool {
     item.name == frozen.artifact_name
         && item.media_type == frozen.media_type
         && item.size_bytes == frozen.size_bytes
