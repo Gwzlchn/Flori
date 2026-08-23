@@ -48,6 +48,20 @@ impl Store {
         Ok(())
     }
 
+    pub async fn prune_job_artifacts(
+        &self,
+        artifacts: &NasArtifactStore,
+        job_id: JobId,
+    ) -> Result<(), StoreError> {
+        let source: Option<String> = sqlx::query_scalar("SELECT source_id FROM jobs WHERE id=?")
+            .bind(job_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        let source = source.ok_or_else(|| StoreError::new(ErrorCode::NotFound))?;
+        self.prune_source_jobs(artifacts, source.parse().map_err(|_| corrupt())?)
+            .await
+    }
+
     pub async fn reconcile_job_prunes(
         &self,
         artifacts: &NasArtifactStore,
@@ -103,6 +117,7 @@ impl Store {
             return Ok(());
         }
         let prefix = format!("sources/{source_id}/jobs/{job_id}/");
+        let retained_prefix = format!("sources/{source_id}/retained/");
         let rows = sqlx::query(
             "SELECT id,kind,retention,relative_path FROM artifacts WHERE job_id=? ORDER BY id",
         )
@@ -116,13 +131,10 @@ impl Store {
             let path: String = row.try_get("relative_path")?;
             let retention: String = row.try_get("retention")?;
             if !path.starts_with(&prefix) {
-                if retention != "source" {
+                if retention != "source" || !path.starts_with(&retained_prefix) {
                     return Err(corrupt());
                 }
                 continue;
-            }
-            if retention == "source" {
-                return Err(corrupt());
             }
             all_paths.push(path.clone());
             if keep_audit

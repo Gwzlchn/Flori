@@ -1,6 +1,6 @@
 use flori_core::{
     ArtifactKind, ArtifactManifestEntry, ArtifactWhen, AttemptAck, AttemptId, AttemptState,
-    CompiledTaskSpec, ErrorCode, FailAttemptRequest, RunnerId, UploadId, UploadState,
+    CompiledTaskSpec, ErrorCode, FailAttemptRequest, RunnerId, SourceId, UploadId, UploadState,
 };
 use sqlx::{Row, Sqlite, Transaction};
 
@@ -32,9 +32,11 @@ impl Store {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let state = attempt_state(&mut transaction, runner_id, attempt_id).await?;
         if state == "failed" {
-            replay_failure(&mut transaction, artifacts, runner_id, attempt_id, request).await?;
+            let source_id =
+                replay_failure(&mut transaction, artifacts, runner_id, attempt_id, request).await?;
             transaction.rollback().await?;
             cleanup_failed_uploads(&self.pool, artifacts, runner_id, attempt_id).await?;
+            self.prune_source_jobs(artifacts, source_id).await?;
             return Ok(failed_ack(attempt_id));
         }
         if state != "leased" {
@@ -92,6 +94,7 @@ impl Store {
         .await?;
         transaction.commit().await?;
         cleanup_failed_uploads(&self.pool, artifacts, runner_id, attempt_id).await?;
+        self.prune_source_jobs(artifacts, active.source_id).await?;
         Ok(failed_ack(attempt_id))
     }
 }
@@ -120,7 +123,7 @@ async fn replay_failure(
     runner_id: RunnerId,
     attempt_id: AttemptId,
     request: &FailAttemptRequest,
-) -> Result<(), StoreError> {
+) -> Result<SourceId, StoreError> {
     let row = sqlx::query(
         "SELECT a.runner_id,a.error_code,t.spec_json,t.id AS task_id,j.id AS job_id,j.source_id \
          FROM attempts a JOIN tasks t ON t.id=a.task_id JOIN jobs j ON j.id=t.job_id WHERE a.id=?",
@@ -144,6 +147,7 @@ async fn replay_failure(
         .parse()
         .map_err(|_| corrupt())?;
     let row_source_id: String = row.try_get("source_id")?;
+    let source_id = row_source_id.parse().map_err(|_| corrupt())?;
     let spec: CompiledTaskSpec =
         serde_json::from_str(row.try_get("spec_json")?).map_err(|_| corrupt())?;
     let rows = sqlx::query(
@@ -218,7 +222,7 @@ async fn replay_failure(
         entries,
         request.manifest_sha256.as_ref(),
     )?;
-    Ok(())
+    Ok(source_id)
 }
 
 fn verify_manifest(

@@ -1,7 +1,7 @@
 use super::super::knowledge::rebuild_source_projection;
 use super::super::{Store, StoreError};
 use crate::artifact::NasArtifactStore;
-use flori_core::{AttemptId, ErrorCode, JobId, TaskId};
+use flori_core::{AttemptId, ErrorCode, JobId, SourceId, TaskId};
 use sqlx::Row;
 
 impl Store {
@@ -68,11 +68,17 @@ impl Store {
                     .fetch_one(&mut *transaction)
                     .await?;
             transaction.rollback().await?;
-            return if current.as_deref() == Some(job_id.as_str()) {
-                Ok(())
-            } else {
-                Err(StoreError::new(ErrorCode::CorruptState))
-            };
+            if current.as_deref() != Some(job_id.as_str()) {
+                return Err(StoreError::new(ErrorCode::CorruptState));
+            }
+            if let Some(artifacts) = artifacts {
+                self.prune_source_jobs(
+                    artifacts,
+                    source_id.parse::<SourceId>().map_err(|_| corrupt())?,
+                )
+                .await?;
+            }
+            return Ok(());
         }
         if job_state != "running" || task_state != "ready" || executor != "core.publish" {
             transaction.rollback().await?;
@@ -146,7 +152,7 @@ impl Store {
         )
         .bind(&job_id)
         .bind(now_ms)
-        .bind(source_id)
+        .bind(&source_id)
         .execute(&mut *transaction)
         .await?;
         if rotated.rows_affected() != 1 {
@@ -154,6 +160,17 @@ impl Store {
             return Err(StoreError::new(ErrorCode::CorruptState));
         }
         transaction.commit().await?;
+        if let Some(artifacts) = artifacts {
+            self.prune_source_jobs(
+                artifacts,
+                source_id.parse::<SourceId>().map_err(|_| corrupt())?,
+            )
+            .await?;
+        }
         Ok(())
     }
+}
+
+fn corrupt() -> StoreError {
+    StoreError::new(ErrorCode::CorruptState)
 }

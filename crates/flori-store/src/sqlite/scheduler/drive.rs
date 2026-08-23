@@ -76,6 +76,7 @@ impl Store {
             {
                 self.fail_core_task(job_id, task_id, attempt_id, error.code(), now_ms)
                     .await?;
+                self.prune_job_artifacts(artifacts, job_id).await?;
                 Ok(true)
             }
             Err(error) => Err(error),

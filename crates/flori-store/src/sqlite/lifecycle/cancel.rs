@@ -17,7 +17,7 @@ impl Store {
         }
         let id = job_id.to_string();
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query("SELECT state FROM jobs WHERE id=?")
+        let row = sqlx::query("SELECT state,source_id FROM jobs WHERE id=?")
             .bind(&id)
             .fetch_optional(&mut *transaction)
             .await?;
@@ -25,10 +25,15 @@ impl Store {
             transaction.rollback().await?;
             return Err(StoreError::new(ErrorCode::NotFound));
         };
+        let source_id = row
+            .try_get::<String, _>("source_id")?
+            .parse()
+            .map_err(|_| StoreError::new(ErrorCode::CorruptState))?;
         match row.try_get::<String, _>("state")?.as_str() {
             "canceled" => {
                 transaction.rollback().await?;
                 self.reconcile_uploads(artifacts, now_ms).await?;
+                self.prune_source_jobs(artifacts, source_id).await?;
                 return Ok(());
             }
             "queued" | "running" => {}
@@ -68,6 +73,7 @@ impl Store {
             return Err(StoreError::new(ErrorCode::Conflict));
         }
         transaction.commit().await?;
-        self.reconcile_uploads(artifacts, now_ms).await
+        self.reconcile_uploads(artifacts, now_ms).await?;
+        self.prune_source_jobs(artifacts, source_id).await
     }
 }

@@ -65,7 +65,9 @@ async fn serve(
     let store = Arc::new(Store::open(sqlite).await?);
     let artifacts = Arc::new(NasArtifactStore::new(artifact_root, max_artifact_bytes)?);
     store.reconcile_source_deletes(&artifacts).await?;
+    store.reconcile_job_prunes(&artifacts).await?;
     store.reconcile_uploads(&artifacts, now_ms()?).await?;
+    store.prune_all_job_artifacts(&artifacts).await?;
     store
         .bootstrap_pdf(
             include_str!("../../../pipelines/pdf.yml"),
