@@ -34,17 +34,26 @@ impl NasArtifactStore {
                     return Err(corrupt());
                 }
                 fs::rename(&job, &trash)?;
-                sync_parent(&job)?;
-                sync_directory(&trash_root)?;
-                for path in retained {
-                    let suffix = path.strip_prefix(&prefix).ok_or_else(corrupt)?;
-                    let source = trash.join(suffix);
-                    checked_file(&source)?;
-                    let target = self.safe_path(Path::new(&path), true)?;
-                    fs::copy(source, &target)?;
-                    fs::File::open(&target)?.sync_all()?;
+                let result = (|| {
+                    sync_parent(&job)?;
+                    sync_directory(&trash_root)?;
+                    for path in retained {
+                        let suffix = path.strip_prefix(&prefix).ok_or_else(corrupt)?;
+                        let source = trash.join(suffix);
+                        checked_file(&source)?;
+                        let target = self.safe_path(Path::new(&path), true)?;
+                        fs::copy(source, &target)?;
+                        fs::File::open(&target)?.sync_all()?;
+                    }
+                    if checked_directory(&job)?.is_some() {
+                        sync_tree_directories(&job)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    rollback_stage(&job, &trash)?;
+                    return Err(error);
                 }
-                sync_tree_directories(&job)?;
                 Ok(true)
             }
             None if all.is_empty() => Ok(false),
@@ -190,6 +199,16 @@ fn remove_trash(path: &Path) -> Result<(), ArtifactStoreError> {
     collect_job_files(path, "")?;
     fs::remove_dir_all(path)?;
     sync_parent(path)
+}
+fn rollback_stage(job: &Path, trash: &Path) -> Result<(), ArtifactStoreError> {
+    if checked_directory(job)?.is_some() {
+        collect_job_files(job, "")?;
+        fs::remove_dir_all(job)?;
+        sync_parent(job)?;
+    }
+    fs::rename(trash, job)?;
+    sync_parent(trash)?;
+    sync_parent(job)
 }
 fn sync_tree_directories(path: &Path) -> Result<(), ArtifactStoreError> {
     for entry in fs::read_dir(path)? {
