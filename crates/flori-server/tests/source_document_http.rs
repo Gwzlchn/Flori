@@ -42,6 +42,11 @@ async fn current_scholarly_document_is_verified_sanitized_and_crosswalked() {
     assert_eq!(provider, ScholarlyProvider::Arxiv);
     assert_eq!(metadata.arxiv_id.as_deref(), Some("1706.03762"));
     assert_eq!(metadata.page_count, 1);
+    assert_eq!(metadata.authors, ["A. Researcher"]);
+    assert_eq!(
+        metadata.abstract_text.as_deref(),
+        Some("Transformer abstract.")
+    );
     assert_eq!(structure.language, "en");
     assert_eq!(resources.len(), 1);
     let crosswalk = crosswalk.expect("crosswalk");
@@ -131,7 +136,7 @@ impl Harness {
         let structure_id = "018f0000-0000-7000-8000-00000000000d"
             .parse()
             .expect("structure ID");
-        let html = br#"<html><head></head><body class="ltx_document"><script>bad()</script><p id="sec-transformer">The Transformer uses attention.</p><a href="https://evil.example">leave</a><img src="https://evil.example/x" data-flori-resource="scholarly_resources/figure.png"></body></html>"#;
+        let html = br#"<html><head></head><body class="ltx_document"><h1 class="ltx_title">Attention Is All You Need</h1><div class="ltx_authors"><span class="ltx_personname">A. Researcher</span></div><div class="ltx_abstract"><p>Transformer abstract.</p></div><script>bad()</script><p id="sec-transformer">The Transformer uses attention.</p><a href="https://evil.example">leave</a><img src="https://evil.example/x" data-flori-resource="scholarly_resources/figure.png"></body></html>"#;
         let pdf = b"%PDF-1.7\nfixture";
         let image = b"\x89PNG\r\n\x1a\nfixture";
         let structure = serde_json::to_vec(&DocumentStructure {

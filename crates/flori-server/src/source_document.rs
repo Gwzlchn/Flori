@@ -75,8 +75,13 @@ async fn document(
         None => None,
     };
     let pdf_url = format!("/api/v1/artifacts/{}/content", bundle.pdf.artifact_id);
-    let metadata =
-        crate::source_document_metadata::metadata(&bundle.source, &bundle.pdf, &bundle.structure);
+    let metadata = crate::source_document_metadata::metadata(
+        &bundle.source,
+        &bundle.pdf,
+        &bundle.structure,
+        bundle.html.as_ref().map(|value| value.html.as_str()),
+    )
+    .map_err(HttpError::new)?;
     let view = if let Some(html) = bundle.html {
         DocumentRepresentationView::ScholarlyHtml {
             source_id: id,
