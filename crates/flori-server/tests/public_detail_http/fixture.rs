@@ -1,9 +1,9 @@
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    ArtifactDeclaration, ArtifactId, ArtifactKind, ArtifactWhen, AttemptId, CompiledTaskSpec,
-    DomainId, ErrorCode, ErrorResponse, Executor, JobId, PipelineId, PipelineRevisionId,
-    PromptSnapshotId, RunnerId, SourceId, TaskId,
+    ArtifactDeclaration, ArtifactId, ArtifactKind, ArtifactWhen, AttemptId, CollectionId,
+    CompiledTaskSpec, DomainId, ErrorCode, ErrorResponse, Executor, JobId, PipelineId,
+    PipelineRevisionId, PromptSnapshotId, RunnerId, SourceId, TaskId,
 };
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -18,6 +18,8 @@ pub(super) struct Harness {
     pub(super) pool: SqlitePool,
     address: SocketAddr,
     server: JoinHandle<()>,
+    pub(super) domain_id: DomainId,
+    pub(super) collection_id: CollectionId,
     pub(super) source_id: SourceId,
     pub(super) current_job_id: JobId,
     pub(super) previous_job_id: JobId,
@@ -59,6 +61,8 @@ impl Harness {
             pool,
             address,
             server,
+            domain_id: seed.domain_id,
+            collection_id: seed.collection_id,
             source_id: seed.source_id,
             current_job_id: seed.current_job_id,
             previous_job_id: seed.previous_job_id,
@@ -89,6 +93,8 @@ impl Drop for Harness {
 }
 
 struct Seed {
+    domain_id: DomainId,
+    collection_id: CollectionId,
     source_id: SourceId,
     current_job_id: JobId,
     previous_job_id: JobId,
@@ -99,6 +105,7 @@ struct Seed {
 
 async fn seed(pool: &SqlitePool) -> Seed {
     let domain_id = DomainId::generate();
+    let collection_id = CollectionId::generate();
     let pipeline_id = PipelineId::generate();
     let revision_id = PipelineRevisionId::generate();
     let source_id = SourceId::generate();
@@ -111,6 +118,8 @@ async fn seed(pool: &SqlitePool) -> Seed {
     let current_attempt_id = AttemptId::generate();
     sqlx::query("INSERT INTO domains(id,slug,name,profile_text,created_at_ms,updated_at_ms) VALUES(?,?,?,'',0,0)")
         .bind(domain_id.to_string()).bind(format!("d-{domain_id}")).bind("Research").execute(pool).await.expect("domain");
+    sqlx::query("INSERT INTO collections(id,domain_id,name,kind,enabled,created_at_ms,updated_at_ms) VALUES(?,?,'Deep Learning','manual',1,0,0)")
+        .bind(collection_id.to_string()).bind(domain_id.to_string()).execute(pool).await.expect("collection");
     sqlx::query("INSERT INTO pipelines(id,key,created_at_ms) VALUES(?,'pdf',0)")
         .bind(pipeline_id.to_string())
         .execute(pool)
@@ -120,6 +129,14 @@ async fn seed(pool: &SqlitePool) -> Seed {
         .bind(revision_id.to_string()).bind(pipeline_id.to_string()).bind("0".repeat(64)).execute(pool).await.expect("revision");
     sqlx::query("INSERT INTO sources(id,kind,canonical_ref,title,domain_id,request_key,request_sha256,created_at_ms,updated_at_ms) VALUES(?,'pdf_upload','upload:paper','Paper',?,?,?,0,0)")
         .bind(source_id.to_string()).bind(domain_id.to_string()).bind(format!("s-{source_id}")).bind("1".repeat(64)).execute(pool).await.expect("source");
+    sqlx::query(
+        "INSERT INTO collection_sources(collection_id,source_id,added_at_ms) VALUES(?,?,0)",
+    )
+    .bind(collection_id.to_string())
+    .bind(source_id.to_string())
+    .execute(pool)
+    .await
+    .expect("membership");
     for (job_id, trigger, key) in [
         (previous_job_id, "pipeline_rerun", "previous"),
         (current_job_id, "initial", "current"),
@@ -193,6 +210,8 @@ async fn seed(pool: &SqlitePool) -> Seed {
             .bind(name).bind(kind).bind("4".repeat(64)).execute(pool).await.expect("artifact");
     }
     Seed {
+        domain_id,
+        collection_id,
         source_id,
         current_job_id,
         previous_job_id,

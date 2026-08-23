@@ -2,11 +2,35 @@
 mod fixture;
 
 use fixture::{Harness, assert_error, body, status};
-use flori_core::{ErrorCode, JobId, JobView, SourceView};
+use flori_core::{CollectionView, DomainView, ErrorCode, JobId, JobView, SourceView};
 
 #[tokio::test]
 async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
     let harness = Harness::new().await;
+    let response = harness.get("/api/v1/domains").await;
+    assert_eq!(status(&response), 200);
+    let domains: Vec<DomainView> = serde_json::from_slice(body(&response)).expect("domains");
+    assert_eq!(domains.len(), 1);
+    assert_eq!(domains[0].domain_id, harness.domain_id);
+    assert_eq!(domains[0].collection_count, 1);
+    assert_eq!(domains[0].source_count, 1);
+
+    let response = harness.get("/api/v1/collections").await;
+    assert_eq!(status(&response), 200);
+    let collections: Vec<CollectionView> =
+        serde_json::from_slice(body(&response)).expect("collections");
+    assert_eq!(collections.len(), 1);
+    assert_eq!(collections[0].collection_id, harness.collection_id);
+    assert_eq!(collections[0].domain_id, harness.domain_id);
+    assert_eq!(collections[0].source_count, 1);
+
+    let response = harness.get("/api/v1/sources").await;
+    assert_eq!(status(&response), 200);
+    let sources: Vec<SourceView> = serde_json::from_slice(body(&response)).expect("sources");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].source_id, harness.source_id);
+    assert_eq!(sources[0].collection_ids, [harness.collection_id]);
+
     let response = harness
         .get(&format!("/api/v1/sources/{}", harness.source_id))
         .await;
@@ -15,6 +39,7 @@ async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
     assert_eq!(source.current_job_id, Some(harness.current_job_id));
     assert_eq!(source.previous_job_id, Some(harness.previous_job_id));
     assert_eq!(source.canonical_ref, "upload:paper");
+    assert_eq!(source.collection_ids, [harness.collection_id]);
 
     let response = harness
         .get(&format!("/api/v1/jobs/{}", harness.current_job_id))
@@ -140,6 +165,17 @@ async fn source_and_job_details_are_strict_complete_and_stably_ordered() {
         .await
         .expect("corrupt task spec");
     assert_corrupt_job(&harness).await;
+
+    sqlx::query("UPDATE collections SET enabled=2 WHERE id=?")
+        .bind(harness.collection_id.to_string())
+        .execute(&mut *connection)
+        .await
+        .expect("corrupt collection state");
+    assert_error(
+        &harness.get("/api/v1/collections").await,
+        500,
+        ErrorCode::CorruptState,
+    );
 }
 
 async fn assert_corrupt_job(harness: &Harness) {
