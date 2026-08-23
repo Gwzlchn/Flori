@@ -144,6 +144,14 @@ async fn cancel_fences_attempt_and_only_allows_existing_usage_to_finish() {
         ),
         ("canceled".into(), "canceled".into(), "canceled".into())
     );
+    let event_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM job_events WHERE scope='job' AND scope_id=? ORDER BY id",
+    )
+    .bind(seed.job.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("cancel events");
+    assert_eq!(event_kinds, ["job_state"]);
     assert_eq!(
         store
             .renew_lease(seed.attempt, seed.runner, 3, 1001)

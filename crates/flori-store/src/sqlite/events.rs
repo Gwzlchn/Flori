@@ -139,6 +139,7 @@ pub(crate) async fn insert_event(
     now_ms: i64,
 ) -> Result<u64, StoreError> {
     let (scope, scope_id, kind, data) = event_parts(payload)?;
+    prune_events(transaction, scope).await?;
     let result = sqlx::query(
         "INSERT INTO job_events(scope,scope_id,kind,payload_json,created_at_ms) VALUES(?,?,?,?,?)",
     )
@@ -149,7 +150,6 @@ pub(crate) async fn insert_event(
     .bind(now_ms)
     .execute(&mut **transaction)
     .await?;
-    prune_events(transaction).await?;
     result.last_insert_rowid().try_into().map_err(|_| corrupt())
 }
 
@@ -236,12 +236,18 @@ fn event_parts(
 
 async fn prune_events(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    incoming_scope: &str,
 ) -> Result<(), StoreError> {
     sqlx::query("DELETE FROM job_events WHERE scope='job' AND NOT EXISTS(SELECT 1 FROM jobs j JOIN sources s ON s.id=j.source_id WHERE j.id=job_events.scope_id AND (j.state IN ('queued','running') OR j.id IN (COALESCE(s.current_job_id,''),COALESCE(s.previous_job_id,'')) OR (j.state='failed' AND j.id=(SELECT id FROM jobs f WHERE f.source_id=j.source_id AND f.state='failed' ORDER BY f.finished_at_ms DESC,f.id DESC LIMIT 1))))")
         .execute(&mut **transaction).await?;
     for scope in ["runner", "system"] {
-        sqlx::query("DELETE FROM job_events WHERE scope=? AND id NOT IN (SELECT id FROM job_events WHERE scope=? ORDER BY id DESC LIMIT 10000)")
-            .bind(scope).bind(scope).execute(&mut **transaction).await?;
+        let retained = if scope == incoming_scope {
+            9_999
+        } else {
+            10_000
+        };
+        sqlx::query("DELETE FROM job_events WHERE scope=? AND id NOT IN (SELECT id FROM job_events WHERE scope=? ORDER BY id DESC LIMIT ?)")
+            .bind(scope).bind(scope).bind(retained).execute(&mut **transaction).await?;
     }
     Ok(())
 }

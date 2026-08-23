@@ -1490,6 +1490,27 @@ async fn authenticated_completion_checks_required_usage_manifest_and_nas() {
             .state,
         AttemptState::Succeeded
     );
+    let event_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT kind FROM job_events WHERE scope='job' AND scope_id=? ORDER BY id",
+    )
+    .bind(foundation.job_id.to_string())
+    .fetch_all(&foundation.pool)
+    .await
+    .expect("attempt events");
+    assert_eq!(
+        event_kinds,
+        [
+            "task_state",
+            "job_state",
+            "job_state",
+            "task_state",
+            "log_cursor",
+            "artifact_committed",
+            "artifact_committed",
+            "task_state",
+            "task_state",
+        ]
+    );
     sqlx::query(
         "UPDATE artifacts SET media_type='text/html' WHERE attempt_id=? AND name='original'",
     )
