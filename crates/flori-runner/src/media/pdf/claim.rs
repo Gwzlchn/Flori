@@ -25,13 +25,36 @@ pub(super) fn validate(claim: &TaskClaim) -> Result<(), ErrorCode> {
             }
             shape(
                 claim,
-                &[(
-                    ArtifactKind::SourceOriginal,
-                    "original",
-                    "output/source.pdf",
-                    true,
-                    false,
-                )],
+                &[
+                    (
+                        ArtifactKind::SourceOriginal,
+                        "original",
+                        "output/source.pdf",
+                        true,
+                        false,
+                    ),
+                    (
+                        ArtifactKind::ScholarlyHtml,
+                        "scholarly_html",
+                        "output/scholarly/document.html",
+                        false,
+                        false,
+                    ),
+                    (
+                        ArtifactKind::ScholarlyHtmlSnapshot,
+                        "scholarly_snapshot",
+                        "output/scholarly/snapshot.json",
+                        false,
+                        false,
+                    ),
+                    (
+                        ArtifactKind::ScholarlyResource,
+                        "scholarly_resources",
+                        "output/scholarly/resources/*",
+                        false,
+                        true,
+                    ),
+                ],
             )
         }
         (Executor::DocumentExtract, ResolvedTaskInputs::DocumentExtract { pdf }) => {

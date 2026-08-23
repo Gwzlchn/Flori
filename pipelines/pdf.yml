@@ -7,6 +7,9 @@ acquire:
   timeout: 10m
   artifacts:
     - { name: original, kind: source_original, path: output/source.pdf, required: true, when: on_success, max_bytes: 104857600 }
+    - { name: scholarly_html, kind: scholarly_html, path: output/scholarly/document.html, required: false, when: on_success, max_bytes: 33554432 }
+    - { name: scholarly_snapshot, kind: scholarly_html_snapshot, path: output/scholarly/snapshot.json, required: false, when: on_success, max_bytes: 1048576 }
+    - { name: scholarly_resources, kind: scholarly_resource, path: output/scholarly/resources/*, required: false, when: on_success, max_files: 256, max_bytes: 8388608 }
     - { name: log, kind: task_log, path: logs/task.ndjson, required: true, when: always, max_bytes: 10485760 }
 
 extract:
