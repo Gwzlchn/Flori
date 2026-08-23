@@ -4,7 +4,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { apiClient, apiError, type components } from "../api/client";
 
 const props = defineProps<{ job: components["schemas"]["JobView"] }>();
-const emit = defineEmits<{ created: [jobId: string] }>();
+const emit = defineEmits<{ created: [jobId: string]; refresh: [] }>();
 const runners = ref<components["schemas"]["RunnerView"][]>([]);
 const runnerId = ref("");
 const model = ref("");
@@ -12,6 +12,7 @@ const effort = ref("");
 const pending = ref<components["schemas"]["RerunJobRequest"]>();
 const pendingLabel = ref("");
 const busy = ref(false);
+const lifecycleBusy = ref(false);
 const status = ref("选择一种重跑方式；每次都会创建新 Job。");
 
 const aiRunners = computed(() => runners.value.filter((runner) =>
@@ -83,6 +84,32 @@ async function submit(): Promise<void> {
   } finally { busy.value = false; }
 }
 
+async function cancelJob(): Promise<void> {
+  if (!window.confirm("确定取消这个 Job？正在运行的 Attempt 会立即失效。")) return;
+  lifecycleBusy.value = true;
+  try {
+    const result = await apiClient.POST("/api/v1/jobs/{job_id}/cancel", {
+      params: { path: { job_id: props.job.job_id } },
+    });
+    status.value = result.response.ok ? "Job 已取消。" : apiError(result.error, "cancel_failed: 无法取消 Job。");
+    if (result.response.ok) emit("refresh");
+  } catch { status.value = "network_temporary: 取消请求未完成。"; }
+  finally { lifecycleBusy.value = false; }
+}
+
+async function deleteSource(): Promise<void> {
+  if (!window.confirm("确定完整删除这个 Source 及全部历史成果？此操作不可撤销。")) return;
+  lifecycleBusy.value = true;
+  try {
+    const result = await apiClient.DELETE("/api/v1/sources/{source_id}", {
+      params: { path: { source_id: props.job.source_id } },
+    });
+    if (result.response.ok) window.location.assign(window.location.pathname);
+    else status.value = apiError(result.error, "delete_failed: 无法删除 Source。");
+  } catch { status.value = "network_temporary: 删除请求未完成。"; }
+  finally { lifecycleBusy.value = false; }
+}
+
 onMounted(async () => {
   try {
     const response = await apiClient.GET("/api/v1/runners");
@@ -93,123 +120,150 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section
-    class="card"
-    aria-labelledby="rerun-title"
+  <details
+    id="operations"
+    class="operations card"
   >
-    <h2 id="rerun-title">
-      重跑与翻译
-    </h2>
-    <p class="hint">
-      重跑总是创建新 Job；失败不会替换已发布的 current。
-    </p>
-    <div class="actions">
-      <button
-        type="button"
-        class="secondary"
-        :disabled="busy"
-        @click="arm('pipeline')"
-      >
-        重跑整条 Pipeline
-      </button>
-      <button
-        type="button"
-        class="secondary"
-        :disabled="busy"
-        @click="arm('translate')"
-      >
-        生成全文翻译
-      </button>
-    </div>
-    <fieldset>
-      <legend>指定 AI Runner 重跑智能笔记</legend>
-      <label for="runner">Runner</label>
-      <select
-        id="runner"
-        v-model="runnerId"
-        :disabled="busy"
-      >
-        <option value="">
-          无可用 Runner
-        </option>
-        <option
-          v-for="runner in aiRunners"
-          :key="runner.runner_id"
-          :value="runner.runner_id"
+    <summary>
+      <span><b>重跑、翻译与危险操作</b><small>这些操作不会占用阅读主区域</small></span>
+      <span class="summary-action">展开操作区</span>
+    </summary>
+    <div class="operations-body">
+      <section aria-labelledby="rerun-title">
+        <p class="eyebrow">
+          Create a new Job
+        </p>
+        <h2 id="rerun-title">
+          重跑与翻译
+        </h2>
+        <p class="meta">
+          重跑总是创建新 Job；失败不会替换已发布的 current。
+        </p>
+        <div class="operation-actions">
+          <button
+            type="button"
+            class="btn secondary"
+            :disabled="busy"
+            @click="arm('pipeline')"
+          >
+            重跑整条 Pipeline
+          </button>
+          <button
+            type="button"
+            class="btn secondary"
+            :disabled="busy"
+            @click="arm('translate')"
+          >
+            生成全文翻译
+          </button>
+        </div>
+        <fieldset class="runner-fields">
+          <legend>指定 AI Runner 重跑智能笔记</legend>
+          <label for="runner">Runner<select
+            id="runner"
+            v-model="runnerId"
+            :disabled="busy"
+          >
+            <option value="">无可用 Runner</option>
+            <option
+              v-for="runner in aiRunners"
+              :key="runner.runner_id"
+              :value="runner.runner_id"
+            >
+              {{ runner.name }} · {{ runner.online ? "在线" : "离线等待" }} · rev {{ runner.config_revision }}
+            </option>
+          </select></label>
+          <label for="model">模型<select
+            id="model"
+            v-model="model"
+            :disabled="busy || !runnerId"
+          >
+            <option
+              v-for="item in models"
+              :key="item.model"
+              :value="item.model"
+            >{{ item.model }}</option>
+          </select></label>
+          <label for="effort">Effort<select
+            id="effort"
+            v-model="effort"
+            :disabled="busy || !model"
+          >
+            <option
+              v-for="item in efforts"
+              :key="item"
+              :value="item"
+            >{{ item }}</option>
+          </select></label>
+          <button
+            type="button"
+            class="btn secondary"
+            :disabled="busy || !runnerId"
+            @click="arm('note')"
+          >
+            准备指定重跑
+          </button>
+        </fieldset>
+        <div
+          v-if="pending"
+          class="confirm-box"
         >
-          {{ runner.name }} · {{ runner.online ? "在线" : "离线等待" }} · rev {{ runner.config_revision }}
-        </option>
-      </select>
-      <label for="model">模型</label>
-      <select
-        id="model"
-        v-model="model"
-        :disabled="busy || !runnerId"
+          <strong>待确认：{{ pendingLabel }}</strong>
+          <div>
+            <button
+              type="button"
+              class="btn primary"
+              :disabled="busy"
+              @click="submit"
+            >
+              {{ busy ? "创建中…" : "确认创建新 Job" }}
+            </button>
+            <button
+              type="button"
+              class="btn secondary"
+              :disabled="busy"
+              @click="pending = undefined"
+            >
+              返回
+            </button>
+          </div>
+        </div>
+      </section>
+      <section
+        class="danger-zone"
+        aria-labelledby="danger-title"
       >
-        <option
-          v-for="item in models"
-          :key="item.model"
-          :value="item.model"
+        <p class="eyebrow">
+          Danger zone
+        </p>
+        <h2 id="danger-title">
+          取消与删除
+        </h2>
+        <p>取消会 fence 当前 Attempt；删除 Source 会移除其全部历史成果，且不可撤销。</p>
+        <button
+          v-if="job.state === 'queued' || job.state === 'running'"
+          type="button"
+          class="btn danger-outline"
+          :disabled="lifecycleBusy"
+          @click="cancelJob"
         >
-          {{ item.model }}
-        </option>
-      </select>
-      <label for="effort">Effort</label>
-      <select
-        id="effort"
-        v-model="effort"
-        :disabled="busy || !model"
-      >
-        <option
-          v-for="item in efforts"
-          :key="item"
-          :value="item"
+          取消当前 Job
+        </button>
+        <button
+          type="button"
+          class="btn danger"
+          :disabled="lifecycleBusy"
+          @click="deleteSource"
         >
-          {{ item }}
-        </option>
-      </select>
-      <button
-        type="button"
-        class="secondary"
-        :disabled="busy || !runnerId"
-        @click="arm('note')"
-      >
-        准备指定重跑
-      </button>
-    </fieldset>
-    <div
-      v-if="pending"
-      class="confirm"
-    >
-      <strong>待确认：{{ pendingLabel }}</strong>
-      <button
-        type="button"
-        :disabled="busy"
-        @click="submit"
-      >
-        {{ busy ? "创建中…" : "确认创建新 Job" }}
-      </button>
-      <button
-        type="button"
-        class="secondary"
-        :disabled="busy"
-        @click="pending = undefined"
-      >
-        取消
-      </button>
+          删除整个 Source
+        </button>
+      </section>
     </div>
     <p
-      class="notice"
+      class="notice-bar"
       aria-live="polite"
     >
       {{ status }}
     </p>
-  </section>
+  </details>
 </template>
-
-<style scoped>
-.actions, fieldset, .confirm { display: grid; gap: 0.75rem; }
-.actions { grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
-fieldset { margin: 1rem 0; }
-.confirm { border-left: 0.25rem solid currentColor; padding-left: 0.75rem; }
-</style>
