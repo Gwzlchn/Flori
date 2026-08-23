@@ -4,6 +4,7 @@ import { computed, ref, watch } from "vue";
 import type { components } from "../api/client";
 import JobPanel from "./JobPanel.vue";
 import MarkdownContent from "./MarkdownContent.vue";
+import ScholarlyDocument from "./ScholarlyDocument.vue";
 import UiIcon from "./UiIcon.vue";
 import VisualCatalog from "./VisualCatalog.vue";
 
@@ -19,6 +20,8 @@ const props = defineProps<{
   summary: string | undefined;
   translation: string | undefined;
   pdfUrl: string | undefined;
+  documentView: components["schemas"]["DocumentRepresentationView"] | undefined;
+  documentHtml: string | undefined;
   evidence: components["schemas"]["EvidenceView"] | undefined;
   activeEvidenceId: string;
   status: string;
@@ -41,6 +44,14 @@ const viewerSrc = computed(() => {
   if (!props.pdfUrl) return undefined;
   return activeLocation.value ? `${props.pdfUrl}#page=${activeLocation.value.page}` : props.pdfUrl;
 });
+const htmlView = computed(() => props.documentView?.representation === "scholarly_html" ? props.documentView : undefined);
+const htmlAnchor = computed(() => htmlView.value?.crosswalk?.status === "verified"
+  ? htmlView.value.crosswalk.html_anchor ?? undefined : undefined);
+const showHtml = computed(() => Boolean(props.documentHtml && htmlView.value && !visualLocation.value
+  && (!props.activeEvidenceId || htmlAnchor.value)));
+const representationLabel = computed(() => showHtml.value
+  ? htmlView.value?.provider === "arxiv" ? "arXiv HTML" : "ar5iv HTML"
+  : "PDF canonical evidence");
 const documentText = computed(() => {
   const artifact = props.job.artifacts.find((item) => item.kind === "document_structure");
   return artifact ? props.textContent.get(artifact.artifact_id) : undefined;
@@ -71,9 +82,6 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
   >
     <div class="reader-heading">
       <div>
-        <p class="eyebrow">
-          Knowledge result
-        </p>
         <h2 id="reader-title">
           内容工作台
         </h2>
@@ -250,9 +258,9 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
         aria-label="PDF 证据定位"
       >
         <div class="evidence-head">
-          <span><i /> 原文与 Evidence</span>
+          <span><i /> {{ representationLabel }}</span>
           <a
-            v-if="viewerSrc"
+            v-if="!showHtml && viewerSrc"
             :href="viewerSrc"
             target="_blank"
             rel="noopener"
@@ -274,8 +282,15 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
           <div><dt>页码</dt><dd>{{ activeLocation.page }}</dd></div>
           <div><dt>坐标</dt><dd>{{ coordinate(activeLocation.bbox.x1) }}, {{ coordinate(activeLocation.bbox.y1) }} → {{ coordinate(activeLocation.bbox.x2) }}, {{ coordinate(activeLocation.bbox.y2) }}</dd></div>
         </dl>
+        <ScholarlyDocument
+          v-if="showHtml && documentHtml && htmlView"
+          :html="documentHtml"
+          :resources="htmlView.resources"
+          :file-urls="fileUrls"
+          :anchor="htmlAnchor"
+        />
         <object
-          v-if="viewerSrc"
+          v-else-if="viewerSrc"
           :key="viewerSrc"
           :data="viewerSrc"
           type="application/pdf"
@@ -287,7 +302,7 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
           v-else
           class="empty-state"
         >
-          缺少原始 PDF，无法定位页面。
+          缺少可验证的学术 HTML 与原始 PDF，无法定位原文。
         </p>
       </aside>
     </div>

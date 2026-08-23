@@ -7,7 +7,7 @@ const TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
   "document_structure", "translation", "smart_note", "summary", "terms", "evidence", "task_log", "ai_audit",
 ]);
 const FILE_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
-  "source_original", "figure", "table_region",
+  "source_original", "figure", "table_region", "scholarly_resource",
 ]);
 
 export function usePdfWorkspace() {
@@ -25,6 +25,8 @@ export function usePdfWorkspace() {
   const evidence = ref<components["schemas"]["EvidenceView"]>();
   const activeEvidenceId = ref("");
   const evidenceStatus = ref(EVIDENCE_HINT);
+  const documentView = ref<components["schemas"]["DocumentRepresentationView"]>();
+  const documentHtml = ref<string>();
   const textContent = reactive(new Map<string, string>());
   const fileUrls = reactive(new Map<string, string>());
   let pollTimer: number | undefined;
@@ -109,6 +111,7 @@ export function usePdfWorkspace() {
       }
       evidence.value = view;
       evidenceStatus.value = `已定位第 ${view.locator.value.page} 页。`;
+      await loadDocument(id);
     } catch {
       if (activeEvidenceId.value === id && job.value?.job_id === current.job_id) {
         evidenceStatus.value = "network_temporary: 无法读取证据，请稍后重试。";
@@ -120,6 +123,8 @@ export function usePdfWorkspace() {
     for (const url of fileUrls.values()) URL.revokeObjectURL(url);
     fileUrls.clear();
     textContent.clear();
+    documentView.value = undefined;
+    documentHtml.value = undefined;
   }
 
   async function loadArtifacts(artifacts: components["schemas"]["ArtifactView"][]): Promise<void> {
@@ -142,13 +147,33 @@ export function usePdfWorkspace() {
   }
 
   async function loadSource(sourceId: string): Promise<void> {
-    if (source.value?.source_id === sourceId) return;
     const result = await apiClient.GET("/api/v1/sources/{source_id}", { params: { path: { source_id: sourceId } } });
     if (result.data) {
       source.value = result.data;
       rememberView("content", result.data.source_id);
     }
     else notice.value = apiError(result.error, "source_read_failed: 无法读取来源。");
+  }
+
+  async function loadDocument(evidenceId = ""): Promise<void> {
+    const current = job.value;
+    const currentSource = source.value;
+    if (!current || !currentSource || current.state !== "succeeded") return;
+    const result = await apiClient.GET("/api/v1/sources/{source_id}/document", {
+      params: {
+        path: { source_id: currentSource.source_id },
+        query: evidenceId ? { evidence_id: evidenceId } : {},
+      },
+    });
+    if (!result.data || result.data.job_id !== current.job_id) return;
+    documentView.value = result.data;
+    documentHtml.value = undefined;
+    if (result.data.representation === "scholarly_html") {
+      const html = await apiClient.GET("/api/v1/sources/{source_id}/document/content", {
+        params: { path: { source_id: currentSource.source_id } }, parseAs: "text",
+      });
+      if (html.data !== undefined && job.value?.job_id === current.job_id) documentHtml.value = html.data;
+    }
   }
 
   async function refreshJob(): Promise<void> {
@@ -163,6 +188,7 @@ export function usePdfWorkspace() {
       job.value = result.data;
       notice.value = `Job ${result.data.state}`;
       await Promise.all([loadSource(result.data.source_id), loadArtifacts(result.data.artifacts)]);
+      await loadDocument();
       if (result.data.state === "queued" || result.data.state === "running") {
         pollTimer = window.setTimeout(() => void refreshJob(), 2000);
       }
@@ -248,6 +274,7 @@ export function usePdfWorkspace() {
   return {
     setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
     textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
+    documentView, documentHtml,
     chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob, closeJob,
   };
 }

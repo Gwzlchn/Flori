@@ -15,6 +15,7 @@ const library = useKnowledgeNavigation();
 const {
   setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
   textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
+  documentView, documentHtml,
   chooseFile, setUploadContext, submit, selectEvidence, refreshJob, openJob, closeJob,
 } = workspace;
 const {
@@ -153,6 +154,8 @@ watch(source, (current) => {
           :summary="summaryText"
           :translation="translationText"
           :pdf-url="pdfUrl"
+          :document-view="documentView"
+          :document-html="documentHtml"
           :evidence="evidence"
           :active-evidence-id="activeEvidenceId"
           :status="evidenceStatus"
