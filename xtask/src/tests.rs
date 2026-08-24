@@ -44,6 +44,10 @@ fn exposes_only_fixed_image_mappings() {
         Some(("docker/runner-media.Dockerfile", None))
     );
     assert_eq!(
+        image("runner-download"),
+        Some(("docker/runner-download.Dockerfile", None))
+    );
+    assert_eq!(
         image("runner-ai-qoder"),
         Some(("docker/runner-ai-qoder.Dockerfile", None))
     );
@@ -132,6 +136,7 @@ fn limits_local_proxy_to_ai_images() {
         Some("FLORI_CODEX_BUILD_PROXY")
     );
     assert_eq!(image_proxy_environment("runner-media"), None);
+    assert_eq!(image_proxy_environment("runner-download"), None);
 }
 
 #[test]

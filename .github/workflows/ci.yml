@@ -150,6 +150,10 @@ jobs:
             dockerfile: docker/runner-media.Dockerfile
             context: .
             target: ""
+          - name: runner-download
+            dockerfile: docker/runner-download.Dockerfile
+            context: .
+            target: ""
           - name: runner-ai-qoder
             dockerfile: docker/runner-ai-qoder.Dockerfile
             context: .
@@ -230,11 +234,11 @@ jobs:
           {
             echo "## Required pipeline timing"
             echo
-            echo "- Required validation jobs: $count/11"
+            echo "- Required validation jobs: $count/12"
             echo "- StartedAt to completedAt: ${span}s / 120s"
             echo "- Slowest job: $(sed -n 's/^slow_job=//p' <<< "$report") ($(sed -n 's/^slow_job_seconds=//p' <<< "$report")s)"
             echo "- Slowest step: $(sed -n 's/^slow_step=//p' <<< "$report") ($(sed -n 's/^slow_step_seconds=//p' <<< "$report")s)"
           } >> "$GITHUB_STEP_SUMMARY"
-          test "$count" -eq 11
+          test "$count" -eq 12
           test "$failed" -eq 0
           test "$span" -le 120

@@ -58,6 +58,22 @@ services:
           create_host_path: false
     profiles: [media]
 
+  runner-download:
+    image: ${FLORI_RUNNER_DOWNLOAD_IMAGE:-flori-runner-download:local}
+    build:
+      context: .
+      dockerfile: docker/runner-download.Dockerfile
+    environment:
+      FLORI_SERVER_URL: ${FLORI_SERVER_URL:-}
+      FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_DOWNLOAD:-}
+      FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
+      FLORI_YOUTUBE_PROXY_URL: ${FLORI_YOUTUBE_PROXY_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - runner-download-spool:/var/lib/flori-runner
+    profiles: [download]
+
   runner-ai-qoder:
     image: ${FLORI_RUNNER_QODER_IMAGE:-flori-runner-ai-qoder:local}
     build:
@@ -115,5 +131,6 @@ services:
 
 volumes:
   runner-media-spool:
+  runner-download-spool:
   runner-ai-qoder-spool:
   runner-ai-codex-spool:

@@ -75,6 +75,7 @@ fn image(name: &str) -> Option<(&'static str, Option<&'static str>)> {
         "edge" => Some(("frontend/Dockerfile", Some("edge"))),
         "server" => Some(("docker/server.Dockerfile", None)),
         "runner-media" => Some(("docker/runner-media.Dockerfile", None)),
+        "runner-download" => Some(("docker/runner-download.Dockerfile", None)),
         "runner-ai-qoder" => Some(("docker/runner-ai-qoder.Dockerfile", None)),
         "runner-ai-codex" => Some(("docker/runner-ai-codex.Dockerfile", None)),
         _ => None,
