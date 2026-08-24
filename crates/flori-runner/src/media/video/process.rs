@@ -29,7 +29,12 @@ pub(super) async fn run_tool(
     command
         .args(arguments)
         .env_clear()
+        .env("HF_HUB_OFFLINE", "1")
+        .env("LANG", "C.UTF-8")
         .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("PYTHONHASHSEED", "0")
+        .env("TRANSFORMERS_OFFLINE", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
