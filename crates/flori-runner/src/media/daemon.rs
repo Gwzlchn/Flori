@@ -6,10 +6,10 @@ use std::{
 use flori_core::{AttemptState, ErrorCode, Executor, FailAttemptRequest, TaskClaim};
 use tokio::{fs, sync::watch};
 
-use crate::{RunnerClient, manifest_sha256};
+use crate::{RunnerClient, manifest_sha256, task_log};
 
 use super::{
-    pdf::{claim, daemon::PdfDaemonConfig, log},
+    pdf::{claim, daemon::PdfDaemonConfig},
     video_claim,
     video_daemon::{self, VideoDaemonConfig},
 };
@@ -148,7 +148,7 @@ async fn execute_inner(
     if fs::create_dir(workspace).await.is_err() {
         return fail(client, claim, ErrorCode::StorageUnavailable).await;
     }
-    if let Err(code) = log::started(client, claim, task_kind).await {
+    if let Err(code) = task_log::started(client, claim, task_kind).await {
         return fail(client, claim, code).await;
     }
     let timeout = tokio::time::sleep(Duration::from_millis(claim.timeout_ms));

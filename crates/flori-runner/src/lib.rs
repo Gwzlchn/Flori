@@ -15,6 +15,8 @@ mod digest;
 #[cfg(feature = "media")]
 mod media;
 mod spool;
+#[cfg(feature = "media")]
+mod task_log;
 mod upload;
 
 #[cfg(any(feature = "codex", feature = "qoder"))]

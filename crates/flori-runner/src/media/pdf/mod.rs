@@ -2,7 +2,6 @@ mod acquire;
 pub(super) mod claim;
 pub(super) mod daemon;
 mod extract;
-pub(super) mod log;
 mod network;
 mod process;
 mod scan;
