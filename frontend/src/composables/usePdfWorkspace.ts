@@ -2,10 +2,10 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 
 import { apiClient, apiError, type components, watchJobEvents } from "../api/client";
 import { useArtifactContent } from "./useArtifactContent";
+import { useEvidenceNavigation } from "./useEvidenceNavigation";
 
-const EVIDENCE_HINT = "点击笔记中的证据引用可跳到原文页。";
 const EAGER_TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
-  "translation", "smart_note", "summary",
+  "translation", "smart_note", "summary", "mechanical_note",
 ]);
 
 export function usePdfWorkspace() {
@@ -20,9 +20,6 @@ export function usePdfWorkspace() {
   const jobKey = ref("");
   const busy = ref(false);
   const notice = ref("正在读取 PDF 配置…");
-  const evidence = ref<components["schemas"]["EvidenceView"]>();
-  const activeEvidenceId = ref("");
-  const evidenceStatus = ref(EVIDENCE_HINT);
   const documentView = ref<components["schemas"]["DocumentRepresentationView"]>();
   const documentHtml = ref<string>();
   const content = useArtifactContent(jobId, (message) => { notice.value = message; });
@@ -42,10 +39,14 @@ export function usePdfWorkspace() {
     return artifact ? textContent.get(artifact.artifact_id) : undefined;
   }
 
-  const sourcePdf = computed(() => artifactOf("source_original"));
+  const sourceOriginal = computed(() => artifactOf("source_original"));
   const pdfUrl = computed(() => {
-    const artifact = sourcePdf.value;
-    return artifact ? fileUrls.get(artifact.artifact_id) : undefined;
+    const artifact = sourceOriginal.value;
+    return artifact?.media_type === "application/pdf" ? fileUrls.get(artifact.artifact_id) : undefined;
+  });
+  const videoUrl = computed(() => {
+    const artifact = sourceOriginal.value;
+    return artifact?.media_type.startsWith("video/") ? fileUrls.get(artifact.artifact_id) : undefined;
   });
   const noteText = computed(() => textOf("smart_note"));
   const summaryText = computed(() => textOf("summary"));
@@ -73,48 +74,14 @@ export function usePdfWorkspace() {
     history.replaceState(null, "", url);
   }
 
-  function resetEvidence(persist = true): void {
-    evidence.value = undefined;
-    activeEvidenceId.value = "";
-    evidenceStatus.value = EVIDENCE_HINT;
-    if (persist) remember({ evidence_id: "" });
-  }
-
-  async function selectEvidence(id: string): Promise<void> {
-    const current = job.value;
-    const pdf = sourcePdf.value;
-    activeEvidenceId.value = id;
-    remember({ evidence_id: id });
-    if (!current) return;
-    if (!pdf) {
-      evidenceStatus.value = "artifact_missing: 缺少原始 PDF，无法定位证据。";
-      return;
-    }
-    evidenceStatus.value = "正在读取证据…";
-    try {
-      const result = await apiClient.GET("/api/v1/evidence/{evidence_id}", {
-        params: { path: { evidence_id: id } },
-      });
-      if (activeEvidenceId.value !== id || job.value?.job_id !== current.job_id) return;
-      if (!result.data) {
-        evidenceStatus.value = apiError(result.error, "evidence_read_failed: 无法读取证据。");
-        return;
-      }
-      const view = result.data;
-      if (view.job_id !== current.job_id || view.source_id !== current.source_id
-        || view.source_artifact_id !== pdf.artifact_id || view.locator.kind !== "pdf") {
-        evidenceStatus.value = "evidence_mismatch: 该证据不属于当前 PDF，已拒绝跳转。";
-        return;
-      }
-      evidence.value = view;
-      evidenceStatus.value = `已定位第 ${view.locator.value.page} 页。`;
-      await loadDocument(id, generation);
-    } catch {
-      if (activeEvidenceId.value === id && job.value?.job_id === current.job_id) {
-        evidenceStatus.value = "network_temporary: 无法读取证据，请稍后重试。";
-      }
-    }
-  }
+  const evidenceNavigation = useEvidenceNavigation(
+    job,
+    source,
+    sourceOriginal,
+    (id) => remember({ evidence_id: id }),
+    async (id) => loadDocument(id, generation),
+  );
+  const { evidence, activeEvidenceId, evidenceStatus, reset: resetEvidence, select: selectEvidence } = evidenceNavigation;
 
   function clearArtifacts(): void {
     content.clear();
@@ -165,6 +132,11 @@ export function usePdfWorkspace() {
     const current = job.value;
     const currentSource = source.value;
     if (!current || !currentSource || current.state !== "succeeded") return;
+    if (currentSource.kind === "local_video") {
+      documentView.value = undefined;
+      documentHtml.value = undefined;
+      return;
+    }
     const sequence = ++documentSequence;
     const result = await apiClient.GET("/api/v1/sources/{source_id}/document", {
       params: {
@@ -292,7 +264,7 @@ export function usePdfWorkspace() {
 
   return {
     setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
-    textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
+    textContent, fileUrls, pdfUrl, videoUrl, noteText, summaryText, translationText, sourceTitle,
     documentView, documentHtml,
     chooseFile, setUploadContext, submit, selectEvidence, loadArtifact: content.load, refreshJob, openJob, closeJob,
   };

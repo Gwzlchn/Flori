@@ -8,7 +8,7 @@ const TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
   "scholarly_html", "scholarly_html_snapshot",
 ]);
 const FILE_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
-  "source_original", "figure", "table_region", "scholarly_resource",
+  "source_original", "figure", "table_region", "keyframe", "scholarly_resource",
 ]);
 
 export function useArtifactContent(activeJobId: Readonly<Ref<string>>, report: (message: string) => void) {

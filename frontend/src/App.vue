@@ -5,6 +5,8 @@ import KnowledgeSidebar from "./components/KnowledgeSidebar.vue";
 import LibraryWorkspace from "./components/LibraryWorkspace.vue";
 import DocumentHeader from "./components/DocumentHeader.vue";
 import PdfReader from "./components/PdfReader.vue";
+import VideoReader from "./components/VideoReader.vue";
+import UploadPanel from "./components/UploadPanel.vue";
 import RerunPanel from "./components/RerunPanel.vue";
 import SearchPanel from "./components/SearchPanel.vue";
 import SystemWorkspace from "./components/SystemWorkspace.vue";
@@ -27,7 +29,7 @@ const {
 const {
   setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
   textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
-  documentView, documentHtml,
+  documentView, documentHtml, videoUrl,
   chooseFile, setUploadContext, submit, selectEvidence, loadArtifact, refreshJob, openJob, closeJob,
 } = workspace;
 const {
@@ -211,42 +213,16 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
             @select="chooseContext"
           />
 
-          <details
+          <UploadPanel
             v-if="!job"
-            id="upload"
-            class="upload-card card"
-            :open="!job"
-          >
-            <summary>
-              <span><b>上传并解析 PDF</b><small>投递到 {{ selectedDomain?.name ?? "默认领域" }} / {{ selectedCollection?.name ?? "未归分类" }}</small></span>
-              <span class="summary-action">选择文件</span>
-            </summary>
-            <div class="upload-body">
-              <label
-                class="file-drop"
-                for="pdf-file"
-              >
-                <span class="file-icon">PDF</span>
-                <span><b>{{ selectedFile?.name ?? "选择数字版 PDF" }}</b><small>浏览器先计算 SHA-256，再安全上传</small></span>
-              </label>
-              <input
-                id="pdf-file"
-                class="visually-hidden"
-                type="file"
-                accept="application/pdf,.pdf"
-                :disabled="busy"
-                @change="chooseFile"
-              >
-              <button
-                type="button"
-                class="btn primary"
-                :disabled="!selectedFile || !setup || busy"
-                @click="submit"
-              >
-                {{ busy ? "处理中…" : "开始解析" }}
-              </button>
-            </div>
-          </details>
+            :busy="busy"
+            :domain-name="selectedDomain?.name ?? '默认领域'"
+            :collection-name="selectedCollection?.name"
+            :file="selectedFile"
+            :ready="Boolean(setup)"
+            @choose="chooseFile"
+            @submit="submit"
+          />
 
           <p
             v-if="showNotice"
@@ -257,7 +233,7 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
           </p>
 
           <PdfReader
-            v-if="job"
+            v-if="job && source?.kind !== 'local_video'"
             :job="job"
             :source="source"
             :domain-name="domains.find((item) => item.domain_id === source?.domain_id)?.name"
@@ -284,6 +260,30 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
             @task-change="setTask"
             @artifact-change="setArtifact"
             @visual-change="setVisual"
+          />
+          <VideoReader
+            v-else-if="job"
+            :job="job"
+            :source="source"
+            :domain-name="activeDomainName"
+            :collection-names="collectionNames"
+            :note="noteText"
+            :summary="summaryText"
+            :video-url="videoUrl"
+            :evidence="evidence"
+            :active-evidence-id="activeEvidenceId"
+            :status="evidenceStatus"
+            :text-content="textContent"
+            :file-urls="fileUrls"
+            :tab="readerTab"
+            :selected-task-key="selectedTaskKey"
+            :selected-artifact-id="selectedArtifactId"
+            @select="openEvidence"
+            @load-artifact="loadArtifact"
+            @refresh="refreshJob"
+            @tab-change="setReaderTab"
+            @task-change="setTask"
+            @artifact-change="setArtifact"
           />
           <RerunPanel
             v-if="job"
