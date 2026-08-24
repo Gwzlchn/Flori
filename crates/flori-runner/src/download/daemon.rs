@@ -8,7 +8,7 @@ use tokio::{fs, sync::watch};
 
 use crate::{RunnerClient, manifest_sha256, task_log};
 
-use super::{DownloadDaemonConfig, claim, execute};
+use super::{DownloadDaemonConfig, claim, execute_task};
 
 pub(super) async fn run(
     client: &RunnerClient,
@@ -125,7 +125,7 @@ async fn execute_inner(
     }
     let timeout = tokio::time::sleep(Duration::from_millis(claim.timeout_ms));
     tokio::pin!(timeout);
-    let work = execute::run(client, config, claim, source, workspace, cancel);
+    let work = execute_task(client, config, claim, source, workspace, cancel);
     tokio::pin!(work);
     let result = tokio::select! {
         result = &mut work => result,

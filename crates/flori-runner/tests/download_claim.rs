@@ -1,6 +1,8 @@
 #[path = "../src/download/claim.rs"]
 mod claim;
 
+use std::{ffi::OsString, path::Path};
+
 use flori_core::{
     ArtifactDeclaration, ArtifactKind, ArtifactWhen, AttemptId, CredentialKind, Executor, JobId,
     ResolvedSource, ResolvedSourceInput, ResolvedTaskInputs, SecretCredential, SecretInputs,
@@ -136,4 +138,105 @@ fn credential_and_artifact_drift_fail_closed() {
     assert!(claim::validate(&value).is_err());
     value.output_declarations[0].path = "output/escape/*".into();
     assert!(claim::validate(&value).is_err());
+}
+
+fn text(values: &[OsString]) -> Vec<&str> {
+    values
+        .iter()
+        .map(|value| value.to_str().expect("utf8 argument"))
+        .collect()
+}
+
+#[test]
+fn youtube_uses_only_its_explicit_proxy_and_cookie_path() {
+    let proxy = reqwest::Url::parse("http://foreign-proxy.internal:1080").expect("proxy");
+    let invocation = claim::youtube(
+        "youtube:dQw4w9WgXcQ",
+        Path::new("/work/output"),
+        &proxy,
+        Some(Path::new("/work/private/cookie")),
+        Path::new("/work/private"),
+    )
+    .expect("invocation");
+    let arguments = text(&invocation.arguments);
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--proxy", proxy.as_str()])
+    );
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--cookies", "/work/private/cookie"])
+    );
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--sub-langs", "zh-Hans,zh-Hant,zh,en"])
+    );
+    assert!(!arguments.contains(&"--write-auto-subs"));
+    assert!(!arguments.contains(&"--max-downloads"));
+    assert_eq!(
+        arguments.last(),
+        Some(&"https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    );
+    let environment = invocation
+        .environment
+        .iter()
+        .map(|(name, _)| name.to_string_lossy())
+        .collect::<Vec<_>>();
+    for forbidden in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        assert!(!environment.iter().any(|name| name == forbidden));
+    }
+}
+
+#[test]
+fn bilibili_forces_proxy_off_and_keeps_cookie_in_private_path() {
+    let invocation = claim::bilibili(
+        "bilibili:BV1GJ411x7h7",
+        Path::new("/work/output"),
+        Path::new("/work/temporary"),
+        Some(Path::new("/work/private/cookie")),
+        Path::new("/work/private"),
+    )
+    .expect("invocation");
+    let arguments = text(&invocation.arguments);
+    assert!(arguments.windows(2).any(|pair| pair == ["--proxy", "no"]));
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["--auth-file", "/work/private/cookie"])
+    );
+    assert_eq!(
+        arguments.last(),
+        Some(&"https://www.bilibili.com/video/BV1GJ411x7h7")
+    );
+}
+
+#[test]
+fn credential_kinds_never_cross_platforms() {
+    let youtube = SecretCredential {
+        kind: CredentialKind::YoutubeCookie,
+        value: "REDACTED".into(),
+    };
+    let bilibili = SecretCredential {
+        kind: CredentialKind::BilibiliCookie,
+        value: "REDACTED".into(),
+    };
+    assert!(claim::credential_matches(
+        SourceKind::YoutubeVideo,
+        &youtube
+    ));
+    assert!(claim::credential_matches(
+        SourceKind::BilibiliVideo,
+        &bilibili
+    ));
+    assert!(!claim::credential_matches(
+        SourceKind::YoutubeVideo,
+        &bilibili
+    ));
+    assert!(!claim::credential_matches(
+        SourceKind::BilibiliVideo,
+        &youtube
+    ));
 }
