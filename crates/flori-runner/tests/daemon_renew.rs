@@ -5,7 +5,7 @@ use std::{fs, net::TcpListener, thread, time::Duration};
 
 use flori_core::{
     AiUsageId, AiUsageState, ArtifactKind, ArtifactWhen, AttemptId, ErrorCode, Executor,
-    ResolvedTaskInputs, UsageAck,
+    ResolvedTaskInputs, UsageAck, UsageUpdate,
 };
 use tokio::sync::watch;
 
@@ -65,26 +65,35 @@ fn server(
     exec_id: AttemptId,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        for step in 0..4 {
+        let (mut stream, _) = listener.accept().expect("accept poll");
+        let (head, _) = read_request(&mut stream);
+        assert!(head.starts_with("POST /runner/v1/poll "));
+        json_response(&mut stream, &claim);
+
+        for _ in 0..6 {
             let (mut stream, _) = listener.accept().expect("accept");
-            let (head, _) = read_request(&mut stream);
-            match step {
-                0 => json_response(&mut stream, &claim),
-                1 => content_response(&mut stream, &document, &document_sha),
-                2 => json_response(
+            let (head, body) = read_request(&mut stream);
+            let request = head.lines().next().expect("request line");
+            if request.starts_with("GET /api/v1/artifacts/") {
+                content_response(&mut stream, &document, &document_sha);
+            } else if request.contains("/usage ") {
+                let update: UsageUpdate = serde_json::from_slice(&body).expect("usage");
+                assert!(matches!(update, UsageUpdate::Started { .. }));
+                json_response(
                     &mut stream,
                     &UsageAck {
                         usage_id: AiUsageId::generate(),
                         state: AiUsageState::Started,
                         applied: true,
                     },
-                ),
-                3 => {
-                    assert!(head.contains(&format!("/attempts/{exec_id}/renew")));
-                    thread::sleep(Duration::from_millis(800));
-                }
-                _ => unreachable!(),
+                );
+            } else if request.contains(&format!("/attempts/{exec_id}/renew ")) {
+                thread::sleep(Duration::from_millis(800));
+                return;
+            } else {
+                panic!("unexpected request: {request}");
             }
         }
+        panic!("renew request was not observed");
     })
 }
