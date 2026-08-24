@@ -1,18 +1,11 @@
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 
 import { apiClient, apiError, type components, watchJobEvents } from "../api/client";
+import { useArtifactContent } from "./useArtifactContent";
 
 const EVIDENCE_HINT = "点击笔记中的证据引用可跳到原文页。";
-const TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
-  "document_structure", "translation", "smart_note", "summary", "terms", "evidence", "task_log", "ai_audit",
-  "subtitle", "transcript", "danmaku", "parts_manifest", "subscription_manifest", "mechanical_note",
-  "scholarly_html", "scholarly_html_snapshot",
-]);
-const FILE_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
-  "source_original", "figure", "table_region", "scholarly_resource",
-]);
 const EAGER_TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
-  "document_structure", "translation", "smart_note", "summary",
+  "translation", "smart_note", "summary",
 ]);
 
 export function usePdfWorkspace() {
@@ -32,11 +25,14 @@ export function usePdfWorkspace() {
   const evidenceStatus = ref(EVIDENCE_HINT);
   const documentView = ref<components["schemas"]["DocumentRepresentationView"]>();
   const documentHtml = ref<string>();
-  const textContent = reactive(new Map<string, string>());
-  const fileUrls = reactive(new Map<string, string>());
+  const content = useArtifactContent(jobId, (message) => { notice.value = message; });
+  const { textContent, fileUrls } = content;
   let eventController: AbortController | undefined;
   let eventCursor = 0;
   let eventRefreshTimer: number | undefined;
+  let generation = 0;
+  let refreshSequence = 0;
+  let documentSequence = 0;
 
   function artifactOf(kind: components["schemas"]["ArtifactKind"]): components["schemas"]["ArtifactView"] | undefined {
     return job.value?.artifacts.find((artifact) => artifact.kind === kind);
@@ -68,18 +64,12 @@ export function usePdfWorkspace() {
     uploadCollectionId.value = collectionId;
   }
 
-  function remember(name: "job_id" | "evidence_id", value: string): void {
+  function remember(values: Partial<Record<"evidence_id" | "job_id" | "source_id" | "view", string>>): void {
     const url = new URL(window.location.href);
-    if (value) url.searchParams.set(name, value);
-    else url.searchParams.delete(name);
-    history.replaceState(null, "", url);
-  }
-
-  function rememberView(view: "content" | "library", sourceId = ""): void {
-    const url = new URL(window.location.href);
-    url.searchParams.set("view", view);
-    if (sourceId) url.searchParams.set("source_id", sourceId);
-    else url.searchParams.delete("source_id");
+    for (const [name, value] of Object.entries(values)) {
+      if (value) url.searchParams.set(name, value);
+      else url.searchParams.delete(name);
+    }
     history.replaceState(null, "", url);
   }
 
@@ -87,14 +77,14 @@ export function usePdfWorkspace() {
     evidence.value = undefined;
     activeEvidenceId.value = "";
     evidenceStatus.value = EVIDENCE_HINT;
-    remember("evidence_id", "");
+    remember({ evidence_id: "" });
   }
 
   async function selectEvidence(id: string): Promise<void> {
     const current = job.value;
     const pdf = sourcePdf.value;
     activeEvidenceId.value = id;
-    remember("evidence_id", id);
+    remember({ evidence_id: id });
     if (!current) return;
     if (!pdf) {
       evidenceStatus.value = "artifact_missing: 缺少原始 PDF，无法定位证据。";
@@ -118,7 +108,7 @@ export function usePdfWorkspace() {
       }
       evidence.value = view;
       evidenceStatus.value = `已定位第 ${view.locator.value.page} 页。`;
-      await loadDocument(id);
+      await loadDocument(id, generation);
     } catch {
       if (activeEvidenceId.value === id && job.value?.job_id === current.job_id) {
         evidenceStatus.value = "network_temporary: 无法读取证据，请稍后重试。";
@@ -127,9 +117,7 @@ export function usePdfWorkspace() {
   }
 
   function clearArtifacts(): void {
-    for (const url of fileUrls.values()) URL.revokeObjectURL(url);
-    fileUrls.clear();
-    textContent.clear();
+    content.clear();
     documentView.value = undefined;
     documentHtml.value = undefined;
   }
@@ -163,95 +151,87 @@ export function usePdfWorkspace() {
     })();
   }
 
-  async function loadArtifact(artifact: components["schemas"]["ArtifactView"]): Promise<void> {
-      if (TEXT_KINDS.has(artifact.kind) && !textContent.has(artifact.artifact_id)) {
-        const result = await apiClient.GET("/api/v1/artifacts/{artifact_id}/content", {
-          params: { path: { artifact_id: artifact.artifact_id } }, parseAs: "text",
-        });
-        if (result.data !== undefined) textContent.set(artifact.artifact_id, result.data);
-        else notice.value = apiError(result.error, "artifact_read_failed: 无法读取成果。");
-      }
-      if (FILE_KINDS.has(artifact.kind) && !fileUrls.has(artifact.artifact_id)) {
-        const result = await apiClient.GET("/api/v1/artifacts/{artifact_id}/content", {
-          params: { path: { artifact_id: artifact.artifact_id } }, parseAs: "blob",
-        });
-        if (result.data !== undefined) fileUrls.set(artifact.artifact_id, URL.createObjectURL(result.data));
-        else notice.value = apiError(result.error, "artifact_read_failed: 无法读取成果。");
-      }
-  }
-
-  async function loadArtifacts(artifacts: components["schemas"]["ArtifactView"][]): Promise<void> {
-    for (const artifact of artifacts) {
-      if (EAGER_TEXT_KINDS.has(artifact.kind) || FILE_KINDS.has(artifact.kind)) await loadArtifact(artifact);
-    }
-  }
-
-  async function loadSource(sourceId: string): Promise<void> {
+  async function loadSource(sourceId: string, expected: number): Promise<void> {
     const result = await apiClient.GET("/api/v1/sources/{source_id}", { params: { path: { source_id: sourceId } } });
+    if (generation !== expected) return;
     if (result.data) {
       source.value = result.data;
-      rememberView("content", result.data.source_id);
+      remember({ source_id: result.data.source_id, view: "content" });
     }
     else notice.value = apiError(result.error, "source_read_failed: 无法读取来源。");
   }
 
-  async function loadDocument(evidenceId = ""): Promise<void> {
+  async function loadDocument(evidenceId = "", expected = generation): Promise<void> {
     const current = job.value;
     const currentSource = source.value;
     if (!current || !currentSource || current.state !== "succeeded") return;
+    const sequence = ++documentSequence;
     const result = await apiClient.GET("/api/v1/sources/{source_id}/document", {
       params: {
         path: { source_id: currentSource.source_id },
         query: evidenceId ? { evidence_id: evidenceId } : {},
       },
     });
-    if (!result.data || result.data.job_id !== current.job_id) return;
+    if (generation !== expected || sequence !== documentSequence
+      || !result.data || result.data.job_id !== current.job_id) return;
     documentView.value = result.data;
     documentHtml.value = undefined;
     if (result.data.representation === "scholarly_html") {
+      await Promise.all(result.data.resources.map(content.load));
       const html = await apiClient.GET("/api/v1/sources/{source_id}/document/content", {
         params: { path: { source_id: currentSource.source_id } }, parseAs: "text",
       });
-      if (html.data !== undefined && job.value?.job_id === current.job_id) documentHtml.value = html.data;
+      if (generation === expected && sequence === documentSequence
+        && html.data !== undefined && job.value?.job_id === current.job_id) documentHtml.value = html.data;
     }
   }
 
-  async function refreshJob(): Promise<void> {
-    if (!jobId.value) return;
+  async function refreshJob(expected = generation): Promise<components["schemas"]["JobView"] | undefined> {
+    const id = jobId.value;
+    if (!id) return;
+    const sequence = ++refreshSequence;
     try {
-      const result = await apiClient.GET("/api/v1/jobs/{job_id}", { params: { path: { job_id: jobId.value } } });
+      const result = await apiClient.GET("/api/v1/jobs/{job_id}", { params: { path: { job_id: id } } });
+      if (generation !== expected || sequence !== refreshSequence || jobId.value !== id) return;
       if (!result.data) {
         notice.value = apiError(result.error, "job_read_failed: 无法读取任务。");
         return;
       }
       job.value = result.data;
       notice.value = `Job ${result.data.state}`;
-      await Promise.all([loadSource(result.data.source_id), loadArtifacts(result.data.artifacts)]);
-      await loadDocument();
+      const eagerArtifacts = result.data.artifacts
+        .filter((artifact) => EAGER_TEXT_KINDS.has(artifact.kind) || artifact.kind === "source_original");
+      await Promise.all([loadSource(result.data.source_id, expected), ...eagerArtifacts.map(content.load)]);
+      await loadDocument("", expected);
       if (result.data.state !== "queued" && result.data.state !== "running") stopEvents();
-    } catch { notice.value = "network_temporary: 无法连接 Flori，请手动刷新状态。"; }
+      return result.data;
+    } catch { notice.value = "network_temporary: 无法连接 Flori，请手动刷新状态。"; return undefined; }
   }
 
   async function openJob(id: string, evidenceId = ""): Promise<void> {
+    const expected = ++generation;
+    stopEvents();
     clearArtifacts();
     resetEvidence();
     jobId.value = id;
-    rememberView("content");
-    remember("job_id", id);
-    await refreshJob();
-    if (job.value?.state === "queued" || job.value?.state === "running") startEvents(id);
+    remember({ job_id: id, source_id: "", view: "content" });
+    job.value = undefined;
+    source.value = undefined;
+    const current = await refreshJob(expected);
+    if (generation !== expected || jobId.value !== id) return;
+    if (current?.state === "queued" || current?.state === "running") startEvents(id);
     if (evidenceId) await selectEvidence(evidenceId);
   }
 
   function closeJob(): void {
+    generation += 1;
     stopEvents();
     clearArtifacts();
     resetEvidence();
     job.value = undefined;
     source.value = undefined;
     jobId.value = "";
-    remember("job_id", "");
-    rememberView("library");
+    remember({ job_id: "", source_id: "", view: "library" });
   }
 
   async function submit(): Promise<void> {
@@ -306,7 +286,7 @@ export function usePdfWorkspace() {
     } catch { notice.value = "network_temporary: 无法读取 PDF 配置。"; }
     const params = new URL(window.location.href).searchParams;
     const savedJob = params.get("job_id");
-    if (savedJob) await openJob(savedJob, params.get("evidence_id") ?? "");
+    if (savedJob && params.get("view") === "content") await openJob(savedJob, params.get("evidence_id") ?? "");
   });
   onUnmounted(() => { stopEvents(); clearArtifacts(); });
 
@@ -314,6 +294,6 @@ export function usePdfWorkspace() {
     setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
     textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
     documentView, documentHtml,
-    chooseFile, setUploadContext, submit, selectEvidence, loadArtifact, refreshJob, openJob, closeJob,
+    chooseFile, setUploadContext, submit, selectEvidence, loadArtifact: content.load, refreshJob, openJob, closeJob,
   };
 }

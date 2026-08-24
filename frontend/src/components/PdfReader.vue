@@ -57,6 +57,13 @@ const representationLabel = computed(() => showHtml.value
 function locateVisual(page: number, bbox: components["schemas"]["PdfRect"], label: string): void {
   visualLocation.value = { page, bbox, label };
 }
+function selectTab(id: ReaderTab): void {
+  tab.value = id;
+  if (id !== "visuals") return;
+  for (const artifact of props.job.artifacts) {
+    if (artifact.kind === "figure" || artifact.kind === "table_region") emit("loadArtifact", artifact);
+  }
+}
 function coordinate(value: number): string { return value.toFixed(1); }
 watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; });
 </script>
@@ -85,7 +92,7 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
           role="tab"
           :aria-selected="tab === item.id"
           :aria-controls="`panel-${item.id}`"
-          @click="tab = item.id"
+          @click="selectTab(item.id)"
         >
           <UiIcon
             :name="item.icon"
