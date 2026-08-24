@@ -44,13 +44,19 @@ RUN --mount=type=cache,id=flori-apt-bookworm,target=/var/cache/apt,sharing=locke
       poppler-utils=22.12.0-2+deb12u3 \
       python3=3.11.2-1+b1 \
       python3-pip=23.0.1+dfsg-1 && \
-    python3 -m pip install --break-system-packages --root-user-action=ignore \
-      PyMuPDF==1.27.2.3 faster-whisper==1.2.1 && \
+    python3 -m pip install --break-system-packages --root-user-action=ignore PyMuPDF==1.27.2.3 && \
     apt-get purge -y --auto-remove python3-pip && \
     groupadd --system --gid 65532 flori && \
     useradd --system -K SYS_UID_MAX=65532 --uid 65532 --gid 65532 \
       --home-dir /home/flori --create-home flori && \
     install -d -o 65532 -g 65532 /var/lib/flori-runner/spool
+RUN --mount=type=cache,id=flori-apt-bookworm,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=flori-apt-lists-bookworm,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,id=flori-whisper-pip,target=/root/.cache/pip,sharing=locked \
+    apt-get update && DEBCONF_NOWARNINGS=yes DEBIAN_FRONTEND=noninteractive \
+      apt-get install -y --no-install-recommends python3-pip=23.0.1+dfsg-1 && \
+    python3 -m pip install --break-system-packages --root-user-action=ignore faster-whisper==1.2.1 && \
+    apt-get purge -y --auto-remove python3-pip
 COPY --from=build /tmp/flori-runner-media /usr/local/bin/flori-runner-media
 LABEL org.flori.runner.kind="media"
 LABEL org.flori.runner.tool.pdf_extractor="1.27.2.3"
