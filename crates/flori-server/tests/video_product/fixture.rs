@@ -125,15 +125,15 @@ pub(super) fn ai_capabilities() -> RegisterRunnerRequest {
     }
 }
 
-pub(super) fn envelope(source: ArtifactId, frame: VideoKeyframe) -> AiResultEnvelope {
+pub(super) fn envelope(source: ArtifactId, frame: VideoKeyframe, quote: &str) -> AiResultEnvelope {
     let evidence = EvidenceId::generate();
     let marker = format!("[[evidence:{evidence}]]");
     AiResultEnvelope::VideoNote {
         schema: AiResultSchema::V1,
         smart_note_markdown: format!(
-            "# 视频笔记\n\n## 来源事实\n\nHello video {marker}\n\n## AI 分析\n\n该片段展示了可验证的时间证据。\n"
+            "# 视频笔记\n\n## 来源事实\n\n{quote} {marker}\n\n## AI 分析\n\nVideo 内容包含可验证的时间证据。\n"
         ),
-        summary_markdown: format!("Hello video {marker}\n"),
+        summary_markdown: format!("Video 摘要：{quote} {marker}\n"),
         terms: TermsManifest {
             schema: TermsManifestSchema::V1,
             terms: vec![TermEntry {
@@ -149,7 +149,7 @@ pub(super) fn envelope(source: ArtifactId, frame: VideoKeyframe) -> AiResultEnve
                     end_ms: 1_500,
                     keyframe: Some(frame),
                 },
-                quote: "Hello video".into(),
+                quote: quote.into(),
             }],
         },
     }

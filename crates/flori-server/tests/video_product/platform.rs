@@ -12,7 +12,7 @@ use flori_runner::{DownloadDaemonConfig, RunnerClient, run_download_daemon};
 use sqlx::SqlitePool;
 use tokio::{sync::watch, task::JoinHandle};
 
-use super::{fixture, http};
+use super::{fixture, http, platform_container};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Case {
@@ -21,11 +21,18 @@ pub(crate) enum Case {
     Bilibili,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Mode {
+    Fake,
+    External,
+}
+
 pub(super) async fn create_source(
     address: SocketAddr,
     pool: &SqlitePool,
     domain_id: DomainId,
     case: Case,
+    mode: Mode,
 ) -> flori_core::CreatedSource {
     let (kind, reference, credential_kind, credential_value) = match case {
         Case::Youtube => (
@@ -42,35 +49,56 @@ pub(super) async fn create_source(
         ),
         Case::Local => unreachable!(),
     };
-    let credential_id = CredentialId::generate();
-    sqlx::query(
-        "INSERT INTO credentials(id,kind,name,plaintext_value,created_at_ms,updated_at_ms) VALUES(?,?,?,?,0,0)",
-    )
-    .bind(credential_id.to_string())
-    .bind(credential_kind)
-    .bind(format!("fixture-{case:?}"))
-    .bind(credential_value)
-    .execute(pool)
-    .await
-    .expect("credential");
+    let credential_id = if mode == Mode::Fake {
+        let credential_id = CredentialId::generate();
+        sqlx::query(
+            "INSERT INTO credentials(id,kind,name,plaintext_value,created_at_ms,updated_at_ms) VALUES(?,?,?,?,0,0)",
+        )
+        .bind(credential_id.to_string())
+        .bind(credential_kind)
+        .bind(format!("fixture-{case:?}"))
+        .bind(credential_value)
+        .execute(pool)
+        .await
+        .expect("credential");
+        Some(credential_id)
+    } else {
+        None
+    };
     http::create_remote(
         address,
         &CreateRemoteSource {
-            request_key: format!("video-{case:?}"),
+            request_key: format!("video-{case:?}-{mode:?}"),
             kind,
             canonical_ref: reference.into(),
             title: Some(format!("{case:?} video golden")),
             domain_id,
             collection_ids: vec![],
-            credential_id: Some(credential_id),
+            credential_id,
         },
     )
     .await
 }
 
-pub(super) struct RunningDownload {
-    pub(super) stop: watch::Sender<bool>,
-    pub(super) task: JoinHandle<Result<(), flori_core::ErrorCode>>,
+pub(super) enum RunningDownload {
+    Fake {
+        stop: watch::Sender<bool>,
+        task: JoinHandle<Result<(), flori_core::ErrorCode>>,
+    },
+    External(platform_container::RunningContainer),
+}
+
+impl RunningDownload {
+    pub(super) async fn stop(self) {
+        match self {
+            Self::Fake { stop, task } => {
+                let _ = stop.send(true);
+                let result = task.await.expect("download join");
+                assert!(result.is_ok(), "download daemon: {result:?}");
+            }
+            Self::External(container) => container.stop().await,
+        }
+    }
 }
 
 pub(super) async fn start(
@@ -79,15 +107,21 @@ pub(super) async fn start(
     root: &Path,
     ffprobe: &Path,
     case: Case,
+    mode: Mode,
 ) -> RunningDownload {
     let registration = RunnerClient::register(
         &format!("http://{address}"),
         fixture::DOWNLOAD_KEY,
-        &capabilities(),
+        &capabilities(mode),
     )
     .await
     .expect("register download");
     assert_eq!(registration.runner_id, runner_id);
+    if mode == Mode::External {
+        return RunningDownload::External(
+            platform_container::start(address, registration.token).await,
+        );
+    }
     let client = RunnerClient::new(&format!("http://{address}"), registration.token)
         .expect("download client");
     let (yt_dlp, yutto) = tools(root, case);
@@ -101,16 +135,23 @@ pub(super) async fn start(
     let (stop, mut cancel) = watch::channel(false);
     let task =
         tokio::spawn(async move { run_download_daemon(&client, &config, &mut cancel).await });
-    RunningDownload { stop, task }
+    RunningDownload::Fake { stop, task }
 }
 
-fn capabilities() -> RegisterRunnerRequest {
+fn capabilities(mode: Mode) -> RegisterRunnerRequest {
     RegisterRunnerRequest {
         tools: [RunnerTool::Ffprobe, RunnerTool::YtDlp, RunnerTool::Yutto]
             .into_iter()
             .map(|tool| RunnerToolCapability {
+                version: match (mode, tool) {
+                    (Mode::External, RunnerTool::Ffprobe) => "5.1.9",
+                    (Mode::External, RunnerTool::YtDlp) => "2026.08.19",
+                    (Mode::External, RunnerTool::Yutto) => "2.3.0",
+                    (Mode::External, _) => unreachable!(),
+                    (Mode::Fake, _) => "fixture",
+                }
+                .into(),
                 tool,
-                version: "fixture".into(),
             })
             .collect(),
         ai_models: vec![],
@@ -144,7 +185,13 @@ fn tools(root: &Path, case: Case) -> (PathBuf, PathBuf) {
     )
 }
 
-pub(super) async fn assert_transcription(pool: &SqlitePool, job: JobId, root: &Path, case: Case) {
+pub(super) async fn assert_transcription(
+    pool: &SqlitePool,
+    job: JobId,
+    root: &Path,
+    case: Case,
+    mode: Mode,
+) {
     let subtitle: i64 =
         sqlx::query_scalar("SELECT count(*) FROM artifacts WHERE job_id=? AND kind='subtitle'")
             .bind(job.to_string())
@@ -167,7 +214,7 @@ pub(super) async fn assert_transcription(pool: &SqlitePool, job: JobId, root: &P
     );
     let calls = fs::read(root.join("whisper-called")).map_or(0, |bytes| bytes.len());
     assert_eq!(calls, usize::from(case != Case::Youtube));
-    if case != Case::Local {
+    if case != Case::Local && mode == Mode::Fake {
         assert!(
             root.join(format!("cookie-observed-{}", case_name(case)))
                 .is_file()

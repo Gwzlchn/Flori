@@ -1,9 +1,11 @@
 mod fixture;
 mod http;
 mod platform;
+mod platform_container;
 mod qoder;
+mod receipt;
 
-pub(crate) use platform::Case;
+pub(crate) use platform::{Case, Mode};
 
 use std::{fs, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
 
@@ -19,7 +21,7 @@ use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
 use tokio::{net::TcpListener, sync::watch};
 
-pub(super) async fn run(case: Case) {
+pub(super) async fn run(case: Case, mode: Mode) {
     let root = std::env::temp_dir().join(format!(
         "flori-video-product-{}",
         flori_core::RequestId::generate()
@@ -36,8 +38,13 @@ pub(super) async fn run(case: Case) {
     )
     .await
     .expect("pool");
+    let max_artifact_bytes = if mode == Mode::External {
+        512 * 1024 * 1024
+    } else {
+        128 * 1024 * 1024
+    };
     let artifacts =
-        Arc::new(NasArtifactStore::new(&artifact_root, 128 * 1024 * 1024).expect("NAS"));
+        Arc::new(NasArtifactStore::new(&artifact_root, max_artifact_bytes).expect("NAS"));
     let (domain, pipeline, download_id, media_id, ai_id) = fixture::seed(&store, &pool).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let address = listener.local_addr().expect("address");
@@ -70,7 +77,7 @@ pub(super) async fn run(case: Case) {
             .await
         }
         Case::Youtube | Case::Bilibili => {
-            platform::create_source(address, &pool, domain, case).await
+            platform::create_source(address, &pool, domain, case, mode).await
         }
     };
     let job = http::create_job(
@@ -95,7 +102,7 @@ pub(super) async fn run(case: Case) {
     let media = RunnerClient::new(&format!("http://{address}"), media_registration.token)
         .expect("media client");
     let tools = fixture::write_media_tools(&root);
-    let download = platform::start(address, download_id, &root, &tools.ffprobe, case).await;
+    let download = platform::start(address, download_id, &root, &tools.ffprobe, case, mode).await;
     let media_config = VideoDaemonConfig {
         ffmpeg: tools.ffmpeg,
         ffprobe: tools.ffprobe,
@@ -133,7 +140,18 @@ pub(super) async fn run(case: Case) {
     let media_task = tokio::spawn(async move {
         run_media_daemon(&media, &pdf_config, &media_config, &mut media_cancel).await
     });
-    http::wait_task(&pool, job.job_id, "note", "ready").await;
+    http::wait_task_for(
+        &pool,
+        job.job_id,
+        "note",
+        "ready",
+        if mode == Mode::External {
+            Duration::from_secs(300)
+        } else {
+            Duration::from_secs(10)
+        },
+    )
+    .await;
 
     let transcript = sqlx::query(
         "SELECT a.relative_path FROM artifacts a WHERE a.job_id=? AND a.kind='transcript'",
@@ -175,7 +193,8 @@ pub(super) async fn run(case: Case) {
         frame.try_get("name").expect("frame name"),
     )
     .expect("keyframe name");
-    let repaired = fixture::envelope(transcript.source_artifact_id, keyframe);
+    let quote = transcript.cues.first().expect("first cue").text.clone();
+    let repaired = fixture::envelope(transcript.source_artifact_id, keyframe, &quote);
     let qoder = qoder::invalid_then_repaired(&root, &repaired);
     let ai_registration = RunnerClient::register(
         &format!("http://{address}"),
@@ -209,7 +228,7 @@ pub(super) async fn run(case: Case) {
     http::wait_published(&pool, job.job_id).await;
     qoder::assert_repaired(&pool, job.job_id, &qoder).await;
 
-    let hits: Vec<SearchHit> = http::get_json(address, "/api/v1/search?q=Hello&limit=10").await;
+    let hits: Vec<SearchHit> = http::get_json(address, "/api/v1/search?q=Video&limit=10").await;
     assert!(hits.len() >= 2);
     assert!(hits.iter().all(|hit| hit.job_id == job.job_id));
     let evidence_id = hits
@@ -244,22 +263,31 @@ pub(super) async fn run(case: Case) {
         .await
         .expect("artifacts");
     assert_eq!(artifacts, if case == Case::Local { 15 } else { 16 });
-    platform::assert_transcription(&pool, job.job_id, &root, case).await;
+    platform::assert_transcription(&pool, job.job_id, &root, case, mode).await;
 
     let _ = media_stop.send(true);
     let _ = ai_stop.send(true);
-    let _ = download.stop.send(true);
-    let download_result = download.task.await.expect("download join");
-    assert!(
-        download_result.is_ok(),
-        "download daemon: {download_result:?}"
-    );
+    download.stop().await;
     let media_result = media_task.await.expect("media join");
     assert!(media_result.is_ok(), "media daemon: {media_result:?}");
     let ai_result = ai_task.await.expect("AI join");
     assert!(ai_result.is_ok(), "AI daemon: {ai_result:?}");
     server.abort();
+    if mode == Mode::External {
+        receipt::write(
+            &pool,
+            &artifact_root,
+            uploaded.source_id,
+            job.job_id,
+            case,
+            &root,
+        )
+        .await;
+        eprintln!("WP12C_RECEIPT_ROOT={}", root.display());
+    }
     pool.close().await;
     drop(store);
-    fs::remove_dir_all(root).expect("cleanup");
+    if mode == Mode::Fake {
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }

@@ -79,13 +79,14 @@ pub(super) async fn get_json<T: DeserializeOwned>(address: SocketAddr, path: &st
     decode(exchange(address, "GET", path, "", &[]).await)
 }
 
-pub(super) async fn wait_task(
+pub(super) async fn wait_task_for(
     pool: &SqlitePool,
     job: flori_core::JobId,
     key: &str,
     expected: &str,
+    timeout: Duration,
 ) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(timeout, async {
         loop {
             let state: String =
                 sqlx::query_scalar("SELECT state FROM tasks WHERE job_id=? AND task_key=?")
