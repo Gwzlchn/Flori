@@ -257,19 +257,18 @@ mod tests {
 
     #[test]
     fn platform_video_references_are_strict_and_canonical() {
-        assert_eq!(
-            canonical_ref(
-                SourceKind::BilibiliVideo,
-                "https://www.bilibili.com/video/BV1GJ411x7h7/"
-            )
-            .expect("Bilibili video"),
-            "bilibili:BV1GJ411x7h7"
-        );
-        assert_eq!(
-            canonical_ref(SourceKind::YoutubeVideo, "https://youtu.be/dQw4w9WgXcQ")
-                .expect("YouTube video"),
-            "youtube:dQw4w9WgXcQ"
-        );
+        let Ok(bilibili) = canonical_ref(
+            SourceKind::BilibiliVideo,
+            "https://www.bilibili.com/video/BV1GJ411x7h7/",
+        ) else {
+            panic!("Bilibili video must be accepted");
+        };
+        assert_eq!(bilibili, "bilibili:BV1GJ411x7h7");
+        let Ok(youtube) = canonical_ref(SourceKind::YoutubeVideo, "https://youtu.be/dQw4w9WgXcQ")
+        else {
+            panic!("YouTube video must be accepted");
+        };
+        assert_eq!(youtube, "youtube:dQw4w9WgXcQ");
         assert!(canonical_ref(SourceKind::BilibiliVideo, "https://b23.tv/short").is_err());
         assert!(
             canonical_ref(
