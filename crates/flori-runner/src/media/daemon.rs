@@ -131,10 +131,7 @@ async fn execute_inner(
             }
             "PDF"
         }
-        Executor::VideoAcquire
-        | Executor::VideoTranscribe
-        | Executor::VideoFrames
-        | Executor::VideoMechanicalNote => {
+        Executor::VideoTranscribe | Executor::VideoFrames | Executor::VideoMechanicalNote => {
             let Some(_) = video else {
                 return fail(client, claim, ErrorCode::CorruptState).await;
             };
@@ -158,10 +155,7 @@ async fn execute_inner(
             Executor::DocumentAcquire | Executor::DocumentExtract => {
                 super::pdf::daemon::run_task(client, config, claim, workspace).await
             }
-            Executor::VideoAcquire
-            | Executor::VideoTranscribe
-            | Executor::VideoFrames
-            | Executor::VideoMechanicalNote => {
+            Executor::VideoTranscribe | Executor::VideoFrames | Executor::VideoMechanicalNote => {
                 video_daemon::run_task(
                     client,
                     video.ok_or(ErrorCode::CorruptState)?,

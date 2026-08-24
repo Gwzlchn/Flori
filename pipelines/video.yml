@@ -2,7 +2,7 @@ acquire:
   executor: video.acquire
   with:
     source: $source
-  tags: [media]
+  tags: [download]
   retry: 1
   timeout: 30m
   artifacts:

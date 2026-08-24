@@ -75,8 +75,12 @@ pub(super) fn supports_executor(
         Executor::DocumentAcquire | Executor::VideoMechanicalNote => true,
         Executor::DocumentExtract => has(RunnerTool::PdfExtractor),
         Executor::VideoAcquire | Executor::VideoSubscription => match source_kind {
-            SourceKind::BilibiliVideo | SourceKind::BilibiliChannel => has(RunnerTool::Yutto),
-            SourceKind::YoutubeVideo | SourceKind::YoutubeChannel => has(RunnerTool::YtDlp),
+            SourceKind::BilibiliVideo | SourceKind::BilibiliChannel => {
+                has(RunnerTool::Yutto) && has(RunnerTool::Ffprobe)
+            }
+            SourceKind::YoutubeVideo | SourceKind::YoutubeChannel => {
+                has(RunnerTool::YtDlp) && has(RunnerTool::Ffprobe)
+            }
             SourceKind::LocalVideo => {
                 executor == Executor::VideoAcquire && has(RunnerTool::Ffprobe)
             }

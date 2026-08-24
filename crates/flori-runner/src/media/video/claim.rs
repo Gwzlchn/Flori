@@ -1,6 +1,4 @@
-use flori_core::{
-    ArtifactKind, ArtifactWhen, ErrorCode, Executor, ResolvedTaskInputs, SourceKind, TaskClaim,
-};
+use flori_core::{ArtifactKind, ArtifactWhen, ErrorCode, Executor, ResolvedTaskInputs, TaskClaim};
 
 use super::pdf::claim::exact;
 
@@ -15,46 +13,6 @@ pub(crate) fn validate(claim: &TaskClaim) -> Result<(), ErrorCode> {
         return Err(ErrorCode::CorruptState);
     }
     match (&claim.executor, &claim.resolved_inputs) {
-        (Executor::VideoAcquire, ResolvedTaskInputs::VideoAcquire { source })
-            if source.kind == SourceKind::LocalVideo
-                && source.input.as_ref().is_some_and(|input| {
-                    input.media_type == "video/mp4" && input.name == "original"
-                }) =>
-        {
-            shape(
-                claim,
-                &[
-                    (
-                        ArtifactKind::SourceOriginal,
-                        "videos",
-                        "output/videos/*",
-                        true,
-                        true,
-                    ),
-                    (
-                        ArtifactKind::Subtitle,
-                        "subtitle",
-                        "output/subtitle.srt",
-                        false,
-                        false,
-                    ),
-                    (
-                        ArtifactKind::Danmaku,
-                        "danmaku",
-                        "output/danmaku.xml",
-                        false,
-                        false,
-                    ),
-                    (
-                        ArtifactKind::PartsManifest,
-                        "parts",
-                        "output/parts.json",
-                        true,
-                        false,
-                    ),
-                ],
-            )
-        }
         (Executor::VideoTranscribe, ResolvedTaskInputs::VideoTranscribe { video, subtitle })
             if video.kind == ArtifactKind::SourceOriginal
                 && video.media_type == "video/mp4"

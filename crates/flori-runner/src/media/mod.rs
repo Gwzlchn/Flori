@@ -1,8 +1,6 @@
 mod daemon;
 pub(crate) mod pdf;
 pub(crate) mod video;
-#[path = "video/acquire.rs"]
-mod video_acquire;
 #[path = "video/claim.rs"]
 mod video_claim;
 #[path = "video/daemon.rs"]

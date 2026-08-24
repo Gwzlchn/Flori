@@ -14,7 +14,6 @@ use super::{
         extract_keyframes, mechanical_note_with_frames, normalize_srt, probe_video,
         transcribe::{FasterWhisperConfig, transcribe_video},
     },
-    video_acquire::acquire_local,
     video_claim as claim,
 };
 
@@ -36,18 +35,6 @@ pub(crate) async fn run_task(
 ) -> Result<Vec<ArtifactManifestEntry>, ErrorCode> {
     claim::validate(claim)?;
     match &claim.resolved_inputs {
-        ResolvedTaskInputs::VideoAcquire { source } => {
-            acquire_local(
-                client,
-                &config.ffprobe,
-                config.tool_timeout,
-                config.max_tool_output_bytes,
-                claim,
-                source,
-                workspace,
-            )
-            .await
-        }
         ResolvedTaskInputs::VideoTranscribe { video, subtitle } => {
             transcribe(client, config, claim, video, subtitle.as_ref(), workspace).await
         }
