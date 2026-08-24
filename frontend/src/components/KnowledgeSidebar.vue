@@ -15,6 +15,7 @@ const props = defineProps<{
   selectedCollectionId: string;
   status: string;
   collapsed: boolean;
+  activeView: "about" | "content" | "library" | "system";
 }>();
 const emit = defineEmits<{
   open: [jobId: string];
@@ -22,6 +23,7 @@ const emit = defineEmits<{
   submit: [];
   close: [];
   toggle: [];
+  navigate: [view: "about" | "library" | "system"];
 }>();
 
 function collectionsOf(domainId: string): components["schemas"]["CollectionView"][] {
@@ -69,6 +71,7 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
       class="brand"
       href="#workspace"
       aria-label="Flori 知识库"
+      @click.prevent="emit('navigate', 'library')"
     >
       <span class="brand-mark"><img
         :src="floriLogo"
@@ -201,8 +204,32 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
         :size="14"
       />投递到 {{ selectedLabel }}
     </button>
+    <nav
+      class="sidebar-tools"
+      aria-label="系统导航"
+    >
+      <button
+        type="button"
+        :class="{ 'is-active': activeView === 'system' }"
+        @click="emit('navigate', 'system')"
+      >
+        <UiIcon
+          name="settings"
+          :size="15"
+        /><span>系统与 Runner</span>
+      </button>
+      <button
+        type="button"
+        :class="{ 'is-active': activeView === 'about' }"
+        @click="emit('navigate', 'about')"
+      >
+        <UiIcon
+          name="info"
+          :size="15"
+        /><span>关于 Flori</span>
+      </button>
+    </nav>
     <footer class="side-footer">
-      <span class="health-copy"><span class="health-dot" /> Home Core 已连接</span>
       <button
         type="button"
         class="sidebar-toggle"
@@ -223,8 +250,10 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
 .sidebar-close, .sidebar-toggle { display: grid; place-items: center; border: 0; color: var(--muted); background: transparent; cursor: pointer; }
 .sidebar-close { position: absolute; top: 16px; right: 12px; display: none; width: 32px; height: 32px; border-radius: 5px; font-size: 22px; }
 .sidebar-close:hover, .sidebar-toggle:hover { color: var(--ink); background: var(--line-soft); }
-.side-footer { justify-content: space-between; }
-.health-copy { display: flex; gap: 7px; align-items: center; min-width: 0; }
+.side-footer { justify-content: flex-end; }
+.sidebar-tools { display: grid; gap: 2px; padding: 7px 3px; border-top: 1px solid var(--line-soft); }
+.sidebar-tools button { display: flex; gap: 8px; align-items: center; min-height: 31px; padding: 5px 8px; border: 0; border-radius: 5px; color: var(--muted); text-align: left; background: transparent; cursor: pointer; }
+.sidebar-tools button:hover, .sidebar-tools button.is-active { color: var(--ink); background: var(--line-soft); }
 .sidebar-toggle { width: 30px; height: 30px; flex: none; border-radius: 5px; }
 :global(.sidebar-collapsed) .sidebar { align-items: center; padding-inline: 8px; }
 :global(.sidebar-collapsed) .brand { padding-inline: 0; }
@@ -232,8 +261,9 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
 :global(.sidebar-collapsed) .library-heading,
 :global(.sidebar-collapsed) .library-tree,
 :global(.sidebar-collapsed) .sidebar-upload,
-:global(.sidebar-collapsed) .health-copy,
-:global(.sidebar-collapsed) .sidebar-primary button span { display: none; }
+:global(.sidebar-collapsed) .sidebar-primary button span,
+:global(.sidebar-collapsed) .sidebar-tools button span { display: none; }
+:global(.sidebar-collapsed) .sidebar-tools button { justify-content: center; padding-inline: 0; }
 :global(.sidebar-collapsed) .sidebar-primary { grid-template-columns: 34px; }
 :global(.sidebar-collapsed) .sidebar-primary button { justify-content: center; padding: 0; }
 @media (max-width: 980px) {
@@ -244,8 +274,9 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
   :global(.sidebar-collapsed) .library-heading,
   :global(.sidebar-collapsed) .library-tree,
   :global(.sidebar-collapsed) .sidebar-upload,
-  :global(.sidebar-collapsed) .health-copy,
-  :global(.sidebar-collapsed) .sidebar-primary button span { display: initial; }
+  :global(.sidebar-collapsed) .sidebar-primary button span,
+  :global(.sidebar-collapsed) .sidebar-tools button span { display: initial; }
+  :global(.sidebar-collapsed) .sidebar-tools button { justify-content: flex-start; padding-inline: 8px; }
   :global(.sidebar-collapsed) .sidebar-primary { grid-template-columns: minmax(0, 1fr) 34px; }
   :global(.sidebar-collapsed) .sidebar-primary button { justify-content: flex-start; padding: 0 10px; }
   .sidebar-toggle { display: none; }

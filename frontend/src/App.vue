@@ -7,14 +7,24 @@ import DocumentHeader from "./components/DocumentHeader.vue";
 import PdfReader from "./components/PdfReader.vue";
 import RerunPanel from "./components/RerunPanel.vue";
 import SearchPanel from "./components/SearchPanel.vue";
+import SystemWorkspace from "./components/SystemWorkspace.vue";
+import AboutPanel from "./components/AboutPanel.vue";
 import { useKnowledgeNavigation } from "./composables/useKnowledgeNavigation";
 import { usePdfWorkspace } from "./composables/usePdfWorkspace";
 import UiIcon from "./components/UiIcon.vue";
+
+type AppView = "about" | "content" | "library" | "system";
+
+function initialView(): AppView {
+  const value = new URL(window.location.href).searchParams.get("view");
+  return value === "about" || value === "content" || value === "system" ? value : "library";
+}
 
 const workspace = usePdfWorkspace();
 const library = useKnowledgeNavigation();
 const sidebarCollapsed = ref(localStorage.getItem("flori.sidebar.collapsed") === "true");
 const mobileSidebarOpen = ref(false);
+const activeView = ref<AppView>(initialView());
 const {
   setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
   textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
@@ -33,23 +43,41 @@ const activeDomainName = computed(() => domains.value.find((item) => item.domain
   ?? selectedDomain.value?.name ?? "知识库");
 const activeCollectionName = computed(() => collectionNames.value[0] ?? selectedCollection.value?.name);
 const showNotice = computed(() => !job.value || job.value.state !== "succeeded" || !notice.value.startsWith("Job succeeded"));
+const pageTitle = computed(() => activeView.value === "system" ? "系统与 Runner"
+  : activeView.value === "about" ? "关于 Flori" : job.value ? sourceTitle.value : "投递内容");
+
+function rememberPage(view: AppView): void {
+  activeView.value = view;
+  const url = new URL(window.location.href);
+  url.searchParams.set("view", view);
+  history.replaceState(null, "", url);
+}
 
 function chooseContext(domainId: string, collectionId = ""): void {
   selectContext(domainId, collectionId);
   setUploadContext(domainId, collectionId);
   closeJob();
+  rememberPage("library");
   mobileSidebarOpen.value = false;
 }
 
 function startSubmission(): void {
   closeJob();
+  rememberPage("library");
   mobileSidebarOpen.value = false;
   requestAnimationFrame(() => document.querySelector("#upload")?.scrollIntoView({ behavior: "smooth", block: "start" }));
 }
 
 function openContent(jobId: string, evidenceId?: string): void {
   mobileSidebarOpen.value = false;
+  rememberPage("content");
   void openJob(jobId, evidenceId);
+}
+
+function navigate(view: "about" | "library" | "system"): void {
+  mobileSidebarOpen.value = false;
+  if (view === "library") closeJob();
+  rememberPage(view);
 }
 
 function toggleSidebar(): void {
@@ -80,11 +108,13 @@ watch(source, (current) => {
       :selected-collection-id="selectedCollectionId"
       :status="libraryStatus"
       :collapsed="sidebarCollapsed"
+      :active-view="activeView"
       @open="openContent"
       @select="chooseContext"
       @submit="startSubmission"
       @close="mobileSidebarOpen = false"
       @toggle="toggleSidebar"
+      @navigate="navigate"
     />
     <button
       type="button"
@@ -105,8 +135,8 @@ watch(source, (current) => {
         </button>
         <div class="breadcrumb">
           <span>{{ activeDomainName }}</span><b>/</b>
-          <span v-if="activeCollectionName">{{ activeCollectionName }}</span>
-          <b v-if="activeCollectionName">/</b><strong>{{ job ? sourceTitle : "投递内容" }}</strong>
+          <span v-if="activeView === 'content' && activeCollectionName">{{ activeCollectionName }}</span>
+          <b v-if="activeView === 'content' && activeCollectionName">/</b><strong>{{ pageTitle }}</strong>
         </div>
         <SearchPanel @open="openContent" />
       </header>
@@ -115,97 +145,105 @@ watch(source, (current) => {
         id="workspace"
         class="page"
       >
-        <DocumentHeader
-          v-if="job"
-          :job="job"
-          :source="source"
-          :title="sourceTitle"
-          :domain-name="activeDomainName"
-          :collection-names="collectionNames"
-          @refresh="refreshJob"
+        <SystemWorkspace
+          v-if="activeView === 'system' && job"
+          :job-id="job.job_id"
         />
-        <LibraryWorkspace
-          v-else
-          :domain="selectedDomain"
-          :collection="selectedCollection"
-          :collections="collections"
-          :sources="sources"
-          @open="openJob"
-          @select="chooseContext"
-        />
+        <SystemWorkspace v-else-if="activeView === 'system'" />
+        <AboutPanel v-else-if="activeView === 'about'" />
+        <template v-else>
+          <DocumentHeader
+            v-if="job"
+            :job="job"
+            :source="source"
+            :title="sourceTitle"
+            :domain-name="activeDomainName"
+            :collection-names="collectionNames"
+            @refresh="refreshJob"
+          />
+          <LibraryWorkspace
+            v-else
+            :domain="selectedDomain"
+            :collection="selectedCollection"
+            :collections="collections"
+            :sources="sources"
+            @open="openJob"
+            @select="chooseContext"
+          />
 
-        <details
-          v-if="!job"
-          id="upload"
-          class="upload-card card"
-          :open="!job"
-        >
-          <summary>
-            <span><b>上传并解析 PDF</b><small>投递到 {{ selectedDomain?.name ?? "默认领域" }} / {{ selectedCollection?.name ?? "未归分类" }}</small></span>
-            <span class="summary-action">选择文件</span>
-          </summary>
-          <div class="upload-body">
-            <label
-              class="file-drop"
-              for="pdf-file"
-            >
-              <span class="file-icon">PDF</span>
-              <span><b>{{ selectedFile?.name ?? "选择数字版 PDF" }}</b><small>浏览器先计算 SHA-256，再安全上传</small></span>
-            </label>
-            <input
-              id="pdf-file"
-              class="visually-hidden"
-              type="file"
-              accept="application/pdf,.pdf"
-              :disabled="busy"
-              @change="chooseFile"
-            >
-            <button
-              type="button"
-              class="btn primary"
-              :disabled="!selectedFile || !setup || busy"
-              @click="submit"
-            >
-              {{ busy ? "处理中…" : "开始解析" }}
-            </button>
-          </div>
-        </details>
+          <details
+            v-if="!job"
+            id="upload"
+            class="upload-card card"
+            :open="!job"
+          >
+            <summary>
+              <span><b>上传并解析 PDF</b><small>投递到 {{ selectedDomain?.name ?? "默认领域" }} / {{ selectedCollection?.name ?? "未归分类" }}</small></span>
+              <span class="summary-action">选择文件</span>
+            </summary>
+            <div class="upload-body">
+              <label
+                class="file-drop"
+                for="pdf-file"
+              >
+                <span class="file-icon">PDF</span>
+                <span><b>{{ selectedFile?.name ?? "选择数字版 PDF" }}</b><small>浏览器先计算 SHA-256，再安全上传</small></span>
+              </label>
+              <input
+                id="pdf-file"
+                class="visually-hidden"
+                type="file"
+                accept="application/pdf,.pdf"
+                :disabled="busy"
+                @change="chooseFile"
+              >
+              <button
+                type="button"
+                class="btn primary"
+                :disabled="!selectedFile || !setup || busy"
+                @click="submit"
+              >
+                {{ busy ? "处理中…" : "开始解析" }}
+              </button>
+            </div>
+          </details>
 
-        <p
-          v-if="showNotice"
-          class="notice-bar"
-          aria-live="polite"
-        >
-          {{ notice }}
-        </p>
+          <p
+            v-if="showNotice"
+            class="notice-bar"
+            aria-live="polite"
+          >
+            {{ notice }}
+          </p>
 
-        <PdfReader
-          v-if="job"
-          :job="job"
-          :source="source"
-          :domain-name="domains.find((item) => item.domain_id === source?.domain_id)?.name"
-          :collection-names="collectionNames"
-          :note="noteText"
-          :summary="summaryText"
-          :translation="translationText"
-          :pdf-url="pdfUrl"
-          :document-view="documentView"
-          :document-html="documentHtml"
-          :evidence="evidence"
-          :active-evidence-id="activeEvidenceId"
-          :status="evidenceStatus"
-          :text-content="textContent"
-          :file-urls="fileUrls"
-          @select="selectEvidence"
-          @load-artifact="loadArtifact"
-          @refresh="refreshJob"
-        />
-        <RerunPanel
-          v-if="job"
-          :job="job"
-          @created="openJob"
-          @refresh="refreshJob"
-        />
+          <PdfReader
+            v-if="job"
+            :job="job"
+            :source="source"
+            :domain-name="domains.find((item) => item.domain_id === source?.domain_id)?.name"
+            :collection-names="collectionNames"
+            :note="noteText"
+            :summary="summaryText"
+            :translation="translationText"
+            :pdf-url="pdfUrl"
+            :document-view="documentView"
+            :document-html="documentHtml"
+            :evidence="evidence"
+            :active-evidence-id="activeEvidenceId"
+            :status="evidenceStatus"
+            :text-content="textContent"
+            :file-urls="fileUrls"
+            @select="selectEvidence"
+            @load-artifact="loadArtifact"
+            @refresh="refreshJob"
+          />
+          <RerunPanel
+            v-if="job"
+            :job="job"
+            @created="openJob"
+            @refresh="refreshJob"
+          />
+        </template>
       </main>
     </div>
   </div>
