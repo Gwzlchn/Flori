@@ -17,6 +17,7 @@ RUN mkdir -p crates/flori-core/src crates/flori-pipeline/src crates/flori-runner
     printf '%s\n' 'fn main() {}' > crates/flori-runner/src/bin/media.rs && \
     printf '%s\n' 'fn main() {}' > crates/flori-runner/src/bin/qoder.rs && \
     printf '%s\n' 'fn main() {}' > crates/flori-runner/src/bin/codex.rs && \
+    printf '%s\n' 'fn main() {}' > crates/flori-runner/src/bin/download.rs && \
     printf '%s\n' 'fn main() {}' > crates/flori-server/src/main.rs && \
     printf '%s\n' '' > crates/flori-store/src/lib.rs && \
     printf '%s\n' 'fn main() {}' > xtask/src/main.rs
