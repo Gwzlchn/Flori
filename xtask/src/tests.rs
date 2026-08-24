@@ -4,6 +4,13 @@ fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(ToString::to_string).collect()
 }
 
+fn command_args(command: &Command) -> Vec<String> {
+    command
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect()
+}
+
 #[test]
 fn parses_only_declared_commands() {
     assert_eq!(parse(strings(&["check"])), Ok(Task::Check));
@@ -47,40 +54,62 @@ fn exposes_only_fixed_image_mappings() {
     assert_eq!(image("custom"), None);
 
     let edge = image_command("edge", None, false).unwrap();
-    let edge_args: Vec<_> = edge.get_args().map(|arg| arg.to_string_lossy()).collect();
-    assert_eq!(edge_args.last().unwrap(), "frontend");
+    assert_eq!(edge.get_program(), "docker");
+    assert_eq!(
+        command_args(&edge),
+        strings(&[
+            "buildx",
+            "build",
+            "--file",
+            "frontend/Dockerfile",
+            "--target",
+            "edge",
+            "--load",
+            "--tag",
+            "flori-edge:local",
+            "frontend",
+        ])
+    );
 
-    let ai = image_command("runner-ai-codex", Some("http://proxy:8080"), true).unwrap();
-    let ai_args: Vec<_> = ai.get_args().map(|arg| arg.to_string_lossy()).collect();
-    assert!(
-        ai_args
-            .iter()
-            .any(|arg| arg == "HTTP_PROXY=http://proxy:8080")
-    );
-    assert!(
-        ai_args
-            .iter()
-            .any(|arg| arg == "HTTPS_PROXY=http://proxy:8080")
-    );
-    assert!(ai_args.windows(2).any(|args| args == ["--network", "host"]));
-    assert_eq!(ai_args.last().unwrap(), ".");
-    assert!(
-        ai_args
-            .iter()
-            .any(|arg| arg == "type=gha,scope=flori-runner-ai-codex")
-    );
-    assert!(
-        ai_args
-            .iter()
-            .any(|arg| arg == "type=gha,mode=max,scope=flori-runner-ai-codex")
+    let ai = image_command("runner-ai-codex", Some("http://proxy:8080"), false).unwrap();
+    assert_eq!(
+        command_args(&ai),
+        strings(&[
+            "buildx",
+            "build",
+            "--file",
+            "docker/runner-ai-codex.Dockerfile",
+            "--network",
+            "host",
+            "--build-arg",
+            "HTTP_PROXY=http://proxy:8080",
+            "--build-arg",
+            "HTTPS_PROXY=http://proxy:8080",
+            "--load",
+            "--tag",
+            "flori-runner-ai-codex:local",
+            ".",
+        ])
     );
 
     let server = image_command("server", None, true).unwrap();
-    assert!(!server.get_args().any(|arg| arg == "--network"));
-    assert!(
-        server
-            .get_args()
-            .any(|arg| arg == "type=gha,scope=flori-server")
+    assert_eq!(
+        command_args(&server),
+        strings(&[
+            "buildx",
+            "build",
+            "--file",
+            "docker/server.Dockerfile",
+            "--cache-from",
+            "type=gha,scope=flori-server",
+            "--cache-to",
+            "type=gha,mode=max,scope=flori-server",
+            "--output",
+            "type=cacheonly",
+            "--tag",
+            "flori-server:local",
+            ".",
+        ])
     );
 }
 
@@ -103,6 +132,35 @@ fn limits_local_proxy_to_ai_images() {
         Some("FLORI_CODEX_BUILD_PROXY")
     );
     assert_eq!(image_proxy_environment("runner-media"), None);
+}
+
+#[test]
+fn parses_and_enforces_optional_image_time_limit() {
+    assert_eq!(parse_image_time_limit(None), Ok(None));
+    assert_eq!(
+        parse_image_time_limit(Some("120")),
+        Ok(Some(Duration::from_secs(120)))
+    );
+    assert!(parse_image_time_limit(Some("0")).is_err());
+    assert!(parse_image_time_limit(Some("-1")).is_err());
+    assert!(parse_image_time_limit(Some("invalid")).is_err());
+    assert!(enforce_image_time_limit("edge", Duration::from_secs(121), None).is_ok());
+    assert!(
+        enforce_image_time_limit(
+            "edge",
+            Duration::from_secs(120),
+            Some(Duration::from_secs(120))
+        )
+        .is_ok()
+    );
+    assert!(
+        enforce_image_time_limit(
+            "edge",
+            Duration::from_millis(120_001),
+            Some(Duration::from_secs(120))
+        )
+        .is_err()
+    );
 }
 
 #[test]

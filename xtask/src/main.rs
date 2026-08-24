@@ -123,26 +123,10 @@ fn run(task: Task) -> Result<(), String> {
             };
             let proxy = image_proxy(&name, github, configured);
             let started = Instant::now();
-            execute(
-                &root,
-                &mut image_command(
-                    &name,
-                    proxy.as_deref(),
-                    env::var_os("GITHUB_ACTIONS").is_some(),
-                )?,
-            )?;
+            execute(&root, &mut image_command(&name, proxy.as_deref(), github)?)?;
             let elapsed = started.elapsed();
             eprintln!("image build {name}: {:.3}s", elapsed.as_secs_f64());
-            if let Some(limit) = image_time_limit()?
-                && elapsed > limit
-            {
-                return Err(format!(
-                    "warm image build exceeded {}s: {name} took {:.3}s",
-                    limit.as_secs(),
-                    elapsed.as_secs_f64()
-                ));
-            }
-            Ok(())
+            enforce_image_time_limit(&name, elapsed, image_time_limit()?)
         }
         Task::DiffBudget(base) => diff_budget(&root, &base),
         Task::Janitor(apply) => janitor(&root, apply),
@@ -166,16 +150,39 @@ fn image_proxy(name: &str, github: bool, proxy: Option<String>) -> Option<String
 
 fn image_time_limit() -> Result<Option<Duration>, String> {
     match env::var("FLORI_IMAGE_MAX_SECONDS") {
-        Ok(value) => value
-            .parse::<u64>()
-            .ok()
-            .filter(|seconds| *seconds > 0)
-            .map(Duration::from_secs)
-            .map(Some)
-            .ok_or_else(|| "FLORI_IMAGE_MAX_SECONDS must be a positive integer".into()),
+        Ok(value) => parse_image_time_limit(Some(&value)),
         Err(env::VarError::NotPresent) => Ok(None),
         Err(error) => Err(format!("invalid FLORI_IMAGE_MAX_SECONDS: {error}")),
     }
+}
+
+fn parse_image_time_limit(value: Option<&str>) -> Result<Option<Duration>, String> {
+    value
+        .map(|raw| {
+            raw.parse::<u64>()
+                .ok()
+                .filter(|seconds| *seconds > 0)
+                .map(Duration::from_secs)
+                .ok_or_else(|| "FLORI_IMAGE_MAX_SECONDS must be a positive integer".into())
+        })
+        .transpose()
+}
+
+fn enforce_image_time_limit(
+    name: &str,
+    elapsed: Duration,
+    limit: Option<Duration>,
+) -> Result<(), String> {
+    if let Some(limit) = limit
+        && elapsed > limit
+    {
+        return Err(format!(
+            "image build exceeded {}s: {name} took {:.3}s",
+            limit.as_secs(),
+            elapsed.as_secs_f64()
+        ));
+    }
+    Ok(())
 }
 
 fn command(root: &Path, program: &str, args: &str) -> Result<(), String> {
@@ -196,10 +203,10 @@ fn execute(root: &Path, command: &mut Command) -> Result<(), String> {
         .ok_or_else(|| format!("command exited with {status}"))
 }
 
-fn image_command(name: &str, proxy: Option<&str>, gha_cache: bool) -> Result<Command, String> {
+fn image_command(name: &str, proxy: Option<&str>, github: bool) -> Result<Command, String> {
     let (dockerfile, target) = image(name).ok_or("unknown image target")?;
     let mut command = Command::new("docker");
-    command.args(["build", "--file", dockerfile]);
+    command.args(["buildx", "build", "--file", dockerfile]);
     if let Some(target) = target {
         command.args(["--target", target]);
     }
@@ -208,12 +215,15 @@ fn image_command(name: &str, proxy: Option<&str>, gha_cache: bool) -> Result<Com
         command.args(["--build-arg", &format!("HTTP_PROXY={proxy}")]);
         command.args(["--build-arg", &format!("HTTPS_PROXY={proxy}")]);
     }
-    if gha_cache {
+    if github {
         command.args(["--cache-from", &format!("type=gha,scope=flori-{name}")]);
         command.args([
             "--cache-to",
             &format!("type=gha,mode=max,scope=flori-{name}"),
         ]);
+        command.args(["--output", "type=cacheonly"]);
+    } else {
+        command.arg("--load");
     }
     let context = if name == "edge" { "frontend" } else { "." };
     command.args(["--tag", &format!("flori-{name}:local"), context]);
