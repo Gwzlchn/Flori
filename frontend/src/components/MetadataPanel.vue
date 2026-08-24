@@ -1,13 +1,23 @@
 <script setup lang="ts">
+import { computed } from "vue";
+
 import type { components } from "../api/client";
 
-defineProps<{
+const props = defineProps<{
   job: components["schemas"]["JobView"];
   source: components["schemas"]["SourceView"] | undefined;
   domainName: string | undefined;
   collectionNames: string[];
   documentView: components["schemas"]["DocumentRepresentationView"] | undefined;
 }>();
+
+const usages = computed(() => props.job.tasks.flatMap((task) => task.attempts.flatMap((attempt) => attempt.usage)));
+const executions = computed(() => props.job.tasks.flatMap((task) => task.attempts.map((attempt) => ({
+  effort: attempt.effort ?? task.selected_effort,
+  model: attempt.model ?? task.selected_model,
+  runner: attempt.runner_id ?? task.pinned_runner_id,
+}))));
+const audit = computed(() => props.job.artifacts.find((artifact) => artifact.kind === "ai_audit"));
 
 const sourceLabels: Record<components["schemas"]["SourceKind"], string> = {
   pdf_upload: "本地上传 PDF", pdf_url: "PDF 直链", arxiv: "arXiv",
@@ -30,6 +40,11 @@ function duration(start?: number | null, finish?: number | null): string {
   return minutes < 60 ? `${minutes} 分 ${seconds % 60} 秒` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 }
 function size(bytes: number): string { return `${(bytes / 1024 / 1024).toFixed(2)} MiB`; }
+function usage(value: components["schemas"]["AiUsageView"]): string {
+  if (value.credits_micros !== null && value.credits_micros !== undefined) return `${(value.credits_micros / 1_000_000).toFixed(3)} credits`;
+  if (value.input_tokens !== null && value.input_tokens !== undefined) return `${value.input_tokens} 输入 / ${value.output_tokens ?? 0} 输出 tokens`;
+  return value.state === "started" ? "调用尚未结束" : "计量不可用";
+}
 </script>
 
 <template>
@@ -91,6 +106,14 @@ function size(bytes: number): string { return `${(bytes / 1024 / 1024).toFixed(2
               >打开来源</a>
             </dd>
           </div>
+        </dl>
+      </section>
+      <section v-if="usages.length || audit">
+        <h3>AI 与审计</h3><dl>
+          <div><dt>执行配置</dt><dd>{{ executions.filter((item) => item.model).map((item) => `${item.runner ?? "Runner"} · ${item.model} / ${item.effort ?? "default"}`).join("；") || "未调用 AI" }}</dd></div>
+          <div><dt>计量</dt><dd>{{ usages.map(usage).join("；") || "无 AI usage" }}</dd></div>
+          <div><dt>AI audit</dt><dd>{{ audit ? `${audit.name} · ${audit.sha256.slice(0, 16)}…` : "无" }}</dd></div>
+          <div><dt>Prompt digest</dt><dd>{{ job.prompt_snapshot_sha256 }}</dd></div>
         </dl>
       </section>
     </div>

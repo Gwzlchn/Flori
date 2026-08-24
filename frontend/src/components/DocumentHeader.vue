@@ -25,6 +25,12 @@ const stateLabels: Record<components["schemas"]["JobState"], string> = {
   queued: "等待处理", running: "处理中", succeeded: "已发布", failed: "处理失败", canceled: "已取消",
 };
 const settledTasks = computed(() => props.job.tasks.filter((task) => task.state === "succeeded" || task.state === "skipped").length);
+const sourceUrl = computed(() => {
+  const value = props.source?.canonical_ref;
+  if (value?.startsWith("url:https://")) return value.slice(4);
+  if (value?.startsWith("arxiv:")) return `https://arxiv.org/abs/${value.slice(6)}`;
+  return undefined;
+});
 </script>
 
 <template>
@@ -51,9 +57,9 @@ const settledTasks = computed(() => props.job.tasks.filter((task) => task.state 
         <span>{{ settledTasks }}/{{ job.tasks.length }} 步收敛</span>
       </div>
       <a
-        v-if="source?.canonical_ref.startsWith('http')"
+        v-if="sourceUrl"
         class="source-link"
-        :href="source.canonical_ref"
+        :href="sourceUrl"
         target="_blank"
         rel="noopener"
       >查看原始来源 <UiIcon
