@@ -5,7 +5,7 @@ use flori_core::{
     SourceKind, TaskClaim,
 };
 
-pub(super) fn validate(claim: &TaskClaim) -> Result<(), ErrorCode> {
+pub(crate) fn validate(claim: &TaskClaim) -> Result<(), ErrorCode> {
     if claim.timeout_ms == 0
         || claim.attempt_no == 0
         || claim.task_key.is_empty()

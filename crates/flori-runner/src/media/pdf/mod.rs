@@ -1,15 +1,15 @@
 mod acquire;
-mod claim;
-mod daemon;
+pub(super) mod claim;
+pub(super) mod daemon;
 mod extract;
-mod log;
+pub(super) mod log;
 mod network;
 mod process;
 mod scan;
 mod scholarly;
 mod scholarly_fetch;
 mod scholarly_html;
-mod upload;
+pub(super) mod upload;
 
 pub use acquire::{PdfAcquireConfig, acquire_pdf};
 pub use daemon::{PdfDaemonConfig, run_pdf_daemon};

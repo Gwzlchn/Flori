@@ -5,11 +5,15 @@ use sha2::{Digest, Sha256};
 
 use crate::RunnerClient;
 
-pub(super) async fn started(client: &RunnerClient, claim: &TaskClaim) -> Result<(), ErrorCode> {
+pub(crate) async fn started(
+    client: &RunnerClient,
+    claim: &TaskClaim,
+    task_kind: &str,
+) -> Result<(), ErrorCode> {
     let line = serde_json::to_string(&TaskLogLine {
         timestamp_ms: unix_ms()?,
         level: TaskLogLevel::Info,
-        message: "PDF task started".to_owned(),
+        message: format!("{task_kind} task started"),
     })
     .map_err(|_| ErrorCode::Internal)?;
     let cursor = client
