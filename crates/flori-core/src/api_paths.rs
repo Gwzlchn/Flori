@@ -2,10 +2,10 @@
 #![allow(dead_code)]
 
 use crate::{
-    ArtifactId, ArtifactView, CollectionView, CreateJobRequest, CreateUploadSourceForm, CreatedJob,
-    CreatedSource, DocumentRepresentationView, DomainView, ErrorResponse, EvidenceId, EvidenceView,
-    JobId, JobView, PdfSetupView, RerunJobRequest, RunnerView, SearchHit, SourceId, SourceView,
-    SystemView,
+    ArtifactId, ArtifactView, CollectionView, CreateJobRequest, CreateRemoteSource,
+    CreateUploadSourceForm, CreatedJob, CreatedSource, DocumentRepresentationView, DomainView,
+    ErrorResponse, EvidenceId, EvidenceView, JobId, JobView, PdfSetupView, RerunJobRequest,
+    RunnerView, SearchHit, SourceId, SourceView, SystemView,
 };
 
 #[utoipa::path(
@@ -88,6 +88,18 @@ pub(crate) fn collections() {}
     responses((status = 200, body = Vec<SourceView>), (status = 500, body = ErrorResponse))
 )]
 pub(crate) fn sources() {}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/sources",
+    request_body = CreateRemoteSource,
+    responses(
+        (status = 200, body = CreatedSource),
+        (status = 400, body = ErrorResponse),
+        (status = 409, body = ErrorResponse),
+    )
+)]
+pub(crate) fn create_source() {}
 
 #[utoipa::path(
     get,

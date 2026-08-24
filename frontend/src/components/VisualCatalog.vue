@@ -15,10 +15,12 @@ interface VisualCard {
 const props = defineProps<{
   artifacts: components["schemas"]["ArtifactView"][];
   structure: components["schemas"]["DocumentStructure"] | undefined;
+  projections: components["schemas"]["HtmlVisualProjection"][] | undefined;
   fileUrls: ReadonlyMap<string, string>;
 }>();
 const emit = defineEmits<{
   locate: [page: number, bbox: components["schemas"]["PdfRect"], label: string];
+  locateHtml: [anchor: string, label: string];
 }>();
 
 const cards = computed<VisualCard[]>(() => {
@@ -43,6 +45,23 @@ const cards = computed<VisualCard[]>(() => {
 });
 function jumpTo(card: VisualCard): void {
   document.getElementById(`visual-${card.meta.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function projectionOf(card: VisualCard): components["schemas"]["HtmlVisualProjection"] | undefined {
+  const kind = card.category === "Figure" ? "figure" : "table_region";
+  return props.projections?.find((item) => item.kind === kind && item.artifact_name === card.meta.artifact_name);
+}
+function locate(card: VisualCard): void {
+  const projection = projectionOf(card);
+  if (projection?.status === "verified" && projection.html_anchor) {
+    emit("locateHtml", projection.html_anchor, card.meta.caption);
+  } else emit("locate", card.meta.page, card.meta.bbox, card.meta.caption);
+}
+function sourceLabel(card: VisualCard): string {
+  const projection = projectionOf(card);
+  if (projection?.status === "verified") return "HTML 原文";
+  if (projection?.status === "caption_ambiguous") return "HTML caption 不唯一，回退 PDF";
+  if (projection?.status === "anchor_missing") return "HTML anchor 缺失，回退 PDF";
+  return "PDF 原文";
 }
 function coordinate(value: number): string { return value.toFixed(1); }
 </script>
@@ -86,12 +105,12 @@ function coordinate(value: number): string { return value.toFixed(1); }
           <button
             type="button"
             class="btn secondary compact"
-            @click="emit('locate', card.meta.page, card.meta.bbox, card.meta.caption)"
+            @click="locate(card)"
           >
             <UiIcon
               name="external"
               :size="13"
-            />原文第 {{ card.meta.page }} 页
+            />{{ sourceLabel(card) }}
           </button>
         </header>
         <img
@@ -101,6 +120,12 @@ function coordinate(value: number): string { return value.toFixed(1); }
         >
         <p class="visual-caption">
           {{ card.meta.caption }}
+        </p>
+        <p
+          v-if="card.category === 'Table' && 'text' in card.meta"
+          class="visual-text"
+        >
+          {{ card.meta.text }}
         </p>
         <p
           v-if="!card.artifact"

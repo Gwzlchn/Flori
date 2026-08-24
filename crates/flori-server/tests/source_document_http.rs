@@ -1,10 +1,10 @@
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc};
 
 use flori_core::{
-    DocumentPage, DocumentRepresentationView, DocumentStructure, DocumentStructureSchema,
-    ErrorCode, ErrorResponse, EvidenceId, HtmlPdfCrosswalkStatus, JobId, ScholarlyFile,
-    ScholarlyHtmlSnapshot, ScholarlyHtmlSnapshotSchema, ScholarlyProvider, Sha256Digest, SourceId,
-    TaskId,
+    DocumentFigure, DocumentPage, DocumentRepresentationView, DocumentStructure,
+    DocumentStructureSchema, DocumentTable, ErrorCode, ErrorResponse, EvidenceId,
+    HtmlPdfCrosswalkStatus, HtmlVisualStatus, JobId, PdfRect, ScholarlyFile, ScholarlyHtmlSnapshot,
+    ScholarlyHtmlSnapshotSchema, ScholarlyProvider, Sha256Digest, SourceId, TaskId,
 };
 use flori_store::{
     Store,
@@ -34,6 +34,7 @@ async fn current_scholarly_document_is_verified_sanitized_and_crosswalked() {
         structure,
         resources,
         crosswalk,
+        visuals,
         ..
     } = view
     else {
@@ -52,6 +53,11 @@ async fn current_scholarly_document_is_verified_sanitized_and_crosswalked() {
     let crosswalk = crosswalk.expect("crosswalk");
     assert_eq!(crosswalk.status, HtmlPdfCrosswalkStatus::Verified);
     assert_eq!(crosswalk.html_anchor.as_deref(), Some("sec-transformer"));
+    assert_eq!(visuals.len(), 2);
+    assert_eq!(visuals[0].status, HtmlVisualStatus::Verified);
+    assert_eq!(visuals[0].html_anchor.as_deref(), Some("fig-transformer"));
+    assert_eq!(visuals[1].status, HtmlVisualStatus::Verified);
+    assert_eq!(visuals[1].html_anchor.as_deref(), Some("tab-results"));
 
     let response = harness
         .get(&format!(
@@ -136,7 +142,7 @@ impl Harness {
         let structure_id = "018f0000-0000-7000-8000-00000000000d"
             .parse()
             .expect("structure ID");
-        let html = br#"<html><head></head><body class="ltx_document"><h1 class="ltx_title">Attention Is All You Need</h1><div class="ltx_authors"><span class="ltx_personname">A. Researcher</span></div><div class="ltx_abstract"><p>Transformer abstract.</p></div><script>bad()</script><p id="sec-transformer">The Transformer uses attention.</p><a href="https://evil.example">leave</a><img src="https://evil.example/x" data-flori-resource="scholarly_resources/figure.png"></body></html>"#;
+        let html = br#"<html><head></head><body class="ltx_document"><h1 class="ltx_title">Attention Is All You Need</h1><div class="ltx_authors"><span class="ltx_personname">A. Researcher</span></div><div class="ltx_abstract"><p>Transformer abstract.</p></div><script>bad()</script><p id="sec-transformer">The Transformer uses attention.</p><figure id="fig-transformer"><figcaption>Transformer architecture</figcaption><img src="https://evil.example/x" data-flori-resource="scholarly_resources/figure.png"></figure><figure class="ltx_table" id="tab-results"><figcaption>Translation results</figcaption><table><tr><td>BLEU 28.4</td></tr></table></figure><a href="https://evil.example">leave</a></body></html>"#;
         let pdf = b"%PDF-1.7\nfixture";
         let image = b"\x89PNG\r\n\x1a\nfixture";
         let structure = serde_json::to_vec(&DocumentStructure {
@@ -149,8 +155,31 @@ impl Harness {
                 height_pt: 100.0,
             }],
             sections: vec![],
-            figures: vec![],
-            tables: vec![],
+            figures: vec![DocumentFigure {
+                id: "figure-1".into(),
+                page: 1,
+                bbox: PdfRect {
+                    x1: 1.0,
+                    y1: 1.0,
+                    x2: 20.0,
+                    y2: 20.0,
+                },
+                caption: "Transformer architecture".into(),
+                artifact_name: "figures/figure-1.png".into(),
+            }],
+            tables: vec![DocumentTable {
+                id: "table-1".into(),
+                page: 1,
+                bbox: PdfRect {
+                    x1: 1.0,
+                    y1: 30.0,
+                    x2: 80.0,
+                    y2: 80.0,
+                },
+                caption: "Translation results".into(),
+                text: "BLEU 28.4".into(),
+                artifact_name: "tables/table-1.png".into(),
+            }],
         })
         .expect("structure");
         let snapshot = ScholarlyHtmlSnapshot {

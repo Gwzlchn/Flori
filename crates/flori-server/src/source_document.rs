@@ -83,6 +83,8 @@ async fn document(
     )
     .map_err(HttpError::new)?;
     let view = if let Some(html) = bundle.html {
+        let visuals =
+            source_document_html::visuals(&html.html, &bundle.structure).map_err(HttpError::new)?;
         DocumentRepresentationView::ScholarlyHtml {
             source_id: id,
             job_id: bundle.pdf.job_id,
@@ -105,6 +107,7 @@ async fn document(
                 })
                 .transpose()
                 .map_err(HttpError::new)?,
+            visuals,
         }
     } else {
         DocumentRepresentationView::Pdf {

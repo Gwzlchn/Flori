@@ -15,13 +15,14 @@ use crate::{
     DocumentTable, DocumentTextBlock, DomainId, DomainView, ErrorBody, ErrorCode, ErrorResponse,
     EvidenceEntry, EvidenceId, EvidenceLocator, EvidenceLocatorKind, EvidenceManifest,
     EvidenceManifestSchema, EvidenceView, Executor, FailAttemptRequest, GlossaryTermId,
-    GlossaryTermState, HtmlPdfCrosswalk, HtmlPdfCrosswalkStatus, JobEvent, JobEventKind,
-    JobEventPayload, JobEventScope, JobId, JobInputs, JobState, JobStateEvent, JobTrigger, JobView,
-    LogCursor, LogFrame, PartsManifest, PartsManifestSchema, PdfRect, PdfSetupView,
-    PendingSourceCommit, PipelineId, PipelineRevisionId, PromptSnapshotId, QrSessionId,
-    RegisterRunnerRequest, RegisterRunnerResponse, RenewLeaseResponse, RequestId, RerunJobRequest,
-    RerunMode, ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource,
-    ResolvedSourceInput, ResolvedTaskInputs, RunnerChangedEvent, RunnerId, RunnerState, RunnerTool,
+    GlossaryTermState, HtmlPdfCrosswalk, HtmlPdfCrosswalkStatus, HtmlVisualProjection,
+    HtmlVisualStatus, JobEvent, JobEventKind, JobEventPayload, JobEventScope, JobId, JobInputs,
+    JobState, JobStateEvent, JobTrigger, JobView, LogCursor, LogFrame, PartsManifest,
+    PartsManifestSchema, PdfRect, PdfSetupView, PendingSourceCommit, PipelineId,
+    PipelineRevisionId, PromptSnapshotId, QrSessionId, RegisterRunnerRequest,
+    RegisterRunnerResponse, RenewLeaseResponse, RequestId, RerunJobRequest, RerunMode,
+    ResolvedArtifact, ResolvedProfile, ResolvedPrompt, ResolvedSource, ResolvedSourceInput,
+    ResolvedTaskInputs, RunnerChangedEvent, RunnerId, RunnerState, RunnerTool,
     RunnerToolCapability, RunnerView, ScholarlyFile, ScholarlyHtmlSnapshot,
     ScholarlyHtmlSnapshotSchema, ScholarlyProvider, SearchChunkId, SearchHit, SecretCredential,
     SecretInputs, Sha256Digest, SourceChangedEvent, SourceId, SourceInputId, SourceKind,
@@ -44,6 +45,7 @@ use crate::{
         crate::api_paths::domains,
         crate::api_paths::collections,
         crate::api_paths::sources,
+        crate::api_paths::create_source,
         crate::api_paths::source_detail,
         crate::api_paths::source_document,
         crate::api_paths::source_document_content,
@@ -199,6 +201,8 @@ use crate::{
         EvidenceView,
         HtmlPdfCrosswalkStatus,
         HtmlPdfCrosswalk,
+        HtmlVisualStatus,
+        HtmlVisualProjection,
         DocumentRepresentationView,
         DocumentMetadataView,
         RunnerView,
@@ -267,7 +271,9 @@ mod tests {
         assert!(document.paths.paths.contains_key("/api/v1/pdf/setup"));
         assert!(document.paths.paths.contains_key("/api/v1/domains"));
         assert!(document.paths.paths.contains_key("/api/v1/collections"));
-        assert!(document.paths.paths.contains_key("/api/v1/sources"));
+        let sources = &document.paths.paths["/api/v1/sources"];
+        assert!(sources.get.is_some());
+        assert!(sources.post.is_some());
         assert!(
             document
                 .paths
@@ -311,6 +317,7 @@ mod tests {
         assert!(schemas.contains_key("RunnerView"));
         assert!(schemas.contains_key("EvidenceLocator"));
         assert!(schemas.contains_key("DocumentRepresentationView"));
+        assert!(schemas.contains_key("HtmlVisualProjection"));
         assert!(schemas.contains_key("Sha256Digest"));
         assert!(schemas.contains_key("TaskClaim"));
         assert!(schemas.contains_key("CompleteAttemptRequest"));

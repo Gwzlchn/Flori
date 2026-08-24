@@ -32,6 +32,7 @@ const props = defineProps<{
 const emit = defineEmits<{ select: [evidenceId: string]; refresh: []; loadArtifact: [artifact: components["schemas"]["ArtifactView"]] }>();
 const tab = ref<ReaderTab>("artifacts");
 const visualLocation = ref<VisualLocation>();
+const visualHtml = ref<{ anchor: string; label: string }>();
 
 const tabs = [
   { id: "artifacts", label: "产物", icon: "book" },
@@ -46,16 +47,21 @@ const viewerSrc = computed(() => {
   return activeLocation.value ? `${props.pdfUrl}#page=${activeLocation.value.page}` : props.pdfUrl;
 });
 const htmlView = computed(() => props.documentView?.representation === "scholarly_html" ? props.documentView : undefined);
-const htmlAnchor = computed(() => htmlView.value?.crosswalk?.status === "verified"
-  ? htmlView.value.crosswalk.html_anchor ?? undefined : undefined);
+const htmlAnchor = computed(() => visualHtml.value?.anchor ?? (htmlView.value?.crosswalk?.status === "verified"
+  ? htmlView.value.crosswalk.html_anchor ?? undefined : undefined));
 const showHtml = computed(() => Boolean(props.documentHtml && htmlView.value && !visualLocation.value
-  && (!props.activeEvidenceId || htmlAnchor.value)));
+  && (visualHtml.value || !props.activeEvidenceId || htmlAnchor.value)));
 const representationLabel = computed(() => showHtml.value
   ? htmlView.value?.provider === "arxiv" ? "arXiv HTML" : "ar5iv HTML"
   : "PDF canonical evidence");
 
 function locateVisual(page: number, bbox: components["schemas"]["PdfRect"], label: string): void {
+  visualHtml.value = undefined;
   visualLocation.value = { page, bbox, label };
+}
+function locateHtml(anchor: string, label: string): void {
+  visualLocation.value = undefined;
+  visualHtml.value = { anchor, label };
 }
 function selectTab(id: ReaderTab): void {
   tab.value = id;
@@ -65,7 +71,7 @@ function selectTab(id: ReaderTab): void {
   }
 }
 function coordinate(value: number): string { return value.toFixed(1); }
-watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; });
+watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; visualHtml.value = undefined; });
 </script>
 
 <template>
@@ -186,8 +192,10 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
           <VisualCatalog
             :artifacts="job.artifacts"
             :structure="documentView?.structure"
+            :projections="htmlView?.visuals"
             :file-urls="fileUrls"
             @locate="locateVisual"
+            @locate-html="locateHtml"
           />
         </section>
 
@@ -230,7 +238,7 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
           class="evidence-status"
           aria-live="polite"
         >
-          {{ visualLocation ? `已定位图表：${visualLocation.label}` : status }}
+          {{ visualHtml ? `已定位 HTML 图表：${visualHtml.label}` : visualLocation ? `已定位图表：${visualLocation.label}` : status }}
         </p>
         <blockquote v-if="evidence && evidenceLocator && !visualLocation">
           {{ evidence.quote }}

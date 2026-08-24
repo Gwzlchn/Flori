@@ -185,6 +185,24 @@ pub struct HtmlPdfCrosswalk {
     pub html_anchor: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HtmlVisualStatus {
+    Verified,
+    CaptionMissing,
+    CaptionAmbiguous,
+    AnchorMissing,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HtmlVisualProjection {
+    pub artifact_name: String,
+    pub kind: ArtifactKind,
+    pub status: HtmlVisualStatus,
+    pub html_anchor: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocumentMetadataView {
@@ -216,6 +234,7 @@ pub enum DocumentRepresentationView {
         fallback_pdf_artifact_id: ArtifactId,
         fallback_pdf_url: String,
         crosswalk: Option<HtmlPdfCrosswalk>,
+        visuals: Vec<HtmlVisualProjection>,
     },
     Pdf {
         source_id: SourceId,
