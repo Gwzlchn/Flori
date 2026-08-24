@@ -6,6 +6,7 @@ import LibraryWorkspace from "./components/LibraryWorkspace.vue";
 import DocumentHeader from "./components/DocumentHeader.vue";
 import PdfReader from "./components/PdfReader.vue";
 import VideoReader from "./components/VideoReader.vue";
+import { isVideoSource } from "./composables/useEvidenceNavigation";
 import UploadPanel from "./components/UploadPanel.vue";
 import RerunPanel from "./components/RerunPanel.vue";
 import SearchPanel from "./components/SearchPanel.vue";
@@ -233,7 +234,7 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
           </p>
 
           <PdfReader
-            v-if="job && source?.kind !== 'local_video'"
+            v-if="job && source && !isVideoSource(source.kind)"
             :job="job"
             :source="source"
             :domain-name="domains.find((item) => item.domain_id === source?.domain_id)?.name"

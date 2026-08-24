@@ -4,6 +4,10 @@ import { apiClient, apiError, type components } from "../api/client";
 
 const HINT = "点击笔记中的证据引用可定位原文。";
 
+export function isVideoSource(kind: components["schemas"]["SourceKind"]): boolean {
+  return kind === "local_video" || kind === "bilibili_video" || kind === "youtube_video";
+}
+
 export function useEvidenceNavigation(
   job: Ref<components["schemas"]["JobView"] | undefined>,
   source: Ref<components["schemas"]["SourceView"] | undefined>,
@@ -44,7 +48,7 @@ export function useEvidenceNavigation(
         return;
       }
       const view = result.data;
-      const locatorMatches = currentSource.kind === "local_video"
+      const locatorMatches = isVideoSource(currentSource.kind)
         ? view.locator.kind === "video" && sourceArtifact.media_type.startsWith("video/")
         : view.locator.kind === "pdf" && sourceArtifact.media_type === "application/pdf";
       if (view.job_id !== current.job_id || view.source_id !== current.source_id

@@ -2,7 +2,7 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 
 import { apiClient, apiError, type components, watchJobEvents } from "../api/client";
 import { useArtifactContent } from "./useArtifactContent";
-import { useEvidenceNavigation } from "./useEvidenceNavigation";
+import { isVideoSource, useEvidenceNavigation } from "./useEvidenceNavigation";
 
 const EAGER_TEXT_KINDS = new Set<components["schemas"]["ArtifactKind"]>([
   "translation", "smart_note", "summary", "mechanical_note",
@@ -132,7 +132,7 @@ export function usePdfWorkspace() {
     const current = job.value;
     const currentSource = source.value;
     if (!current || !currentSource || current.state !== "succeeded") return;
-    if (currentSource.kind === "local_video") {
+    if (isVideoSource(currentSource.kind)) {
       documentView.value = undefined;
       documentHtml.value = undefined;
       return;
