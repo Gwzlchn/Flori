@@ -5,7 +5,7 @@ use std::{
 };
 
 use flori_core::{
-    CreateRemoteSource, DomainId, JobId, RegisterRunnerRequest, RunnerId, RunnerTool,
+    CreateRemoteSource, CredentialId, DomainId, JobId, RegisterRunnerRequest, RunnerId, RunnerTool,
     RunnerToolCapability, SourceKind,
 };
 use flori_runner::{DownloadDaemonConfig, RunnerClient, run_download_daemon};
@@ -23,17 +23,36 @@ pub(crate) enum Case {
 
 pub(super) async fn create_source(
     address: SocketAddr,
+    pool: &SqlitePool,
     domain_id: DomainId,
     case: Case,
 ) -> flori_core::CreatedSource {
-    let (kind, reference) = match case {
-        Case::Youtube => (SourceKind::YoutubeVideo, "https://youtu.be/dQw4w9WgXcQ"),
+    let (kind, reference, credential_kind, credential_value) = match case {
+        Case::Youtube => (
+            SourceKind::YoutubeVideo,
+            "https://youtu.be/dQw4w9WgXcQ",
+            "youtube_cookie",
+            "fixture-cookie-youtube",
+        ),
         Case::Bilibili => (
             SourceKind::BilibiliVideo,
             "https://www.bilibili.com/video/BV1GJ411x7h7",
+            "bilibili_cookie",
+            "fixture-cookie-bilibili",
         ),
         Case::Local => unreachable!(),
     };
+    let credential_id = CredentialId::generate();
+    sqlx::query(
+        "INSERT INTO credentials(id,kind,name,plaintext_value,created_at_ms,updated_at_ms) VALUES(?,?,?,?,0,0)",
+    )
+    .bind(credential_id.to_string())
+    .bind(credential_kind)
+    .bind(format!("fixture-{case:?}"))
+    .bind(credential_value)
+    .execute(pool)
+    .await
+    .expect("credential");
     http::create_remote(
         address,
         &CreateRemoteSource {
@@ -43,7 +62,7 @@ pub(super) async fn create_source(
             title: Some(format!("{case:?} video golden")),
             domain_id,
             collection_ids: vec![],
-            credential_id: None,
+            credential_id: Some(credential_id),
         },
     )
     .await
@@ -103,16 +122,18 @@ fn tools(root: &Path, case: Case) -> (PathBuf, PathBuf) {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/vnext/local-video.mp4");
     let yt = if case == Case::Youtube {
         format!(
-            "cp '{}' quarantine/download.mp4\nprintf '1\n00:00:00,000 --> 00:00:01,500\nHello video\n' > quarantine/download.en.srt\n",
-            video.display()
+            "case \"$*\" in *'--proxy http://youtube-proxy.invalid:1080/'*) ;; *) exit 91;; esac\nwhile [ \"$1\" != '--cookies' ]; do shift; done\nshift\ntest \"$(stat -c %a \"$1\")\" = 600\ntest \"$(cat \"$1\")\" = fixture-cookie-youtube\ntouch '{}'\ncp '{}' quarantine/download.mp4\nprintf '1\n00:00:00,000 --> 00:00:01,500\nHello video\n' > quarantine/download.en.srt\n",
+            root.join("cookie-observed-youtube").display(),
+            video.display(),
         )
     } else {
         "exit 99\n".into()
     };
     let bili = if case == Case::Bilibili {
         format!(
-            "cp '{}' quarantine/download.mp4\nprintf '<i><d p=\"0,1,25,0,0,0,0,0\">hello</d></i>' > quarantine/danmaku.xml\n",
-            video.display()
+            "case \"$*\" in *'--proxy no'*) ;; *) exit 92;; esac\nwhile [ \"$1\" != '--auth-file' ]; do shift; done\nshift\ntest \"$(stat -c %a \"$1\")\" = 600\ntest \"$(cat \"$1\")\" = fixture-cookie-bilibili\ntouch '{}'\ncp '{}' quarantine/download.mp4\nprintf '<i><d p=\"0,1,25,0,0,0,0,0\">hello</d></i>' > quarantine/danmaku.xml\n",
+            root.join("cookie-observed-bilibili").display(),
+            video.display(),
         )
     } else {
         "exit 99\n".into()
@@ -146,4 +167,35 @@ pub(super) async fn assert_transcription(pool: &SqlitePool, job: JobId, root: &P
     );
     let calls = fs::read(root.join("whisper-called")).map_or(0, |bytes| bytes.len());
     assert_eq!(calls, usize::from(case != Case::Youtube));
+    if case != Case::Local {
+        assert!(
+            root.join(format!("cookie-observed-{}", case_name(case)))
+                .is_file()
+        );
+        let mut work = fs::read_dir(root.join("download-work")).expect("download work");
+        assert!(work.next().is_none(), "private workspace must be removed");
+        let marker = format!("fixture-cookie-{}", case_name(case));
+        let paths: Vec<String> =
+            sqlx::query_scalar("SELECT relative_path FROM artifacts WHERE job_id=?")
+                .bind(job.to_string())
+                .fetch_all(pool)
+                .await
+                .expect("artifact paths");
+        for path in paths {
+            let bytes = fs::read(root.join("artifacts").join(path)).expect("artifact bytes");
+            assert!(
+                !bytes
+                    .windows(marker.len())
+                    .any(|value| value == marker.as_bytes())
+            );
+        }
+    }
+}
+
+fn case_name(case: Case) -> &'static str {
+    match case {
+        Case::Youtube => "youtube",
+        Case::Bilibili => "bilibili",
+        Case::Local => "local",
+    }
 }

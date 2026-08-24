@@ -69,7 +69,9 @@ pub(super) async fn run(case: Case) {
             )
             .await
         }
-        Case::Youtube | Case::Bilibili => platform::create_source(address, domain, case).await,
+        Case::Youtube | Case::Bilibili => {
+            platform::create_source(address, &pool, domain, case).await
+        }
     };
     let job = http::create_job(
         address,
