@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 
 import { apiClient, apiError, type components } from "../api/client";
 
@@ -10,6 +10,7 @@ const results = ref<components["schemas"]["SearchHit"][]>([]);
 const status = ref("输入关键词，搜索当前发布成果。");
 const searching = ref(false);
 let requestSequence = 0;
+const root = ref<HTMLElement>();
 
 function normalizedQuery(): string { return query.value.trim().split(/\s+/u).filter(Boolean).join(" "); }
 function rememberQuery(value: string): void {
@@ -73,17 +74,29 @@ function openResult(hit: components["schemas"]["SearchHit"], evidenceId?: string
   if (evidenceId) url.searchParams.set("evidence_id", evidenceId);
   else url.searchParams.delete("evidence_id");
   history.replaceState(null, "", url);
+  submittedQuery.value = "";
   emit("open", hit.job_id, evidenceId);
 }
 
+function close(): void { submittedQuery.value = ""; }
+function closeOutside(event: MouseEvent): void {
+  if (root.value && event.target instanceof Node && !root.value.contains(event.target)) close();
+}
+
 onMounted(() => {
+  document.addEventListener("click", closeOutside);
   const saved = new URL(window.location.href).searchParams.get("q");
   if (saved !== null) { query.value = saved; void search(); }
 });
+onBeforeUnmount(() => document.removeEventListener("click", closeOutside));
 </script>
 
 <template>
-  <div class="global-search">
+  <div
+    ref="root"
+    class="global-search"
+    @keydown.esc="close"
+  >
     <form
       class="search-box"
       @submit.prevent="search"
@@ -119,7 +132,7 @@ onMounted(() => {
         <span>{{ status }}</span><button
           type="button"
           aria-label="关闭搜索结果"
-          @click="submittedQuery = ''"
+          @click="close"
         >
           ×
         </button>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 
 import type { components } from "../api/client";
 import UiIcon from "./UiIcon.vue";
@@ -33,6 +33,34 @@ function sourcesOf(domainId: string, collectionId?: string): components["schemas
 }
 const selectedLabel = computed(() => props.collections.find((item) => item.collection_id === props.selectedCollectionId)?.name
   ?? props.domains.find((item) => item.domain_id === props.selectedDomainId)?.name ?? "知识库");
+const expandedDomains = ref<Set<string>>(new Set());
+const expandedCollections = ref<Set<string>>(new Set());
+
+function toggled(values: Set<string>, id: string): Set<string> {
+  const next = new Set(values);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  return next;
+}
+function selectDomain(domainId: string): void {
+  expandedDomains.value = toggled(expandedDomains.value, domainId);
+  emit("select", domainId);
+}
+function selectCollection(domainId: string, collectionId: string): void {
+  expandedDomains.value = new Set(expandedDomains.value).add(domainId);
+  expandedCollections.value = toggled(expandedCollections.value, collectionId);
+  emit("select", domainId, collectionId);
+}
+function selectUncategorized(domainId: string): void {
+  const key = `uncategorized:${domainId}`;
+  expandedCollections.value = toggled(expandedCollections.value, key);
+  emit("select", domainId);
+}
+
+watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([domainId, collectionId]) => {
+  if (domainId) expandedDomains.value = new Set(expandedDomains.value).add(domainId);
+  if (collectionId) expandedCollections.value = new Set(expandedCollections.value).add(collectionId);
+}, { immediate: true });
 </script>
 
 <template>
@@ -86,8 +114,9 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
         <button
           type="button"
           class="tree-domain"
-          :class="{ 'is-active': selectedDomainId === domain.domain_id && !selectedCollectionId }"
-          @click="emit('select', domain.domain_id)"
+          :class="{ 'is-active': selectedDomainId === domain.domain_id && !selectedCollectionId, 'is-expanded': expandedDomains.has(domain.domain_id) }"
+          :aria-expanded="expandedDomains.has(domain.domain_id)"
+          @click="selectDomain(domain.domain_id)"
         >
           <UiIcon
             name="chevron"
@@ -96,22 +125,25 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
         </button>
         <div
           v-for="collection in collectionsOf(domain.domain_id)"
+          v-show="expandedDomains.has(domain.domain_id)"
           :key="collection.collection_id"
           class="collection-group"
         >
           <button
             type="button"
             class="tree-collection"
-            :class="{ 'is-active': selectedCollectionId === collection.collection_id }"
-            @click="emit('select', domain.domain_id, collection.collection_id)"
+            :class="{ 'is-active': selectedCollectionId === collection.collection_id, 'is-expanded': expandedCollections.has(collection.collection_id) }"
+            :aria-expanded="expandedCollections.has(collection.collection_id)"
+            @click="selectCollection(domain.domain_id, collection.collection_id)"
           >
             <UiIcon
-              name="folder"
+              name="chevron"
               :size="14"
             /><b>{{ collection.name }}</b><small>{{ collection.source_count }}</small>
           </button>
           <button
             v-for="source in sourcesOf(domain.domain_id, collection.collection_id)"
+            v-show="expandedCollections.has(collection.collection_id)"
             :key="source.source_id"
             type="button"
             class="tree-source"
@@ -126,14 +158,15 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
           </button>
         </div>
         <div
-          v-if="sourcesOf(domain.domain_id).length"
+          v-if="expandedDomains.has(domain.domain_id) && sourcesOf(domain.domain_id).length"
           class="collection-group"
         >
           <button
             type="button"
             class="tree-collection"
-            :class="{ 'is-active': selectedDomainId === domain.domain_id && !selectedCollectionId }"
-            @click="emit('select', domain.domain_id)"
+            :class="{ 'is-active': selectedDomainId === domain.domain_id && !selectedCollectionId, 'is-expanded': expandedCollections.has(`uncategorized:${domain.domain_id}`) }"
+            :aria-expanded="expandedCollections.has(`uncategorized:${domain.domain_id}`)"
+            @click="selectUncategorized(domain.domain_id)"
           >
             <UiIcon
               name="folder"
@@ -142,6 +175,7 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
           </button>
           <button
             v-for="source in sourcesOf(domain.domain_id)"
+            v-show="expandedCollections.has(`uncategorized:${domain.domain_id}`)"
             :key="source.source_id"
             type="button"
             class="tree-source"
@@ -216,4 +250,6 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
   :global(.sidebar-collapsed) .sidebar-primary button { justify-content: flex-start; padding: 0 10px; }
   .sidebar-toggle { display: none; }
 }
+.tree-domain :deep(.ui-icon), .tree-collection :deep(.ui-icon) { transition: transform .12s ease; }
+.tree-domain.is-expanded :deep(.ui-icon), .tree-collection.is-expanded :deep(.ui-icon) { transform: rotate(90deg); }
 </style>
