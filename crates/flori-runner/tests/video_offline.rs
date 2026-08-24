@@ -145,7 +145,7 @@ esac
 #[tokio::test]
 async fn rejects_tool_timeout_nonzero_and_oversize_output() {
     let temp = TempDir::new();
-    let timeout = temp.script("timeout", "sleep 2\n");
+    let timeout = temp.script("timeout", "while :; do :; done\n");
     assert_eq!(
         probe_video(
             &timeout,
