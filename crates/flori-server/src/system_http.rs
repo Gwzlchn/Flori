@@ -147,6 +147,7 @@ fn cursor(headers: &HeaderMap, query: Option<u64>) -> Result<u64, HttpError> {
 }
 
 fn sse_event(item: JobEvent) -> Vec<u8> {
+    let created_at_ms = item.created_at_ms;
     let (kind, data) = match item.payload {
         JobEventPayload::SourceChanged(value) => ("source_changed", json(&value)),
         JobEventPayload::JobState(value) => ("job_state", json(&value)),
@@ -157,8 +158,12 @@ fn sse_event(item: JobEvent) -> Vec<u8> {
         JobEventPayload::SystemHealth(value) => ("system_health", json(&value)),
     };
     let mut output = String::new();
-    write!(output, "id: {}\nevent: {kind}\ndata: {data}\n\n", item.id)
-        .expect("writing to String cannot fail");
+    write!(
+        output,
+        "id: {}\nevent: {kind}\nevent-time-ms: {created_at_ms}\ndata: {data}\n\n",
+        item.id
+    )
+    .expect("writing to String cannot fail");
     output.into_bytes()
 }
 

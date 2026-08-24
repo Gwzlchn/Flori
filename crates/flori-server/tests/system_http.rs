@@ -156,6 +156,7 @@ async fn system_and_sse_are_strict_resumable_and_job_scoped() {
     assert!(global.contains("content-type: text/event-stream"));
     assert!(global.contains("id: 1"));
     assert!(global.contains("event: job_state"));
+    assert!(global.contains("event-time-ms: 1"));
     assert!(global.contains(&format!(r#""job_id":"{}""#, harness.job_id)));
 
     let scoped = harness

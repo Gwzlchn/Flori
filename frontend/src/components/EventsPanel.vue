@@ -9,7 +9,7 @@ interface EventLine {
   cursor: number;
   kind: string;
   data: string;
-  receivedAt: number;
+  createdAt: number;
 }
 
 const events = ref<EventLine[]>([]);
@@ -38,12 +38,14 @@ function accept(frame: string): void {
   const lines = frame.split("\n");
   const id = lines.find((line) => line.startsWith("id: "))?.slice(4);
   const event = lines.find((line) => line.startsWith("event: "))?.slice(7) ?? "";
+  const createdAt = lines.find((line) => line.startsWith("event-time-ms: "))?.slice(15);
   const data = lines.filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n");
-  if (!id || !/^\d+$/u.test(id) || !event || !data) return;
+  if (!id || !/^\d+$/u.test(id) || !createdAt || !/^\d+$/u.test(createdAt) || !event || !data) return;
   const next = Number(id);
-  if (!Number.isSafeInteger(next) || next <= cursor) return;
+  const timestamp = Number(createdAt);
+  if (!Number.isSafeInteger(next) || next <= cursor || !Number.isSafeInteger(timestamp)) return;
   cursor = next;
-  events.value = [{ cursor, kind: event, data, receivedAt: Date.now() }, ...events.value].slice(0, 80);
+  events.value = [{ cursor, kind: event, data, createdAt: timestamp }, ...events.value].slice(0, 80);
 }
 
 async function stream(signal: AbortSignal): Promise<"ended" | "expired" | "failed"> {
@@ -134,14 +136,14 @@ onUnmounted(() => controller?.abort());
           class="event-dot"
           aria-hidden="true"
         />
-        <div><b>{{ label(item.kind) }}</b><small>游标 {{ item.cursor }} · 接收于 {{ new Date(item.receivedAt).toLocaleTimeString("zh-CN") }}</small><code>{{ item.data }}</code></div>
+        <div><b>{{ label(item.kind) }}</b><small>游标 {{ item.cursor }} · {{ new Date(item.createdAt).toLocaleString("zh-CN") }}</small><code>{{ item.data }}</code></div>
       </li>
     </ol>
     <p
       v-else
       class="empty-state"
     >
-      等待新的事件。服务端 SSE 不提供历史事件时间，页面只标记接收时间。
+      等待新的事件。
     </p>
   </section>
 </template>
