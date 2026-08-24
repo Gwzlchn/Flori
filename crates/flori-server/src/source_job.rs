@@ -122,9 +122,6 @@ async fn create_source(
     StrictJson(request): StrictJson<CreateRemoteSource>,
 ) -> Result<Json<CreatedSource>, HttpError> {
     let canonical_ref = canonical_ref(request.kind, &request.canonical_ref)?;
-    if request.credential_id.is_some() {
-        return Err(HttpError::new(ErrorCode::InvalidRequest));
-    }
     let request_sha256 =
         digest(&serde_json::to_vec(&request).map_err(|_| HttpError::new(ErrorCode::Internal))?);
     let source_id = state
@@ -135,6 +132,7 @@ async fn create_source(
             title: request.title.as_deref(),
             domain_id: request.domain_id,
             collection_ids: &request.collection_ids,
+            credential_id: request.credential_id,
             request_key: &request.request_key,
             request_sha256: request_sha256.as_str(),
             created_at_ms: super::runner::now_ms()?,
@@ -175,8 +173,43 @@ fn canonical_ref(kind: SourceKind, value: &str) -> Result<String, HttpError> {
         SourceKind::Arxiv => arxiv_id(value)
             .map(|id| format!("arxiv:{id}"))
             .ok_or_else(|| HttpError::new(ErrorCode::InvalidRequest)),
+        SourceKind::BilibiliVideo => bilibili_id(value)
+            .map(|id| format!("bilibili:{id}"))
+            .ok_or_else(|| HttpError::new(ErrorCode::InvalidRequest)),
+        SourceKind::YoutubeVideo => youtube_id(value)
+            .map(|id| format!("youtube:{id}"))
+            .ok_or_else(|| HttpError::new(ErrorCode::InvalidRequest)),
         _ => Err(HttpError::new(ErrorCode::UnsupportedSource)),
     }
+}
+
+fn bilibili_id(value: &str) -> Option<&str> {
+    let id = value
+        .strip_prefix("bilibili:")
+        .or_else(|| value.strip_prefix("https://www.bilibili.com/video/"))?;
+    let id = id.strip_suffix('/').unwrap_or(id);
+    valid_bilibili_id(id).then_some(id)
+}
+
+fn valid_bilibili_id(id: &str) -> bool {
+    id.len() == 12
+        && id.starts_with("BV")
+        && id[2..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn youtube_id(value: &str) -> Option<&str> {
+    let id = value
+        .strip_prefix("youtube:")
+        .or_else(|| value.strip_prefix("https://youtu.be/"))
+        .or_else(|| value.strip_prefix("https://www.youtube.com/watch?v="))?;
+    valid_youtube_id(id).then_some(id)
+}
+
+fn valid_youtube_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn arxiv_id(value: &str) -> Option<&str> {
@@ -220,5 +253,38 @@ mod tests {
         assert!(canonical_ref(SourceKind::Arxiv, "https://arxiv.org/abs/1706.03762v").is_err());
         assert!(canonical_ref(SourceKind::PdfUrl, "https://user@example.com/a.pdf").is_err());
         assert!(canonical_ref(SourceKind::PdfUrl, "http://example.com/a.pdf").is_err());
+    }
+
+    #[test]
+    fn platform_video_references_are_strict_and_canonical() {
+        assert_eq!(
+            canonical_ref(
+                SourceKind::BilibiliVideo,
+                "https://www.bilibili.com/video/BV1GJ411x7h7/"
+            )
+            .expect("Bilibili video"),
+            "bilibili:BV1GJ411x7h7"
+        );
+        assert_eq!(
+            canonical_ref(SourceKind::YoutubeVideo, "https://youtu.be/dQw4w9WgXcQ")
+                .expect("YouTube video"),
+            "youtube:dQw4w9WgXcQ"
+        );
+        assert!(canonical_ref(SourceKind::BilibiliVideo, "https://b23.tv/short").is_err());
+        assert!(
+            canonical_ref(
+                SourceKind::BilibiliVideo,
+                "https://www.bilibili.com/video/BV1GJ411x7h7?p=2"
+            )
+            .is_err()
+        );
+        assert!(
+            canonical_ref(
+                SourceKind::YoutubeVideo,
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123"
+            )
+            .is_err()
+        );
+        assert!(canonical_ref(SourceKind::YoutubeVideo, "https://evil.test/dQw4w9WgXcQ").is_err());
     }
 }

@@ -445,6 +445,7 @@ async fn compiled_pipeline_materializes_strict_tasks_and_pipeline_rerun() {
         title: Some("Paper"),
         domain_id,
         collection_ids: &[collection_id],
+        credential_id: None,
         request_key: "source-request",
         request_sha256: &"1".repeat(64),
         created_at_ms: 3,

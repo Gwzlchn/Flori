@@ -189,6 +189,7 @@ async fn foundation_with_translate(database: &TestDatabase, translate: bool) -> 
             title: None,
             domain_id,
             collection_ids: &[],
+            credential_id: None,
             request_key: "source",
             request_sha256: &"a".repeat(64),
             created_at_ms: 2,

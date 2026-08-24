@@ -5,8 +5,8 @@ use super::{
     wire::source_kind,
 };
 use flori_core::{
-    CollectionId, DomainId, ErrorCode, JobEventPayload, Sha256Digest, SourceChangedEvent, SourceId,
-    SourceKind,
+    CollectionId, CredentialId, CredentialKind, DomainId, ErrorCode, JobEventPayload, Sha256Digest,
+    SourceChangedEvent, SourceId, SourceKind,
 };
 use sqlx::{Row, Sqlite, Transaction};
 
@@ -17,6 +17,7 @@ pub struct CreateSource<'a> {
     pub title: Option<&'a str>,
     pub domain_id: DomainId,
     pub collection_ids: &'a [CollectionId],
+    pub credential_id: Option<CredentialId>,
     pub request_key: &'a str,
     pub request_sha256: &'a str,
     pub created_at_ms: i64,
@@ -51,16 +52,18 @@ impl Store {
             };
         }
         validate_collections(&mut transaction, input.domain_id, input.collection_ids).await?;
+        validate_credential(&mut transaction, input.kind, input.credential_id).await?;
         let source_id = SourceId::generate();
         sqlx::query(
-            "INSERT INTO sources(id,kind,canonical_ref,title,domain_id,request_key, \
-             request_sha256,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO sources(id,kind,canonical_ref,title,domain_id,credential_id,request_key, \
+             request_sha256,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(source_id.to_string())
         .bind(source_kind(input.kind))
         .bind(input.canonical_ref)
         .bind(input.title)
         .bind(input.domain_id.to_string())
+        .bind(input.credential_id.map(|id| id.to_string()))
         .bind(input.request_key)
         .bind(input.request_sha256)
         .bind(input.created_at_ms)
@@ -92,6 +95,33 @@ impl Store {
         transaction.commit().await?;
         Ok(source_id)
     }
+}
+
+async fn validate_credential(
+    transaction: &mut Transaction<'_, Sqlite>,
+    source_kind: SourceKind,
+    credential_id: Option<CredentialId>,
+) -> Result<(), StoreError> {
+    let Some(credential_id) = credential_id else {
+        return Ok(());
+    };
+    let expected = match source_kind {
+        SourceKind::BilibiliVideo | SourceKind::BilibiliChannel => CredentialKind::BilibiliCookie,
+        SourceKind::YoutubeVideo | SourceKind::YoutubeChannel => CredentialKind::YoutubeCookie,
+        _ => return Err(StoreError::new(ErrorCode::InvalidRequest)),
+    };
+    let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM credentials WHERE id=?")
+        .bind(credential_id.to_string())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    let matches = kind
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<CredentialKind>(&format!("\"{value}\"")).ok())
+        == Some(expected);
+    if !matches {
+        return Err(StoreError::new(ErrorCode::CredentialUnavailable));
+    }
+    Ok(())
 }
 
 async fn validate_collections(
