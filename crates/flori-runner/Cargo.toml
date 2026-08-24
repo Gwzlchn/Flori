@@ -7,11 +7,16 @@ rust-version.workspace = true
 version.workspace = true
 
 [features]
-default = ["codex", "media", "qoder"]
+default = ["codex", "download", "media", "qoder"]
 codex = []
 download = []
 media = []
 qoder = []
+
+[[bin]]
+name = "flori-runner-download"
+path = "src/bin/download.rs"
+required-features = ["download"]
 
 [[bin]]
 name = "flori-runner-media"
