@@ -9,8 +9,8 @@ use flori_core::{
 use sha2::{Digest, Sha256};
 use tokio::fs;
 
-use super::{claim, network, scholarly_fetch, scholarly_html, upload};
-use crate::RunnerClient;
+use super::{claim, network, scholarly_fetch, scholarly_html};
+use crate::{RunnerClient, task_upload};
 
 pub(super) async fn capture(
     client: &RunnerClient,
@@ -40,7 +40,7 @@ pub(super) async fn capture(
         if let Ok(captured) = capture_provider(task.job_id, provider, &url, timeout).await {
             persist(root, &captured).await?;
             let mut entries = vec![
-                upload::file(
+                task_upload::file(
                     client,
                     task,
                     claim::exact(task, ArtifactKind::ScholarlyHtml)?,
@@ -49,7 +49,7 @@ pub(super) async fn capture(
                     &root.join("document.html"),
                 )
                 .await?,
-                upload::file(
+                task_upload::file(
                     client,
                     task,
                     claim::exact(task, ArtifactKind::ScholarlyHtmlSnapshot)?,
@@ -62,7 +62,7 @@ pub(super) async fn capture(
             let declaration = claim::exact(task, ArtifactKind::ScholarlyResource)?;
             for resource in &captured.snapshot.resources {
                 entries.push(
-                    upload::file(
+                    task_upload::file(
                         client,
                         task,
                         declaration,

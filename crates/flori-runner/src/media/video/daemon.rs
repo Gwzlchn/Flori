@@ -6,7 +6,7 @@ use flori_core::{
 };
 use tokio::fs;
 
-use crate::RunnerClient;
+use crate::{RunnerClient, task_upload};
 
 use super::{
     pdf,
@@ -176,7 +176,7 @@ async fn frames(
             .await
             .map_err(|_| ErrorCode::StorageUnavailable)?;
         entries.push(
-            pdf::upload::file(
+            task_upload::file(
                 client,
                 claim,
                 declaration,
@@ -235,7 +235,7 @@ async fn upload_exact(
 ) -> Result<Vec<ArtifactManifestEntry>, ErrorCode> {
     let declaration = pdf::claim::exact(claim, kind)?;
     Ok(vec![
-        pdf::upload::file(
+        task_upload::file(
             client,
             claim,
             declaration,

@@ -8,7 +8,6 @@ mod scan;
 mod scholarly;
 mod scholarly_fetch;
 mod scholarly_html;
-pub(super) mod upload;
 
 pub use acquire::{PdfAcquireConfig, acquire_pdf};
 pub use daemon::{PdfDaemonConfig, run_pdf_daemon};

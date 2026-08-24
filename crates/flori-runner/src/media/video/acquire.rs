@@ -6,7 +6,7 @@ use flori_core::{
 };
 use tokio::fs;
 
-use crate::{RunnerClient, media::pdf};
+use crate::{RunnerClient, media::pdf, task_upload};
 
 use super::video::probe_video;
 
@@ -36,7 +36,7 @@ pub(crate) async fn acquire_local(
         return Err(ErrorCode::ExecutorFailed);
     }
     let declaration = pdf::claim::exact(claim, ArtifactKind::SourceOriginal)?;
-    let video = pdf::upload::file(
+    let video = task_upload::file(
         client,
         claim,
         declaration,
@@ -65,7 +65,7 @@ pub(crate) async fn acquire_local(
     .await
     .map_err(|_| ErrorCode::StorageUnavailable)?;
     let declaration = pdf::claim::exact(claim, ArtifactKind::PartsManifest)?;
-    let manifest = pdf::upload::file(
+    let manifest = task_upload::file(
         client,
         claim,
         declaration,

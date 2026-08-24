@@ -3,11 +3,9 @@ use std::{path::Path, path::PathBuf, time::Duration};
 use flori_core::{ArtifactKind, ArtifactManifestEntry, ErrorCode, ResolvedTaskInputs, TaskClaim};
 use tokio::sync::watch;
 
-use crate::RunnerClient;
+use crate::{RunnerClient, task_upload};
 
-use super::{
-    PdfAcquireConfig, PdfExtractConfig, acquire_pdf, claim, extract_pdf, scholarly, upload,
-};
+use super::{PdfAcquireConfig, PdfExtractConfig, acquire_pdf, claim, extract_pdf, scholarly};
 
 pub struct PdfDaemonConfig {
     pub work_root: PathBuf,
@@ -36,7 +34,7 @@ pub(crate) async fn run_task(
             acquire_pdf(client, source, &path, &config.acquire).await?;
             let declaration = claim::exact(claim, ArtifactKind::SourceOriginal)?;
             let mut entries = vec![
-                upload::file(
+                task_upload::file(
                     client,
                     claim,
                     declaration,
@@ -70,7 +68,7 @@ pub(crate) async fn run_task(
                 Vec::with_capacity(1 + structure.figures.len() + structure.tables.len());
             let declaration = claim::exact(claim, ArtifactKind::DocumentStructure)?;
             entries.push(
-                upload::file(
+                task_upload::file(
                     client,
                     claim,
                     declaration,
@@ -93,7 +91,7 @@ pub(crate) async fn run_task(
             {
                 let declaration = claim::exact(claim, kind)?;
                 entries.push(
-                    upload::file(
+                    task_upload::file(
                         client,
                         claim,
                         declaration,
