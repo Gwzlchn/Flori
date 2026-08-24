@@ -4,9 +4,10 @@ use flori_store::Store;
 use sqlx::Row;
 
 const PIPELINE: &str = include_str!("../../../pipelines/pdf.yml");
+const VIDEO_PIPELINE: &str = include_str!("../../../pipelines/video.yml");
 
 #[tokio::test]
-async fn pdf_bootstrap_is_idempotent_and_preserves_edited_prompts() {
+async fn bootstrap_is_idempotent_and_preserves_edited_prompts() {
     let root = temporary_root();
     fs::create_dir(&root).expect("test root");
     let database = root.join("flori.sqlite");
@@ -15,6 +16,10 @@ async fn pdf_bootstrap_is_idempotent_and_preserves_edited_prompts() {
         .bootstrap_pdf(PIPELINE, "note-v1", "translate-v1", "test", 1)
         .await
         .expect("first bootstrap");
+    let first_video = store
+        .bootstrap_video(VIDEO_PIPELINE, "video-v1", "test", 1)
+        .await
+        .expect("first video bootstrap");
 
     let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", database.display()))
         .await
@@ -27,13 +32,26 @@ async fn pdf_bootstrap_is_idempotent_and_preserves_edited_prompts() {
     .execute(&pool)
     .await
     .expect("simulate future Prompt UI edit");
+    sqlx::query(
+        "UPDATE prompts SET content='user-video', \
+         sha256='46a9855194fa9a2990837657fb75078f020e845dc95fc72ba819aa926a75f912' \
+         WHERE key='video_note'",
+    )
+    .execute(&pool)
+    .await
+    .expect("simulate video Prompt edit");
     pool.close().await;
 
     let second = store
         .bootstrap_pdf(PIPELINE, "note-v2", "translate-v2", "test", 2)
         .await
         .expect("repeat bootstrap");
+    let second_video = store
+        .bootstrap_video(VIDEO_PIPELINE, "video-v2", "test", 2)
+        .await
+        .expect("repeat video bootstrap");
     assert_eq!(second, first);
+    assert_eq!(second_video, first_video);
     assert_eq!(store.pdf_setup().await.expect("setup"), Some(first));
 
     let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", database.display()))
@@ -47,6 +65,12 @@ async fn pdf_bootstrap_is_idempotent_and_preserves_edited_prompts() {
         prompt.try_get::<String, _>("content").expect("content"),
         "user-edited"
     );
+    let video_prompt: String =
+        sqlx::query_scalar("SELECT content FROM prompts WHERE key='video_note'")
+            .fetch_one(&pool)
+            .await
+            .expect("video prompt");
+    assert_eq!(video_prompt, "user-video");
     let counts: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM domains),(SELECT count(*) FROM prompts), \
          (SELECT count(*) FROM pipelines),(SELECT count(*) FROM pipeline_revisions)",
@@ -54,7 +78,7 @@ async fn pdf_bootstrap_is_idempotent_and_preserves_edited_prompts() {
     .fetch_one(&pool)
     .await
     .expect("counts");
-    assert_eq!(counts, (1, 2, 1, 1));
+    assert_eq!(counts, (1, 3, 2, 2));
     pool.close().await;
     drop(store);
     fs::remove_dir_all(root).expect("remove fixture");

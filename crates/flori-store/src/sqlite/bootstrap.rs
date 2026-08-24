@@ -9,8 +9,59 @@ use super::{Store, StoreError};
 
 const DOMAIN_SLUG: &str = "general";
 const PIPELINE_KEY: &str = "pdf";
+const VIDEO_PIPELINE_KEY: &str = "video";
 
 impl Store {
+    pub async fn bootstrap_video(
+        &self,
+        pipeline_yaml: &str,
+        note_prompt: &str,
+        revision_label: &str,
+        now_ms: i64,
+    ) -> Result<PipelineId, StoreError> {
+        if note_prompt.is_empty() || revision_label.is_empty() || now_ms < 0 {
+            return Err(StoreError::new(ErrorCode::InvalidRequest));
+        }
+        let compilation = compile(VIDEO_PIPELINE_KEY, pipeline_yaml.as_bytes())
+            .map_err(|_| StoreError::new(ErrorCode::PipelineInvalid))?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let domain_exists: i64 = sqlx::query_scalar("SELECT count(*) FROM domains WHERE slug=?")
+            .bind(DOMAIN_SLUG)
+            .fetch_one(&mut *transaction)
+            .await?;
+        if domain_exists != 1 {
+            return Err(StoreError::new(ErrorCode::CorruptState));
+        }
+        sqlx::query(
+            "INSERT INTO prompts(key,content,sha256,updated_at_ms) VALUES('video_note',?,?,?) \
+             ON CONFLICT(key) DO NOTHING",
+        )
+        .bind(note_prompt)
+        .bind(digest(note_prompt).as_str())
+        .bind(now_ms)
+        .execute(&mut *transaction)
+        .await?;
+        let pipeline_id = match sqlx::query("SELECT id FROM pipelines WHERE key=?")
+            .bind(VIDEO_PIPELINE_KEY)
+            .fetch_optional(&mut *transaction)
+            .await?
+        {
+            Some(row) => parse_id(row.try_get("id")?)?,
+            None => PipelineId::generate(),
+        };
+        transaction.commit().await?;
+        self.register_pipeline_revision(
+            pipeline_id,
+            PipelineRevisionId::generate(),
+            &compilation,
+            revision_label,
+            pipeline_yaml,
+            now_ms,
+        )
+        .await?;
+        Ok(pipeline_id)
+    }
+
     pub async fn bootstrap_pdf(
         &self,
         pipeline_yaml: &str,

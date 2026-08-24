@@ -119,6 +119,14 @@ async fn serve(
             now_ms()?,
         )
         .await?;
+    store
+        .bootstrap_video(
+            include_str!("../../../pipelines/video.yml"),
+            include_str!("../../../prompts/video_note.md"),
+            "embedded-rust-vnext",
+            now_ms()?,
+        )
+        .await?;
     let current_ms = now_ms()?;
     let online_after_ms =
         current_ms.saturating_sub(i64::try_from(lease_ms.saturating_mul(2)).unwrap_or(i64::MAX));
