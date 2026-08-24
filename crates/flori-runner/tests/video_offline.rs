@@ -1,4 +1,5 @@
 #[path = "../src/media/video.rs"]
+#[allow(dead_code, unused_imports)]
 mod video;
 
 use std::{
