@@ -36,6 +36,15 @@ fn normalizes_golden_subtitle_and_keeps_mechanical_note_faithful() {
 }
 
 #[test]
+fn accepts_trailing_blank_lines_from_platform_subtitles() {
+    let source = ArtifactId::generate();
+    let subtitle = "1\r\n00:00:00,000 --> 00:00:01,000\r\ncaption\r\n\r\n";
+    let transcript = normalize_srt(source, "en", 1_000, subtitle).expect("platform SRT");
+    assert_eq!(transcript.cues.len(), 1);
+    assert_eq!(transcript.cues[0].text, "caption");
+}
+
+#[test]
 fn rejects_overlapping_out_of_range_and_malformed_subtitles() {
     let source = ArtifactId::generate();
     let overlap =

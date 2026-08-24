@@ -12,7 +12,7 @@ pub(crate) fn normalize_srt(
         .trim_start_matches('\u{feff}')
         .replace("\r\n", "\n");
     let mut cues = Vec::new();
-    for (expected_index, block) in normalized.split("\n\n").enumerate() {
+    for (expected_index, block) in normalized.trim_end().split("\n\n").enumerate() {
         let mut lines = block.lines().filter(|line| !line.trim().is_empty());
         let index = lines
             .next()
