@@ -31,6 +31,7 @@ pub(super) fn check(root: &Path) -> Result<(), String> {
     let mut expected = POLICY_FILES
         .lines()
         .chain([
+            "docker/runner-download.Dockerfile",
             "crates/flori-core/src/knowledge.rs",
             "crates/flori-core/src/scholarly_html.rs",
             "crates/flori-core/src/source.rs",
