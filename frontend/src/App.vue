@@ -40,7 +40,9 @@ const collectionNames = computed(() => source.value?.collection_ids
   .filter((name): name is string => name !== undefined) ?? []);
 const activeDomainName = computed(() => domains.value.find((item) => item.domain_id === source.value?.domain_id)?.name
   ?? selectedDomain.value?.name ?? "知识库");
-const activeCollectionName = computed(() => collectionNames.value[0] ?? selectedCollection.value?.name);
+const activeCollectionName = computed(() => source.value?.collection_ids.includes(selectedCollectionId.value)
+  ? selectedCollection.value?.name
+  : collectionNames.value[0]);
 const showNotice = computed(() => !job.value || job.value.state !== "succeeded" || !notice.value.startsWith("Job succeeded"));
 const pageTitle = computed(() => activeView.value === "system" ? "系统与 Runner"
   : activeView.value === "about" ? "关于 Flori" : job.value ? sourceTitle.value : "投递内容");
@@ -102,7 +104,7 @@ function toggleSidebar(): void {
 watch(source, (current) => {
   if (!current) return;
   selectSource(current);
-  setUploadContext(current.domain_id, current.collection_ids[0] ?? "");
+  setUploadContext(current.domain_id, selectedCollectionId.value);
   void refreshLibrary();
 });
 watch(job, (current) => {

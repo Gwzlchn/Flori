@@ -29,7 +29,10 @@ export function useKnowledgeNavigation() {
   }
 
   function selectSource(source: components["schemas"]["SourceView"]): void {
-    const collectionId = source.collection_ids[0] ?? "";
+    const currentCollection = selectedCollectionId.value;
+    const collectionId = currentCollection && source.collection_ids.includes(currentCollection)
+      ? currentCollection
+      : source.collection_ids[0] ?? "";
     select(source.domain_id, collectionId, false);
     remember(source.domain_id, collectionId, false);
   }

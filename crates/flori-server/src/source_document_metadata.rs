@@ -11,10 +11,13 @@ pub(super) fn metadata(
 ) -> Result<DocumentMetadataView, ErrorCode> {
     let arxiv = source.canonical_ref.strip_prefix("arxiv:");
     let (arxiv_id, arxiv_version) = arxiv.map_or((None, None), |value| {
-        let version = value
+        let versioned = value
             .rsplit_once('v')
-            .and_then(|(_, version)| version.parse().ok());
-        (Some(value.to_owned()), version)
+            .and_then(|(id, version)| version.parse().ok().map(|version| (id, version)));
+        versioned.map_or_else(
+            || (Some(value.to_owned()), None),
+            |(id, version)| (Some(id.to_owned()), Some(version)),
+        )
     });
     let fallback_abstract = structure.sections.iter().find_map(|section| {
         section
@@ -149,6 +152,61 @@ mod tests {
         assert_eq!(
             metadata.abstract_text.as_deref(),
             Some("A useful abstract.")
+        );
+    }
+
+    #[test]
+    fn separates_arxiv_id_from_version() {
+        let source = SourceView {
+            source_id: "018f0000-0000-7000-8000-000000000001"
+                .parse()
+                .expect("source ID"),
+            domain_id: "018f0000-0000-7000-8000-000000000002"
+                .parse()
+                .expect("domain ID"),
+            collection_ids: vec![],
+            kind: flori_core::SourceKind::Arxiv,
+            canonical_ref: "arxiv:1706.03762v2".into(),
+            title: None,
+            current_job_id: None,
+            previous_job_id: None,
+        };
+        let structure = DocumentStructure {
+            schema: flori_core::DocumentStructureSchema::V1,
+            source_artifact_id: "018f0000-0000-7000-8000-000000000003"
+                .parse()
+                .expect("artifact ID"),
+            language: "en".into(),
+            pages: vec![],
+            sections: vec![],
+            figures: vec![],
+            tables: vec![],
+        };
+        let pdf = ArtifactView {
+            artifact_id: structure.source_artifact_id,
+            job_id: "018f0000-0000-7000-8000-000000000004"
+                .parse()
+                .expect("job ID"),
+            task_id: "018f0000-0000-7000-8000-000000000005"
+                .parse()
+                .expect("task ID"),
+            source_id: source.source_id,
+            name: "source_original".into(),
+            kind: flori_core::ArtifactKind::SourceOriginal,
+            media_type: "application/pdf".into(),
+            size_bytes: 1,
+            sha256: flori_core::Sha256Digest::parse(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .expect("digest"),
+        };
+
+        let metadata = metadata(&source, &pdf, &structure, None).expect("metadata");
+        assert_eq!(metadata.arxiv_id.as_deref(), Some("1706.03762"));
+        assert_eq!(metadata.arxiv_version, Some(2));
+        assert_eq!(
+            metadata.original_url.as_deref(),
+            Some("https://arxiv.org/abs/1706.03762v2")
         );
     }
 }
