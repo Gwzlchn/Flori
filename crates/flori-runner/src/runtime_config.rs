@@ -27,6 +27,10 @@ const CODEX_CONFIG_DIR: &str = "CODEX_HOME";
 const QODER_PROXY_URL: &str = "FLORI_QODER_PROXY_URL";
 #[cfg(feature = "codex")]
 const CODEX_PROXY_URL: &str = "FLORI_CODEX_PROXY_URL";
+#[cfg(feature = "media")]
+const WHISPER_MODEL_DIR: &str = "FLORI_WHISPER_MODEL_DIR";
+#[cfg(feature = "media")]
+const WHISPER_MODEL_NAME: &str = "FLORI_WHISPER_MODEL_NAME";
 
 #[cfg(any(feature = "codex", feature = "qoder"))]
 pub(crate) struct RuntimeConfig {
@@ -44,6 +48,8 @@ pub(crate) struct RuntimeConfig {
 pub(crate) struct MediaRuntimeConfig {
     pub(crate) client: RunnerClient,
     pub(crate) spool_dir: PathBuf,
+    pub(crate) whisper_model_dir: PathBuf,
+    pub(crate) whisper_model_name: String,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -126,9 +132,22 @@ pub(crate) fn parse_media(
     let server_url = required_text(&mut environment, SERVER_URL)?;
     let token = required_text(&mut environment, TOKEN)?;
     let spool_dir = required_path(&mut environment, SPOOL_DIR)?;
+    let whisper_model_dir = required_path(&mut environment, WHISPER_MODEL_DIR)?;
+    let whisper_model_name = required_identifier(&mut environment, WHISPER_MODEL_NAME)?;
+    if whisper_model_name != "base" {
+        return Err(RuntimeConfigError::InvalidEnvironment(WHISPER_MODEL_NAME));
+    }
+    if whisper_model_dir.file_name().and_then(|name| name.to_str()) != Some("base") {
+        return Err(RuntimeConfigError::InvalidEnvironment(WHISPER_MODEL_DIR));
+    }
     let client = RunnerClient::new(&server_url, token)
         .map_err(|_| RuntimeConfigError::InvalidEnvironment(SERVER_URL))?;
-    Ok(MediaRuntimeConfig { client, spool_dir })
+    Ok(MediaRuntimeConfig {
+        client,
+        spool_dir,
+        whisper_model_dir,
+        whisper_model_name,
+    })
 }
 
 fn required_text(
@@ -144,7 +163,7 @@ fn required_text(
         .ok_or(RuntimeConfigError::InvalidEnvironment(name))
 }
 
-#[cfg(any(feature = "codex", feature = "qoder"))]
+#[cfg(any(feature = "codex", feature = "qoder", feature = "media"))]
 fn required_identifier(
     environment: &mut impl FnMut(&str) -> Option<OsString>,
     name: &'static str,

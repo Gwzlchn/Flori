@@ -107,6 +107,11 @@ fn parses_media_without_ai_configuration() {
             "FLORI_RUNNER_SPOOL_DIR",
             OsString::from("/var/lib/flori-runner/spool"),
         ),
+        (
+            "FLORI_WHISPER_MODEL_DIR",
+            OsString::from("/models/faster-whisper/base"),
+        ),
+        ("FLORI_WHISPER_MODEL_NAME", OsString::from("base")),
     ]);
     let config =
         parse_media(&args("media"), |name| values.get(name).cloned()).expect("valid media config");
@@ -115,6 +120,31 @@ fn parses_media_without_ai_configuration() {
         config.spool_dir,
         PathBuf::from("/var/lib/flori-runner/spool")
     );
+    assert_eq!(
+        config.whisper_model_dir,
+        PathBuf::from("/models/faster-whisper/base")
+    );
+    assert_eq!(config.whisper_model_name, "base");
+
+    for name in ["FLORI_WHISPER_MODEL_DIR", "FLORI_WHISPER_MODEL_NAME"] {
+        let mut invalid = values.clone();
+        invalid.remove(name);
+        assert_eq!(
+            parse_media(&args("media"), |key| invalid.get(key).cloned()).err(),
+            Some(RuntimeConfigError::MissingEnvironment(name))
+        );
+    }
+    for (name, value) in [
+        ("FLORI_WHISPER_MODEL_DIR", "/models/faster-whisper/large-v3"),
+        ("FLORI_WHISPER_MODEL_NAME", "large-v3"),
+    ] {
+        let mut invalid = values.clone();
+        invalid.insert(name, value.into());
+        assert_eq!(
+            parse_media(&args("media"), |key| invalid.get(key).cloned()).err(),
+            Some(RuntimeConfigError::InvalidEnvironment(name))
+        );
+    }
 }
 
 #[test]

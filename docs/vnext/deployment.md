@@ -38,6 +38,8 @@ flori-server healthcheck <address>
 
 测试不复制五套 runtime 镜像。document extractor、yt-dlp、yutto、FFmpeg 和 Whisper 属于 media Runner 内的短命执行器。
 
+视频转写只使用 runner-media 内锁定的 `faster-whisper==1.2.1` 和固定逻辑模型 `base`。部署必须把完整 CTranslate2 模型目录只读挂载到 `/models/faster-whisper/base`；启动配置不接受其它模型名或相对路径，执行器同时设置 Hugging Face 离线环境，运行时不得下载模型。
+
 QoderCLI 和 CodexCLI 使用人工锁定版本。vNext首版固定为 QoderCLI `1.1.26` 和 CodexCLI `0.148.0`：
 
 1. 修改一个版本锁。

@@ -46,8 +46,16 @@ services:
       FLORI_SERVER_URL: ${FLORI_SERVER_URL:-}
       FLORI_RUNNER_TOKEN: ${FLORI_RUNNER_TOKEN_MEDIA:-}
       FLORI_RUNNER_SPOOL_DIR: /var/lib/flori-runner/spool
+      FLORI_WHISPER_MODEL_DIR: /models/faster-whisper/base
+      FLORI_WHISPER_MODEL_NAME: base
     volumes:
       - runner-media-spool:/var/lib/flori-runner
+      - type: bind
+        source: ${FLORI_WHISPER_MODEL_DIR:-./models/faster-whisper/base}
+        target: /models/faster-whisper/base
+        read_only: true
+        bind:
+          create_host_path: false
     profiles: [media]
 
   runner-ai-qoder:
