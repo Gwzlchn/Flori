@@ -5,19 +5,21 @@
 #[cfg(any(feature = "codex", feature = "qoder"))]
 mod ai;
 mod attempt;
-#[cfg(any(feature = "codex", feature = "qoder"))]
+#[cfg(any(feature = "codex", feature = "download", feature = "qoder"))]
 mod child_process;
 mod client;
 mod content;
 #[cfg(any(feature = "codex", feature = "qoder"))]
 mod daemon;
 mod digest;
+#[cfg(feature = "download")]
+mod download;
 #[cfg(feature = "media")]
 mod media;
 mod spool;
-#[cfg(feature = "media")]
+#[cfg(any(feature = "download", feature = "media"))]
 mod task_log;
-#[cfg(feature = "media")]
+#[cfg(any(feature = "download", feature = "media"))]
 mod task_upload;
 mod upload;
 
@@ -40,6 +42,8 @@ pub use ai::{
 pub use client::{ClientError, RunnerClient};
 #[cfg(any(feature = "codex", feature = "qoder"))]
 pub use daemon::{DaemonConfig, run as run_ai_daemon};
+#[cfg(feature = "download")]
+pub use download::{DownloadDaemonConfig, run_download_daemon};
 #[cfg(feature = "media")]
 pub use media::pdf::{
     PdfAcquireConfig, PdfDaemonConfig, PdfExtractConfig, acquire_pdf, extract_pdf, run_pdf_daemon,
