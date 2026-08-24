@@ -5,6 +5,8 @@
 #[cfg(any(feature = "codex", feature = "qoder"))]
 mod ai;
 mod attempt;
+#[cfg(any(feature = "codex", feature = "qoder"))]
+mod child_process;
 mod client;
 mod content;
 #[cfg(any(feature = "codex", feature = "qoder"))]

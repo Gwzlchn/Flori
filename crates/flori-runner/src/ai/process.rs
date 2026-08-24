@@ -1,22 +1,10 @@
-use std::{
-    ffi::OsString,
-    fmt,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{ffi::OsString, fmt, path::PathBuf, time::Duration};
 
 use flori_core::{AiTool, ErrorCode};
 use reqwest::Url;
-use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    process::Command,
-    sync::watch,
-};
+use tokio::sync::watch;
+
+use crate::child_process::{ChildProcessConfig, ChildTermination, run_child_process};
 
 #[path = "process/qoder_process.rs"]
 #[cfg(feature = "qoder")]
@@ -79,232 +67,51 @@ pub async fn run_ai_process(
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<AiProcessOutput, AiProcessError> {
     validate(config)?;
-    let mut command = Command::new(&config.executable);
-    command
-        .args(&config.arguments)
-        .current_dir(&config.working_directory)
-        .env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-        .env("HOME", &config.home)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .process_group(0);
-    match config.tool {
+    let config_name = match config.tool {
         #[cfg(feature = "qoder")]
-        AiTool::QoderCli => command.env("QODER_CONFIG_DIR", &config.tool_config_home),
+        AiTool::QoderCli => "QODER_CONFIG_DIR",
         #[cfg(feature = "codex")]
-        AiTool::CodexCli => command.env("CODEX_HOME", &config.tool_config_home),
+        AiTool::CodexCli => "CODEX_HOME",
         #[allow(unreachable_patterns)]
         _ => return Err(AiProcessError::new(ErrorCode::InvalidRequest)),
     };
     let value = config.proxy_url.as_str().trim_end_matches('/');
-    command.envs([
-        ("HTTP_PROXY", value),
-        ("http_proxy", value),
-        ("HTTPS_PROXY", value),
-        ("https_proxy", value),
-    ]);
-    let mut child = command
-        .spawn()
-        .map_err(|_| AiProcessError::new(ErrorCode::ExecutorFailed))?;
-    let mut process_group = ProcessGroup::new(&child)?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| AiProcessError::new(ErrorCode::Internal))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| AiProcessError::new(ErrorCode::Internal))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| AiProcessError::new(ErrorCode::Internal))?;
-    let prompt = prompt.to_vec();
-    let prompt_task = tokio::spawn(async move {
-        stdin.write_all(&prompt).await?;
-        stdin.shutdown().await
-    });
-    let total = Arc::new(AtomicUsize::new(0));
-    let (limit_tx, mut limit_rx) = watch::channel(false);
-    let _limit_guard = limit_tx.clone();
-    let stdout_task = tokio::spawn(read_bounded(
-        stdout,
-        config.max_output_bytes,
-        total.clone(),
-        limit_tx.clone(),
-    ));
-    let stderr_task = tokio::spawn(read_bounded(
-        stderr,
-        config.max_output_bytes,
-        total,
-        limit_tx,
-    ));
-
-    enum Stop {
-        Exited(Result<(), ()>),
-        TimedOut,
-        Canceled,
-        OutputLimit,
-    }
-    let stop = tokio::select! {
-        status = async {
-            prompt_task.await.map_err(|_| ())?.map_err(|_| ())?;
-            process_exited(process_group.pid).await
-        } => Stop::Exited(status),
-        () = canceled(cancel) => Stop::Canceled,
-        () = tokio::time::sleep(config.timeout) => Stop::TimedOut,
-        result = limit_rx.changed() => {
-            let _ = result;
-            Stop::OutputLimit
-        }
-    };
-    let (termination, status) = match stop {
-        Stop::Exited(Ok(())) => (
-            AiProcessTermination::Exited,
-            kill_and_wait(&mut child, &mut process_group).await?,
-        ),
-        Stop::Canceled => (
-            AiProcessTermination::Canceled,
-            kill_and_wait(&mut child, &mut process_group).await?,
-        ),
-        Stop::TimedOut => (
-            AiProcessTermination::TimedOut,
-            kill_and_wait(&mut child, &mut process_group).await?,
-        ),
-        Stop::OutputLimit => {
-            kill_and_wait(&mut child, &mut process_group).await?;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            return Err(AiProcessError::new(ErrorCode::ArtifactTooLarge));
-        }
-        Stop::Exited(Err(())) => {
-            kill_and_wait(&mut child, &mut process_group).await?;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            return Err(AiProcessError::new(ErrorCode::ExecutorFailed));
-        }
-    };
-    let stdout = join_reader(stdout_task).await?;
-    let stderr = join_reader(stderr_task).await?;
+    let environment = [
+        ("PATH", OsString::from("/usr/local/bin:/usr/bin:/bin")),
+        ("HOME", config.home.as_os_str().to_owned()),
+        (config_name, config.tool_config_home.as_os_str().to_owned()),
+        ("HTTP_PROXY", OsString::from(value)),
+        ("http_proxy", OsString::from(value)),
+        ("HTTPS_PROXY", OsString::from(value)),
+        ("https_proxy", OsString::from(value)),
+    ]
+    .into_iter()
+    .map(|(name, value)| (OsString::from(name), value))
+    .collect();
+    let output = run_child_process(
+        &ChildProcessConfig {
+            executable: config.executable.clone(),
+            arguments: config.arguments.clone(),
+            working_directory: config.working_directory.clone(),
+            environment,
+            stdin: Some(prompt.to_vec()),
+            timeout: config.timeout,
+            max_output_bytes: config.max_output_bytes,
+        },
+        cancel,
+    )
+    .await
+    .map_err(AiProcessError::new)?;
     Ok(AiProcessOutput {
-        stdout,
-        stderr,
-        exit_code: status.code(),
-        termination,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        exit_code: output.exit_code,
+        termination: match output.termination {
+            ChildTermination::Exited => AiProcessTermination::Exited,
+            ChildTermination::TimedOut => AiProcessTermination::TimedOut,
+            ChildTermination::Canceled => AiProcessTermination::Canceled,
+        },
     })
-}
-
-async fn read_bounded(
-    mut reader: impl AsyncRead + Unpin,
-    max: usize,
-    total: Arc<AtomicUsize>,
-    limit: watch::Sender<bool>,
-) -> Result<Vec<u8>, AiProcessError> {
-    let mut output = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|_| AiProcessError::new(ErrorCode::ExecutorFailed))?;
-        if read == 0 {
-            return Ok(output);
-        }
-        if total
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                current.checked_add(read).filter(|next| *next <= max)
-            })
-            .is_err()
-        {
-            let _ = limit.send(true);
-            return Err(AiProcessError::new(ErrorCode::ArtifactTooLarge));
-        }
-        output.extend_from_slice(&buffer[..read]);
-    }
-}
-
-async fn canceled(cancel: &mut watch::Receiver<bool>) {
-    loop {
-        if *cancel.borrow() || cancel.changed().await.is_err() {
-            return;
-        }
-    }
-}
-
-async fn process_exited(pid: Pid) -> Result<(), ()> {
-    let options = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT | WaitIdOptions::NOHANG;
-    loop {
-        match waitid(WaitId::Pid(pid), options) {
-            Ok(Some(_)) => return Ok(()),
-            Ok(None) => tokio::time::sleep(Duration::from_millis(5)).await,
-            Err(_) => return Err(()),
-        }
-    }
-}
-
-async fn kill_and_wait(
-    child: &mut tokio::process::Child,
-    process_group: &mut ProcessGroup,
-) -> Result<std::process::ExitStatus, AiProcessError> {
-    let signal = process_group.kill_remaining();
-    if signal.is_err() {
-        let _ = child.start_kill();
-    }
-    let status = child
-        .wait()
-        .await
-        .map_err(|_| AiProcessError::new(ErrorCode::ExecutorFailed))?;
-    signal?;
-    process_group.disarm();
-    Ok(status)
-}
-
-struct ProcessGroup {
-    pid: Pid,
-    armed: bool,
-}
-
-impl ProcessGroup {
-    fn new(child: &tokio::process::Child) -> Result<Self, AiProcessError> {
-        let raw = child
-            .id()
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(Pid::from_raw)
-            .ok_or_else(|| AiProcessError::new(ErrorCode::Internal))?;
-        Ok(Self {
-            pid: raw,
-            armed: true,
-        })
-    }
-
-    fn kill_remaining(&self) -> Result<(), AiProcessError> {
-        match kill_process_group(self.pid, Signal::KILL) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
-            Err(_) => Err(AiProcessError::new(ErrorCode::ExecutorFailed)),
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = self.kill_remaining();
-        }
-    }
-}
-
-async fn join_reader(
-    task: tokio::task::JoinHandle<Result<Vec<u8>, AiProcessError>>,
-) -> Result<Vec<u8>, AiProcessError> {
-    task.await
-        .map_err(|_| AiProcessError::new(ErrorCode::Internal))?
 }
 
 fn validate(config: &AiProcessConfig) -> Result<(), AiProcessError> {
