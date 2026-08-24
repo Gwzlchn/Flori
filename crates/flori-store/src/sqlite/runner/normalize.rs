@@ -77,7 +77,9 @@ pub(super) fn supports_executor(
         Executor::VideoAcquire | Executor::VideoSubscription => match source_kind {
             SourceKind::BilibiliVideo | SourceKind::BilibiliChannel => has(RunnerTool::Yutto),
             SourceKind::YoutubeVideo | SourceKind::YoutubeChannel => has(RunnerTool::YtDlp),
-            SourceKind::LocalVideo => executor == Executor::VideoAcquire,
+            SourceKind::LocalVideo => {
+                executor == Executor::VideoAcquire && has(RunnerTool::Ffprobe)
+            }
             SourceKind::Arxiv | SourceKind::PdfUrl | SourceKind::PdfUpload => false,
         },
         Executor::VideoTranscribe => has(RunnerTool::WhisperCpp) || has(RunnerTool::FasterWhisper),
@@ -159,4 +161,40 @@ const fn tool_name(tool: RunnerTool) -> &'static str {
 
 fn corrupt() -> StoreError {
     StoreError::new(ErrorCode::CorruptState)
+}
+
+#[cfg(test)]
+mod tests {
+    use flori_core::{Executor, RunnerTool, RunnerToolCapability, SourceKind};
+
+    use super::{RunnerInventory, supports_executor};
+
+    fn inventory(tools: Vec<RunnerToolCapability>) -> RunnerInventory {
+        RunnerInventory {
+            config_revision: 1,
+            max_concurrency: 1,
+            tags: Vec::new(),
+            tools,
+            ai_models: Vec::new(),
+            default_model: None,
+            default_effort: None,
+        }
+    }
+
+    #[test]
+    fn local_video_acquire_requires_ffprobe() {
+        assert!(!supports_executor(
+            Executor::VideoAcquire,
+            SourceKind::LocalVideo,
+            &inventory(Vec::new()),
+        ));
+        assert!(supports_executor(
+            Executor::VideoAcquire,
+            SourceKind::LocalVideo,
+            &inventory(vec![RunnerToolCapability {
+                tool: RunnerTool::Ffprobe,
+                version: "7.1".into(),
+            }]),
+        ));
+    }
 }
