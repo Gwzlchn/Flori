@@ -53,10 +53,6 @@ const showHtml = computed(() => Boolean(props.documentHtml && htmlView.value && 
 const representationLabel = computed(() => showHtml.value
   ? htmlView.value?.provider === "arxiv" ? "arXiv HTML" : "ar5iv HTML"
   : "PDF canonical evidence");
-const documentText = computed(() => {
-  const artifact = props.job.artifacts.find((item) => item.kind === "document_structure");
-  return artifact ? props.textContent.get(artifact.artifact_id) : undefined;
-});
 
 function locateVisual(page: number, bbox: components["schemas"]["PdfRect"], label: string): void {
   visualLocation.value = { page, bbox, label };
@@ -182,7 +178,7 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
           </header>
           <VisualCatalog
             :artifacts="job.artifacts"
-            :document-text="documentText"
+            :structure="documentView?.structure"
             :file-urls="fileUrls"
             @locate="locateVisual"
           />
@@ -206,6 +202,7 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; })
           :source="source"
           :domain-name="domainName"
           :collection-names="collectionNames"
+          :document-view="documentView"
         />
       </div>
 
