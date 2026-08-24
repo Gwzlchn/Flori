@@ -4,7 +4,7 @@ mod runtime_config;
 use std::{collections::HashMap, ffi::OsString, net::TcpListener, path::PathBuf, process::Command};
 
 use flori_core::AiTool;
-use runtime_config::{RuntimeConfigError, parse, parse_media};
+use runtime_config::{RuntimeConfigError, parse, parse_download, parse_media};
 
 fn args(tool: &str) -> Vec<OsString> {
     ["run", tool].into_iter().map(Into::into).collect()
@@ -143,6 +143,57 @@ fn parses_media_without_ai_configuration() {
         assert_eq!(
             parse_media(&args("media"), |key| invalid.get(key).cloned()).err(),
             Some(RuntimeConfigError::InvalidEnvironment(name))
+        );
+    }
+}
+
+#[test]
+fn parses_download_with_its_only_proxy() {
+    let values = HashMap::from([
+        (
+            "FLORI_SERVER_URL",
+            OsString::from("https://flori.example.test"),
+        ),
+        ("FLORI_RUNNER_TOKEN", OsString::from("runner-token")),
+        (
+            "FLORI_RUNNER_SPOOL_DIR",
+            OsString::from("/var/lib/flori-runner/spool"),
+        ),
+        (
+            "FLORI_YOUTUBE_PROXY_URL",
+            OsString::from("http://youtube-proxy.internal:1080"),
+        ),
+        (
+            "FLORI_QODER_PROXY_URL",
+            OsString::from("http://qoder-proxy.invalid:10809"),
+        ),
+    ]);
+    let config = parse_download(&args("download"), |name| values.get(name).cloned())
+        .expect("download config");
+    let _client = &config.client;
+    assert_eq!(
+        config.spool_dir,
+        PathBuf::from("/var/lib/flori-runner/spool")
+    );
+    assert_eq!(
+        config.youtube_proxy_url.as_str(),
+        "http://youtube-proxy.internal:1080/"
+    );
+    for invalid in [
+        "https://proxy.internal:1080",
+        "socks5h://proxy.internal:1080",
+        "http://user@proxy.internal:1080",
+        "http://proxy.internal:1080/path",
+        "http://proxy.internal:1080/",
+        "http://proxy.internal:1080?query=value",
+    ] {
+        let mut invalid_values = values.clone();
+        invalid_values.insert("FLORI_YOUTUBE_PROXY_URL", invalid.into());
+        assert_eq!(
+            parse_download(&args("download"), |name| invalid_values.get(name).cloned()).err(),
+            Some(RuntimeConfigError::InvalidEnvironment(
+                "FLORI_YOUTUBE_PROXY_URL"
+            ))
         );
     }
 }

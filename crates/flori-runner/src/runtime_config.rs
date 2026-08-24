@@ -7,11 +7,13 @@ use std::{
 #[cfg(any(feature = "codex", feature = "qoder"))]
 use flori_core::AiTool;
 use flori_runner::RunnerClient;
-#[cfg(any(feature = "codex", feature = "qoder"))]
+#[cfg(any(feature = "codex", feature = "download", feature = "qoder"))]
 use reqwest::Url;
 
 const SERVER_URL: &str = "FLORI_SERVER_URL";
 const TOKEN: &str = "FLORI_RUNNER_TOKEN";
+#[cfg(feature = "download")]
+const YOUTUBE_PROXY_URL: &str = "FLORI_YOUTUBE_PROXY_URL";
 #[cfg(any(feature = "codex", feature = "qoder"))]
 const MODEL: &str = "FLORI_RUNNER_MODEL";
 #[cfg(any(feature = "codex", feature = "qoder"))]
@@ -52,6 +54,13 @@ pub(crate) struct MediaRuntimeConfig {
     pub(crate) whisper_model_name: String,
 }
 
+#[cfg(feature = "download")]
+pub(crate) struct DownloadRuntimeConfig {
+    pub(crate) client: RunnerClient,
+    pub(crate) spool_dir: PathBuf,
+    pub(crate) youtube_proxy_url: Url,
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeConfigError {
     InvalidArguments,
@@ -62,11 +71,32 @@ pub(crate) enum RuntimeConfigError {
 impl fmt::Display for RuntimeConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidArguments => formatter.write_str("expected: run qoder|codex"),
+            Self::InvalidArguments => formatter.write_str("invalid runner command"),
             Self::MissingEnvironment(name) => write!(formatter, "missing environment: {name}"),
             Self::InvalidEnvironment(name) => write!(formatter, "invalid environment: {name}"),
         }
     }
+}
+
+#[cfg(feature = "download")]
+pub(crate) fn parse_download(
+    args: &[OsString],
+    mut environment: impl FnMut(&str) -> Option<OsString>,
+) -> Result<DownloadRuntimeConfig, RuntimeConfigError> {
+    if args != ["run", "download"] {
+        return Err(RuntimeConfigError::InvalidArguments);
+    }
+    let server_url = required_text(&mut environment, SERVER_URL)?;
+    let token = required_text(&mut environment, TOKEN)?;
+    let spool_dir = required_path(&mut environment, SPOOL_DIR)?;
+    let youtube_proxy_url = required_download_proxy(&mut environment, YOUTUBE_PROXY_URL)?;
+    let client = RunnerClient::new(&server_url, token)
+        .map_err(|_| RuntimeConfigError::InvalidEnvironment(SERVER_URL))?;
+    Ok(DownloadRuntimeConfig {
+        client,
+        spool_dir,
+        youtube_proxy_url,
+    })
 }
 
 impl std::error::Error for RuntimeConfigError {}
@@ -203,6 +233,27 @@ fn required_proxy_url(
         .is_none_or(|authority| authority.is_empty() || authority.starts_with('/'))
         || value.ends_with('/')
     {
+        return Err(RuntimeConfigError::InvalidEnvironment(name));
+    }
+    let url = Url::parse(&value).map_err(|_| RuntimeConfigError::InvalidEnvironment(name))?;
+    (url.scheme() == "http"
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none())
+    .then_some(url)
+    .ok_or(RuntimeConfigError::InvalidEnvironment(name))
+}
+
+#[cfg(feature = "download")]
+fn required_download_proxy(
+    environment: &mut impl FnMut(&str) -> Option<OsString>,
+    name: &'static str,
+) -> Result<Url, RuntimeConfigError> {
+    let value = required_text(environment, name)?;
+    if value.ends_with('/') || value.contains('#') {
         return Err(RuntimeConfigError::InvalidEnvironment(name));
     }
     let url = Url::parse(&value).map_err(|_| RuntimeConfigError::InvalidEnvironment(name))?;
