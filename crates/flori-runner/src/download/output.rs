@@ -241,3 +241,71 @@ async fn copy_regular(source: &Path, target: &Path) -> Result<(), ErrorCode> {
         .map_err(|_| ErrorCode::StorageUnavailable)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{os::unix::fs::symlink, path::PathBuf};
+
+    use flori_core::{ErrorCode, RequestId};
+    use tokio::fs;
+
+    use super::{discover, one, preferred_subtitle};
+
+    fn root() -> PathBuf {
+        std::env::temp_dir().join(format!("flori-download-output-{}", RequestId::generate()))
+    }
+
+    #[tokio::test]
+    async fn rejects_symlink_and_partial_output() {
+        let root = root();
+        fs::create_dir_all(&root).await.expect("create quarantine");
+        fs::write(root.join("video.mp4.part"), b"partial")
+            .await
+            .expect("write partial");
+        assert_eq!(
+            discover(&root, 8).await.err(),
+            Some(ErrorCode::ArtifactInvalidPath)
+        );
+        fs::remove_file(root.join("video.mp4.part"))
+            .await
+            .expect("remove partial");
+        fs::write(root.join("outside.mp4"), b"video")
+            .await
+            .expect("write video");
+        symlink(root.join("outside.mp4"), root.join("linked.mp4")).expect("create symlink");
+        assert_eq!(
+            discover(&root, 8).await.err(),
+            Some(ErrorCode::ArtifactInvalidPath)
+        );
+        fs::remove_dir_all(root).await.expect("remove quarantine");
+    }
+
+    #[tokio::test]
+    async fn rejects_file_count_and_multiple_videos() {
+        let root = root();
+        fs::create_dir_all(&root).await.expect("create quarantine");
+        fs::write(root.join("one.mp4"), b"one")
+            .await
+            .expect("write first video");
+        fs::write(root.join("two.mp4"), b"two")
+            .await
+            .expect("write second video");
+        assert_eq!(
+            discover(&root, 1).await.err(),
+            Some(ErrorCode::ArtifactTooLarge)
+        );
+        let output = discover(&root, 2).await.expect("discover two videos");
+        assert_eq!(one(&output.videos).err(), Some(ErrorCode::ExecutorFailed));
+        fs::remove_dir_all(root).await.expect("remove quarantine");
+    }
+
+    #[tokio::test]
+    async fn prefers_chinese_then_english_subtitles() {
+        let paths = [
+            PathBuf::from("video.en.srt"),
+            PathBuf::from("video.ja.srt"),
+            PathBuf::from("video.zh-Hans.srt"),
+        ];
+        assert_eq!(preferred_subtitle(&paths), Some(&paths[2]));
+    }
+}
