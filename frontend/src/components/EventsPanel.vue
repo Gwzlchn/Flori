@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 
 import { apiClient, apiError, type components } from "../api/client";
 
@@ -13,9 +13,12 @@ interface EventLine {
 }
 
 const events = ref<EventLine[]>([]);
+const filter = ref("");
 const status = ref("正在连接事件流…");
 let cursor = 0;
 let controller: AbortController | undefined;
+const kinds = computed(() => [...new Set(events.value.map((event) => event.kind))].sort());
+const visibleEvents = computed(() => filter.value ? events.value.filter((event) => event.kind === filter.value) : events.value);
 
 function label(kind: string): string {
   switch (kind) {
@@ -107,7 +110,14 @@ onUnmounted(() => controller?.abort());
         </p><h2 id="events-title">
           {{ jobId ? "当前 Job 事件" : "系统事件" }}
         </h2>
-      </div><span>{{ events.length }} / 80</span>
+      </div><label>筛选<select v-model="filter">
+        <option value="">全部事件</option>
+        <option
+          v-for="kind in kinds"
+          :key="kind"
+          :value="kind"
+        >{{ label(kind) }}</option>
+      </select></label><span>{{ visibleEvents.length }} / {{ events.length }}</span>
     </header>
     <p
       class="event-status"
@@ -115,9 +125,9 @@ onUnmounted(() => controller?.abort());
     >
       {{ status }}
     </p>
-    <ol v-if="events.length">
+    <ol v-if="visibleEvents.length">
       <li
-        v-for="item in events"
+        v-for="item in visibleEvents"
         :key="item.cursor"
       >
         <span
@@ -140,7 +150,8 @@ onUnmounted(() => controller?.abort());
 .event-panel { overflow: hidden; }
 header { display: flex; align-items: end; justify-content: space-between; padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
 header p, header h2 { margin-bottom: 0; }
-header > span, small { color: var(--muted); font-size: 11px; }
+header > span, header label, small { color: var(--muted); font-size: 11px; }
+header label { display: flex; gap: 5px; align-items: center; margin-left: auto; }header select { max-width: 150px; border: 1px solid var(--line); border-radius: 5px; background: white; }
 .event-status { margin: 0; padding: 8px 16px; color: var(--brand-dark); background: var(--brand-soft); font-size: 12px; }
 ol { display: grid; max-height: 430px; margin: 0; padding: 0; overflow: auto; list-style: none; }
 li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line-soft); }
