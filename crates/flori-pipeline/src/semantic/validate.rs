@@ -10,7 +10,13 @@ pub(super) fn validate_core_input(
             (ArtifactKind::Figure, false),
             (ArtifactKind::TableRegion, false),
         ],
+        "source" if producer.executor == Executor::VideoFrames => &[(ArtifactKind::Keyframe, true)],
         "notes" if producer.executor == Executor::AiDocumentNote => &[
+            (ArtifactKind::SmartNote, true),
+            (ArtifactKind::Summary, true),
+            (ArtifactKind::Terms, true),
+        ],
+        "notes" if producer.executor == Executor::AiVideoNote => &[
             (ArtifactKind::SmartNote, true),
             (ArtifactKind::Summary, true),
             (ArtifactKind::Terms, true),

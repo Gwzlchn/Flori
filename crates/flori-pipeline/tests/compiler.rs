@@ -2,6 +2,7 @@ use flori_core::ErrorCode;
 use flori_pipeline::compile;
 
 const PDF: &str = include_str!("../../../pipelines/pdf.yml");
+const VIDEO: &str = include_str!("../../../pipelines/video.yml");
 
 #[test]
 fn compiles_pdf_deterministically() {
@@ -30,6 +31,43 @@ fn compiles_pdf_deterministically() {
         assert_eq!(spec.executor, task.executor);
         assert_eq!(bindings.executor(), task.executor);
         assert!(bindings.is_valid());
+    }
+}
+
+#[test]
+fn compiles_video_artifact_sets_and_references() {
+    let compilation = compile("video", VIDEO.as_bytes()).expect("valid video pipeline");
+    assert_eq!(
+        compilation.pipeline.topological_order,
+        [
+            "acquire",
+            "transcribe",
+            "frames",
+            "mechanical",
+            "note",
+            "validate",
+            "publish"
+        ]
+    );
+    for task in compilation.pipeline.tasks.values() {
+        let (spec, bindings) = task.freeze_for_job().expect("freeze video task");
+        assert_eq!(spec.executor, task.executor);
+        assert!(bindings.is_valid());
+    }
+    for yaml in [
+        VIDEO.replacen("kind: keyframe", "kind: figure", 1),
+        VIDEO.replacen(
+            "required: true, when: on_success, max_files: 12",
+            "required: false, when: on_success, max_files: 12",
+            1,
+        ),
+        VIDEO.replacen("source: $needs.frames", "source: $needs.transcribe", 1),
+        VIDEO.replacen("notes: $needs.note", "notes: $needs.mechanical", 1),
+    ] {
+        assert_eq!(
+            compile("video", yaml.as_bytes()).unwrap_err().code(),
+            ErrorCode::PipelineInvalid
+        );
     }
 }
 
