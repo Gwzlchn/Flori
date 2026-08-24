@@ -25,7 +25,7 @@ rustix = { version = "=1.1.4", default-features = false, features = ["fs", "proc
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 serde_yaml_ng = "=0.10.0"
-sha2 = "=0.11.0"
+sha2 = "=0.10.9"
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "macros"] }
 tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "=0.7.19", features = ["io"] }

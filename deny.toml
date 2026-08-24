@@ -19,8 +19,12 @@ allow = [
 ]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
+skip = [
+  { crate = "hashbrown@0.16.1", reason = "sqlx 0.9 and hashlink 0.11 still require this release" },
+  { crate = "syn@2.0.119", reason = "sqlx and lol_html macros have not converged on syn 3" },
+]
 
 [sources]
 unknown-registry = "deny"

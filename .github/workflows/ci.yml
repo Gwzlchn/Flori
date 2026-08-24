@@ -12,24 +12,30 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  actions: read
   contents: read
 
 env:
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: rust-vnext
 
 jobs:
-  check:
+  complexity:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
-          components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Resolve diff base
         id: diff-base
         env:
@@ -69,59 +75,163 @@ jobs:
             done < <(git rev-list --reverse "$BASE..$head")
             git checkout --detach "$head"
           fi
+
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo xtask check
+
+  sqlx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Verify SQLx offline metadata
         run: |
           cargo install sqlx-cli --version 0.9.0 --locked --no-default-features --features sqlite
           sqlite3 "$RUNNER_TEMP/flori-sqlx.db" ".read crates/flori-store/migrations/0001_v1.sql"
           DATABASE_URL="sqlite://$RUNNER_TEMP/flori-sqlx.db" cargo sqlx prepare --check --workspace -- --all-targets
-      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: 1.95.0
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo xtask test
 
   integration:
-    needs: [check, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo xtask integration foundation
 
   image:
-    needs: [check, test]
+    name: image / ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - server
-          - runner-media
-          - runner-ai-qoder
-          - runner-ai-codex
-          - edge
+        include:
+          - name: server
+            dockerfile: docker/server.Dockerfile
+            context: .
+            target: ""
+          - name: runner-media
+            dockerfile: docker/runner-media.Dockerfile
+            context: .
+            target: ""
+          - name: runner-ai-qoder
+            dockerfile: docker/runner-ai-qoder.Dockerfile
+            context: .
+            target: ""
+          - name: runner-ai-codex
+            dockerfile: docker/runner-ai-codex.Dockerfile
+            context: .
+            target: ""
+          - name: edge
+            dockerfile: frontend/Dockerfile
+            context: frontend
+            target: edge
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-        with:
-          install: true
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
-      - name: Build ${{ matrix.target }} image
-        run: cargo xtask image "${{ matrix.target }}"
-      - name: Verify warm ${{ matrix.target }} build within 120 seconds
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build ${{ matrix.name }} image
         env:
-          FLORI_IMAGE_MAX_SECONDS: 120
-        run: cargo xtask image "${{ matrix.target }}"
+          IMAGE_NAME: ${{ matrix.name }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          CONTEXT: ${{ matrix.context }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          args=(
+            build
+            --file "$DOCKERFILE"
+            --cache-from "type=gha,scope=flori-$IMAGE_NAME"
+            --cache-to "type=gha,mode=max,scope=flori-$IMAGE_NAME"
+            --output type=cacheonly
+            --tag "flori-$IMAGE_NAME:local"
+          )
+          if [ -n "$TARGET" ]; then
+            args+=(--target "$TARGET")
+          fi
+          docker buildx "${args[@]}" "$CONTEXT"
+
+  pipeline-time:
+    name: pipeline-time
+    if: always()
+    needs: [complexity, check, sqlx, deny, test, integration, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Report and enforce required execution time
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jobs="$RUNNER_TEMP/jobs.json"
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs' | jq -s '{jobs: add}' > "$jobs"
+          report="$(jq -r '
+            def required:
+              .name == "complexity" or .name == "check" or .name == "sqlx" or
+              .name == "deny" or .name == "test" or .name == "integration" or
+              (.name | startswith("image / "));
+            [.jobs[] | select(required)] as $jobs |
+            [$jobs[] | . + {seconds: ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601))}] as $timed |
+            [$timed[].started_at | fromdateiso8601] | min as $first |
+            [$timed[].completed_at | fromdateiso8601] | max as $last |
+            ($timed | max_by(.seconds)) as $slow_job |
+            ([$timed[] as $job | $job.steps[] |
+              select(.started_at != null and .completed_at != null) |
+              {job: $job.name, name, seconds: ((.completed_at | fromdateiso8601) - (.started_at | fromdateiso8601))}]
+              | max_by(.seconds)) as $slow_step |
+            "count=\($jobs | length)\n" +
+            "failed=\([$jobs[] | select(.conclusion != "success")] | length)\n" +
+            "span=\($last - $first)\n" +
+            "slow_job=\($slow_job.name)\nslow_job_seconds=\($slow_job.seconds)\n" +
+            "slow_step=\($slow_step.job) / \($slow_step.name)\nslow_step_seconds=\($slow_step.seconds)"
+          ' "$jobs")"
+          echo "$report"
+          count="$(sed -n 's/^count=//p' <<< "$report")"
+          failed="$(sed -n 's/^failed=//p' <<< "$report")"
+          span="$(sed -n 's/^span=//p' <<< "$report")"
+          {
+            echo "## Required pipeline timing"
+            echo
+            echo "- Required validation jobs: $count/11"
+            echo "- StartedAt to completedAt: ${span}s / 120s"
+            echo "- Slowest job: $(sed -n 's/^slow_job=//p' <<< "$report") ($(sed -n 's/^slow_job_seconds=//p' <<< "$report")s)"
+            echo "- Slowest step: $(sed -n 's/^slow_step=//p' <<< "$report") ($(sed -n 's/^slow_step_seconds=//p' <<< "$report")s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$count" -eq 11
+          test "$failed" -eq 0
+          test "$span" -le 120

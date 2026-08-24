@@ -201,7 +201,7 @@ async fn validate_file(
     }
     if actual_size != size_bytes
         || !prefix[expected.2..].starts_with(expected.1)
-        || digest_bytes(hasher.finalize().as_slice()) != request.file_sha256
+        || digest_bytes(hasher.finalize().as_ref()) != request.file_sha256
     {
         return Err(HttpError::new(ErrorCode::DigestMismatch));
     }
@@ -209,7 +209,7 @@ async fn validate_file(
 }
 
 fn digest(bytes: &[u8]) -> Sha256Digest {
-    digest_bytes(Sha256::digest(bytes).as_slice())
+    digest_bytes(Sha256::digest(bytes).as_ref())
 }
 
 fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
