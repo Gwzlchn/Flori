@@ -52,7 +52,7 @@ pub(super) async fn detect_scenes(
             boundaries.push(millis);
         }
     }
-    boundaries.push(duration_ms);
+    close_timeline(&mut boundaries, duration_ms);
     Ok(boundaries
         .windows(2)
         .filter_map(|values| {
@@ -62,6 +62,13 @@ pub(super) async fn detect_scenes(
             })
         })
         .collect())
+}
+
+fn close_timeline(boundaries: &mut Vec<u64>, duration_ms: u64) {
+    match boundaries.last_mut() {
+        Some(last) if duration_ms.saturating_sub(*last) < MIN_SCENE_MS => *last = duration_ms,
+        _ => boundaries.push(duration_ms),
+    }
 }
 
 fn seconds_to_millis(value: &str) -> Result<u64, VideoMediaError> {
@@ -87,12 +94,19 @@ fn seconds_to_millis(value: &str) -> Result<u64, VideoMediaError> {
 
 #[cfg(test)]
 mod tests {
-    use super::seconds_to_millis;
+    use super::{close_timeline, seconds_to_millis};
 
     #[test]
     fn parses_bounded_ffmpeg_timestamps() {
         assert_eq!(seconds_to_millis("12.34567"), Ok(12_345));
         assert!(seconds_to_millis("1e3").is_err());
         assert!(seconds_to_millis("-1.0").is_err());
+    }
+
+    #[test]
+    fn merges_an_undecodable_short_tail_into_the_previous_scene() {
+        let mut boundaries = vec![0, 697_238];
+        close_timeline(&mut boundaries, 697_301);
+        assert_eq!(boundaries, vec![0, 697_301]);
     }
 }
