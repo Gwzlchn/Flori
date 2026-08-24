@@ -149,21 +149,23 @@ pub(super) async fn run(case: Case, mode: Mode) {
         download.take().expect("download runner").stop().await;
     }
     let (media_stop, mut media_cancel) = watch::channel(false);
-    let media_task = tokio::spawn(async move {
+    let mut media_task = tokio::spawn(async move {
         run_media_daemon(&media, &pdf_config, &media_config, &mut media_cancel).await
     });
-    http::wait_task_for(
-        &pool,
-        job.job_id,
-        "note",
-        "ready",
-        if mode == Mode::External {
-            Duration::from_secs(300)
-        } else {
-            Duration::from_secs(10)
-        },
-    )
-    .await;
+    tokio::select! {
+        result = &mut media_task => panic!("media daemon stopped early: {result:?}"),
+        () = http::wait_task_for(
+            &pool,
+            job.job_id,
+            "note",
+            "ready",
+            if mode == Mode::External {
+                Duration::from_secs(300)
+            } else {
+                Duration::from_secs(10)
+            },
+        ) => {},
+    }
 
     let transcript = sqlx::query(
         "SELECT a.relative_path FROM artifacts a WHERE a.job_id=? AND a.kind='transcript'",

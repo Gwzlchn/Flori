@@ -1,5 +1,9 @@
 use std::{
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -70,7 +74,15 @@ async fn supervise(
     let exec_id = claim.exec_id;
     let mut lease_deadline = deadline(claim.lease_expires_at_ms)?;
     let (stop, receiver) = watch::channel(false);
-    let mut execution = Box::pin(execute(client, config, video, claim, receiver));
+    let terminalizing = Arc::new(AtomicBool::new(false));
+    let mut execution = Box::pin(execute(
+        client,
+        config,
+        video,
+        claim,
+        receiver,
+        Arc::clone(&terminalizing),
+    ));
     loop {
         tokio::select! {
             result = &mut execution => return result,
@@ -79,6 +91,12 @@ async fn supervise(
                 client.renew(exec_id).await
             } => match result {
                 Ok(renewed) => lease_deadline = deadline(renewed.lease_expires_at_ms)?,
+                Err(error)
+                    if error.code() == ErrorCode::StaleAttempt
+                        && terminalizing.load(Ordering::Acquire) =>
+                {
+                    return execution.await;
+                }
                 Err(error) => {
                     let _ = stop.send(true);
                     let _ = execution.await;
@@ -105,9 +123,19 @@ async fn execute(
     video: Option<&VideoDaemonConfig>,
     claim: TaskClaim,
     mut cancel: watch::Receiver<bool>,
+    terminalizing: Arc<AtomicBool>,
 ) -> Result<(), ErrorCode> {
     let workspace = config.work_root.join(claim.exec_id.to_string());
-    let result = execute_inner(client, config, video, &claim, &workspace, &mut cancel).await;
+    let result = execute_inner(
+        client,
+        config,
+        video,
+        &claim,
+        &workspace,
+        &mut cancel,
+        &terminalizing,
+    )
+    .await;
     match fs::remove_dir_all(&workspace).await {
         Ok(()) => result,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => result,
@@ -123,30 +151,31 @@ async fn execute_inner(
     claim: &TaskClaim,
     workspace: &Path,
     cancel: &mut watch::Receiver<bool>,
+    terminalizing: &AtomicBool,
 ) -> Result<(), ErrorCode> {
     let task_kind = match claim.executor {
         Executor::DocumentAcquire | Executor::DocumentExtract => {
             if let Err(code) = claim::validate(claim) {
-                return fail(client, claim, code).await;
+                return fail(client, claim, code, terminalizing).await;
             }
             "PDF"
         }
         Executor::VideoTranscribe | Executor::VideoFrames | Executor::VideoMechanicalNote => {
             let Some(_) = video else {
-                return fail(client, claim, ErrorCode::CorruptState).await;
+                return fail(client, claim, ErrorCode::CorruptState, terminalizing).await;
             };
             if let Err(code) = video_claim::validate(claim) {
-                return fail(client, claim, code).await;
+                return fail(client, claim, code, terminalizing).await;
             }
             "Video"
         }
-        _ => return fail(client, claim, ErrorCode::CorruptState).await,
+        _ => return fail(client, claim, ErrorCode::CorruptState, terminalizing).await,
     };
     if fs::create_dir(workspace).await.is_err() {
-        return fail(client, claim, ErrorCode::StorageUnavailable).await;
+        return fail(client, claim, ErrorCode::StorageUnavailable, terminalizing).await;
     }
     if let Err(code) = task_log::started(client, claim, task_kind).await {
-        return fail(client, claim, code).await;
+        return fail(client, claim, code, terminalizing).await;
     }
     let timeout = tokio::time::sleep(Duration::from_millis(claim.timeout_ms));
     tokio::pin!(timeout);
@@ -177,6 +206,7 @@ async fn execute_inner(
         Ok(entries) => {
             let digest = manifest_sha256(claim.job_id, claim.task_id, claim.exec_id, entries)
                 .map_err(|error| error.code())?;
+            terminalizing.store(true, Ordering::Release);
             let ack = client
                 .complete(claim.exec_id, digest)
                 .await
@@ -186,7 +216,7 @@ async fn execute_inner(
             }
             Ok(())
         }
-        Err(code) => fail(client, claim, code).await,
+        Err(code) => fail(client, claim, code, terminalizing).await,
     }
 }
 
@@ -194,7 +224,9 @@ async fn fail(
     client: &RunnerClient,
     claim: &TaskClaim,
     error_code: ErrorCode,
+    terminalizing: &AtomicBool,
 ) -> Result<(), ErrorCode> {
+    terminalizing.store(true, Ordering::Release);
     let ack = client
         .fail(
             claim.exec_id,
