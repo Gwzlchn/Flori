@@ -81,12 +81,14 @@ async fn replayed_usage_never_spawns_and_daemon_continues_after_failure() {
     );
     let client = RunnerClient::new(&base_url, "runner-token").expect("client");
     let config = config(&root, executable, Duration::from_secs(1));
-    let (_keep, mut cancel) = watch::channel(false);
-    assert_eq!(
-        run_ai_daemon(&client, &config, &mut cancel).await,
-        Err(flori_core::ErrorCode::NetworkTemporary)
-    );
-    let audit = server.join().expect("server");
+    let (stop, mut cancel) = watch::channel(false);
+    let daemon = tokio::spawn(async move { run_ai_daemon(&client, &config, &mut cancel).await });
+    let audit = tokio::task::spawn_blocking(move || server.join().expect("server"))
+        .await
+        .expect("server join");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    stop.send(true).expect("stop daemon");
+    assert_eq!(daemon.await.expect("daemon join"), Ok(()));
     assert!(audit.usage_invocation_keys.is_empty());
     assert!(audit.redacted_arguments.is_empty());
     assert!(!marker.exists(), "idempotent replay must not spawn CLI");

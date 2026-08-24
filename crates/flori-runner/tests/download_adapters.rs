@@ -39,8 +39,8 @@ fn youtube_uses_only_its_explicit_proxy_and_cookie_path() {
             .windows(2)
             .any(|pair| pair == ["--sub-langs", "zh-Hans,zh-Hant,zh,en"])
     );
-    assert!(!arguments.iter().any(|value| *value == "--write-auto-subs"));
-    assert!(!arguments.iter().any(|value| *value == "--max-downloads"));
+    assert!(!arguments.contains(&"--write-auto-subs"));
+    assert!(!arguments.contains(&"--max-downloads"));
     assert_eq!(
         arguments.last(),
         Some(&"https://www.youtube.com/watch?v=dQw4w9WgXcQ")

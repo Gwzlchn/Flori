@@ -61,7 +61,7 @@ async fn upload_pdf_uses_authenticated_content_and_streams_output() {
         ),
         root.script("python", "exit 1"),
     );
-    run_until_server_closes(&base, &config).await;
+    run_until_server_closes(&base, &config, &server).await;
     let uploads = server.join().expect("server");
     assert_eq!(uploads.len(), 1);
     assert_eq!(uploads[0].name, "original");
@@ -116,7 +116,7 @@ EOF"#,
         root.script("unused-text", "exit 1"),
         python,
     );
-    run_until_server_closes(&base, &config).await;
+    run_until_server_closes(&base, &config, &server).await;
     let uploads = server.join().expect("server");
     assert_eq!(uploads.len(), 3);
     let output = uploads
@@ -138,13 +138,30 @@ EOF"#,
     );
 }
 
-async fn run_until_server_closes(base: &str, config: &PdfDaemonConfig) {
+async fn run_until_server_closes<T>(
+    base: &str,
+    config: &PdfDaemonConfig,
+    server: &std::thread::JoinHandle<T>,
+) {
     let client = RunnerClient::new(base, "runner-token").expect("client");
-    let (_keep, mut cancel) = watch::channel(false);
-    assert_eq!(
-        run_pdf_daemon(&client, config, &mut cancel).await,
-        Err(ErrorCode::NetworkTemporary)
-    );
+    let (stop, mut cancel) = watch::channel(false);
+    let mut daemon = Box::pin(run_pdf_daemon(&client, config, &mut cancel));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !server.is_finished() {
+            tokio::select! {
+                result = &mut daemon => panic!("daemon stopped early: {result:?}"),
+                () = tokio::time::sleep(Duration::from_millis(10)) => {},
+            }
+        }
+    })
+    .await
+    .expect("server completion timeout");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    stop.send(true).expect("stop daemon");
+    assert!(matches!(
+        daemon.await,
+        Ok(()) | Err(ErrorCode::TaskCanceled)
+    ));
 }
 
 fn claim(

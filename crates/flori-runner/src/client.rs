@@ -118,6 +118,14 @@ impl RunnerClient {
         self.decode(response).await.map(Some)
     }
 
+    pub(crate) async fn poll_resilient(&self) -> Result<Option<TaskClaim>, ErrorCode> {
+        match self.poll().await {
+            Ok(claim) => Ok(claim),
+            Err(error) if error.code() == ErrorCode::NetworkTemporary => Ok(None),
+            Err(error) => Err(error.code()),
+        }
+    }
+
     pub(crate) fn request(
         &self,
         method: Method,

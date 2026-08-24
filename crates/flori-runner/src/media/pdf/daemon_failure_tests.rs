@@ -25,7 +25,7 @@ async fn malformed_media_claim_fails_without_running_tools() {
         root.script("text", "exit 99"),
         root.script("python", "exit 99"),
     );
-    run_until_server_closes(&base, &config).await;
+    run_until_server_closes(&base, &config, &server).await;
     server.join().expect("server");
 }
 

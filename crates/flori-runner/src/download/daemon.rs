@@ -23,7 +23,7 @@ pub(super) async fn run(
         let claim = tokio::select! {
             biased;
             () = canceled(cancel) => return Ok(()),
-            result = client.poll() => result.map_err(|error| error.code())?,
+            result = client.poll_resilient() => result?,
         };
         match claim {
             Some(claim) => supervise(client, config, claim, cancel).await?,
