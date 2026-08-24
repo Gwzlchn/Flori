@@ -141,6 +141,25 @@ cargo xtask janitor --dry-run|--apply
 
 子 Agent 只实现、测试和报告，不改产品范围、最终版本、集成分支或生产。主 Agent 汇总 touched paths、运行并集验证、创建正式提交并回收 worktree。
 
+### 项目资源回收门
+
+WP 或独立开发项目只有在任务资源完成对账后才算结束。移除 Git worktree 本身不等于完成回收；使用独立工作目录的项目必须确认以下任务专属路径均已删除：
+
+```text
+$FLORI_WORKING_DIR/wt/<slug>
+$FLORI_WORKING_DIR/target/<slug>
+$FLORI_WORKING_DIR/tmp/<slug>
+```
+
+项目创建的临时 Docker container、network、volume、image tag 和无引用构建镜像也必须按精确名称或任务标签回收。删除前先验证所有权、引用和运行状态；只删除当前项目创建的资源。不得用全局 prune 或共享 `cargo clean` 代替精确回收，也不得触碰共享 Cargo 下载缓存、其它项目的 BuildKit cache、运行中部署、回滚镜像、业务 volume 或用户资源。全局 Docker/BuildKit 清理属于 `operate`，需要单独固定范围并授权。
+
+若调试或回滚确需暂时保留资源，最终报告必须列出 owner、用途、大小、精确路径或名称，以及到期时间或回收条件；未申报残留视为项目未收口。收口证据至少包括：
+
+1. 回收前后的 `git worktree list` 和上述三个路径的存在性检查。
+2. 按项目名称、标签或精确资源名过滤的 Docker inventory。
+3. `cargo xtask janitor --dry-run` 结果，以及未被 janitor 覆盖的任务目录对账。
+4. 回收前后的字节数或文件系统可用空间；未释放共享层时如实说明。
+
 ## 提交和记录
 
 - 一个可独立验收、可独立回滚的价值对应一个提交。

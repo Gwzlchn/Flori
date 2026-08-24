@@ -122,6 +122,6 @@ implement -> local minimum green -> deletion pass -> risk review
 
 ## 10. Close at the authorized endpoint
 
-Report the delivered value, candidate or commit, exact validation, complexity delta and remaining dependency. Check task-owned branches/worktrees before finishing and reclaim only resources created by the task.
+Report the delivered value, candidate or commit, exact validation, complexity delta and remaining dependency. Apply the authoritative [project resource recovery gate](../../../docs/vnext/development.md#项目资源回收门); removing a worktree alone is not sufficient, and only task-owned resources may be reclaimed.
 
 Never claim CI, deployment or external verification that did not run.
