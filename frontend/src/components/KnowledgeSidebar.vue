@@ -14,11 +14,14 @@ const props = defineProps<{
   selectedDomainId: string;
   selectedCollectionId: string;
   status: string;
+  collapsed: boolean;
 }>();
 const emit = defineEmits<{
   open: [jobId: string];
   select: [domainId: string, collectionId?: string];
   submit: [];
+  close: [];
+  toggle: [];
 }>();
 
 function collectionsOf(domainId: string): components["schemas"]["CollectionView"][] {
@@ -45,12 +48,20 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
       ></span>
       <span><strong>Flori</strong><small>Knowledge base</small></span>
     </a>
+    <button
+      type="button"
+      class="sidebar-close"
+      aria-label="关闭导航"
+      @click="emit('close')"
+    >
+      ×
+    </button>
     <div class="sidebar-primary">
       <button
         type="button"
         @click="emit('submit')"
       >
-        <UiIcon name="send" />投递内容
+        <UiIcon name="send" /><span>投递内容</span>
       </button>
       <span title="当前发布成果"><UiIcon
         name="archive"
@@ -157,7 +168,52 @@ const selectedLabel = computed(() => props.collections.find((item) => item.colle
       />投递到 {{ selectedLabel }}
     </button>
     <footer class="side-footer">
-      <span class="health-dot" /> Home Core 已连接
+      <span class="health-copy"><span class="health-dot" /> Home Core 已连接</span>
+      <button
+        type="button"
+        class="sidebar-toggle"
+        :aria-label="collapsed ? '展开导航' : '收起导航'"
+        :title="collapsed ? '展开导航' : '收起导航'"
+        @click="emit('toggle')"
+      >
+        <UiIcon
+          name="panel"
+          :size="16"
+        />
+      </button>
     </footer>
   </aside>
 </template>
+
+<style scoped>
+.sidebar-close, .sidebar-toggle { display: grid; place-items: center; border: 0; color: var(--muted); background: transparent; cursor: pointer; }
+.sidebar-close { position: absolute; top: 16px; right: 12px; display: none; width: 32px; height: 32px; border-radius: 5px; font-size: 22px; }
+.sidebar-close:hover, .sidebar-toggle:hover { color: var(--ink); background: var(--line-soft); }
+.side-footer { justify-content: space-between; }
+.health-copy { display: flex; gap: 7px; align-items: center; min-width: 0; }
+.sidebar-toggle { width: 30px; height: 30px; flex: none; border-radius: 5px; }
+:global(.sidebar-collapsed) .sidebar { align-items: center; padding-inline: 8px; }
+:global(.sidebar-collapsed) .brand { padding-inline: 0; }
+:global(.sidebar-collapsed) .brand span:last-child,
+:global(.sidebar-collapsed) .library-heading,
+:global(.sidebar-collapsed) .library-tree,
+:global(.sidebar-collapsed) .sidebar-upload,
+:global(.sidebar-collapsed) .health-copy,
+:global(.sidebar-collapsed) .sidebar-primary button span { display: none; }
+:global(.sidebar-collapsed) .sidebar-primary { grid-template-columns: 34px; }
+:global(.sidebar-collapsed) .sidebar-primary button { justify-content: center; padding: 0; }
+@media (max-width: 980px) {
+  .sidebar-close { display: grid; }
+  :global(.sidebar-collapsed) .sidebar { align-items: stretch; padding: 15px 12px; }
+  :global(.sidebar-collapsed) .brand { padding: 2px 8px 12px; }
+  :global(.sidebar-collapsed) .brand span:last-child,
+  :global(.sidebar-collapsed) .library-heading,
+  :global(.sidebar-collapsed) .library-tree,
+  :global(.sidebar-collapsed) .sidebar-upload,
+  :global(.sidebar-collapsed) .health-copy,
+  :global(.sidebar-collapsed) .sidebar-primary button span { display: initial; }
+  :global(.sidebar-collapsed) .sidebar-primary { grid-template-columns: minmax(0, 1fr) 34px; }
+  :global(.sidebar-collapsed) .sidebar-primary button { justify-content: flex-start; padding: 0 10px; }
+  .sidebar-toggle { display: none; }
+}
+</style>

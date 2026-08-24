@@ -1,7 +1,7 @@
 <script setup lang="ts">
 defineProps<{
   name: "archive" | "book" | "chevron" | "external" | "file" | "folder" | "image"
-    | "info" | "pipeline" | "refresh" | "search" | "send" | "settings";
+    | "info" | "menu" | "panel" | "pipeline" | "refresh" | "search" | "send" | "settings";
   size?: number;
 }>();
 </script>
@@ -58,6 +58,19 @@ defineProps<{
         cy="12"
         r="9"
       /><path d="M12 11v6M12 7h.01" />
+    </template>
+    <path
+      v-else-if="name === 'menu'"
+      d="M4 6h16M4 12h16M4 18h16"
+    />
+    <template v-else-if="name === 'panel'">
+      <rect
+        x="3"
+        y="4"
+        width="18"
+        height="16"
+        rx="2"
+      /><path d="M9 4v16" />
     </template>
     <template v-else-if="name === 'pipeline'">
       <circle

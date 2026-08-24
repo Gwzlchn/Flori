@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
+import { computed, ref, watch } from "vue";
 
 import KnowledgeSidebar from "./components/KnowledgeSidebar.vue";
 import LibraryWorkspace from "./components/LibraryWorkspace.vue";
@@ -9,9 +9,12 @@ import RerunPanel from "./components/RerunPanel.vue";
 import SearchPanel from "./components/SearchPanel.vue";
 import { useKnowledgeNavigation } from "./composables/useKnowledgeNavigation";
 import { usePdfWorkspace } from "./composables/usePdfWorkspace";
+import UiIcon from "./components/UiIcon.vue";
 
 const workspace = usePdfWorkspace();
 const library = useKnowledgeNavigation();
+const sidebarCollapsed = ref(localStorage.getItem("flori.sidebar.collapsed") === "true");
+const mobileSidebarOpen = ref(false);
 const {
   setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
   textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
@@ -35,11 +38,23 @@ function chooseContext(domainId: string, collectionId = ""): void {
   selectContext(domainId, collectionId);
   setUploadContext(domainId, collectionId);
   closeJob();
+  mobileSidebarOpen.value = false;
 }
 
 function startSubmission(): void {
   closeJob();
+  mobileSidebarOpen.value = false;
   requestAnimationFrame(() => document.querySelector("#upload")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+}
+
+function openContent(jobId: string, evidenceId?: string): void {
+  mobileSidebarOpen.value = false;
+  void openJob(jobId, evidenceId);
+}
+
+function toggleSidebar(): void {
+  sidebarCollapsed.value = !sidebarCollapsed.value;
+  localStorage.setItem("flori.sidebar.collapsed", String(sidebarCollapsed.value));
 }
 
 watch(source, (current) => {
@@ -52,7 +67,10 @@ watch(source, (current) => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div
+    class="app-shell"
+    :class="{ 'sidebar-collapsed': sidebarCollapsed, 'mobile-sidebar-open': mobileSidebarOpen }"
+  >
     <KnowledgeSidebar
       :domains="domains"
       :collections="collections"
@@ -61,19 +79,36 @@ watch(source, (current) => {
       :selected-domain-id="selectedDomainId"
       :selected-collection-id="selectedCollectionId"
       :status="libraryStatus"
-      @open="openJob"
+      :collapsed="sidebarCollapsed"
+      @open="openContent"
       @select="chooseContext"
       @submit="startSubmission"
+      @close="mobileSidebarOpen = false"
+      @toggle="toggleSidebar"
+    />
+    <button
+      type="button"
+      class="sidebar-scrim"
+      aria-label="关闭导航"
+      @click="mobileSidebarOpen = false"
     />
 
     <div class="app-main">
       <header class="topbar">
+        <button
+          type="button"
+          class="mobile-menu"
+          aria-label="打开导航"
+          @click="mobileSidebarOpen = true"
+        >
+          <UiIcon name="menu" />
+        </button>
         <div class="breadcrumb">
           <span>{{ activeDomainName }}</span><b>/</b>
           <span v-if="activeCollectionName">{{ activeCollectionName }}</span>
           <b v-if="activeCollectionName">/</b><strong>{{ job ? sourceTitle : "投递内容" }}</strong>
         </div>
-        <SearchPanel @open="openJob" />
+        <SearchPanel @open="openContent" />
       </header>
 
       <main
@@ -175,3 +210,21 @@ watch(source, (current) => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.app-shell { transition: grid-template-columns .16s ease; }
+.app-shell.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+.sidebar-scrim, .mobile-menu { display: none; }
+.mobile-menu { width: 34px; height: 34px; place-items: center; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; }
+.mobile-menu:hover { color: var(--ink); background: var(--line-soft); }
+@media (max-width: 980px) {
+  .app-shell, .app-shell.sidebar-collapsed { display: block; }
+  .app-shell :deep(.sidebar) { position: fixed; z-index: 70; top: 0; bottom: 0; left: 0; width: min(320px, 86vw); height: 100dvh; border-right: 1px solid var(--line); border-bottom: 0; box-shadow: 0 20px 60px rgb(15 15 15 / 24%); transform: translateX(-105%); transition: transform .18s ease; }
+  .app-shell.mobile-sidebar-open :deep(.sidebar) { transform: translateX(0); }
+  .sidebar-scrim { position: fixed; z-index: 60; inset: 0; width: 100%; height: 100%; border: 0; background: rgb(15 15 15 / 35%); cursor: default; }
+  .mobile-sidebar-open .sidebar-scrim, .mobile-menu { display: grid; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-shell, .app-shell :deep(.sidebar) { transition: none; }
+}
+</style>
