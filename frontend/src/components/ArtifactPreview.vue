@@ -11,8 +11,12 @@ const props = defineProps<{
   artifact: components["schemas"]["ArtifactView"];
   text: string | undefined;
   fileUrl: string | undefined;
+  active: boolean;
 }>();
-const emit = defineEmits<{ load: [artifact: components["schemas"]["ArtifactView"]] }>();
+const emit = defineEmits<{
+  load: [artifact: components["schemas"]["ArtifactView"]];
+  select: [artifactId: string];
+}>();
 
 const previewKinds = {
   source_original: "media", document_structure: "json", figure: "image", table_region: "image",
@@ -38,7 +42,9 @@ const downloading = ref(false);
 const downloadError = ref("");
 
 function open(event: Event): void {
-  if (event.currentTarget instanceof HTMLDetailsElement && event.currentTarget.open && !loaded.value && !tooLarge.value) {
+  if (!(event.currentTarget instanceof HTMLDetailsElement)) return;
+  emit("select", event.currentTarget.open ? props.artifact.artifact_id : "");
+  if (event.currentTarget.open && !loaded.value && !tooLarge.value) {
     emit("load", props.artifact);
   }
 }
@@ -76,6 +82,7 @@ async function download(): Promise<void> {
 <template>
   <details
     class="artifact-preview"
+    :open="active"
     @toggle="open"
   >
     <summary>

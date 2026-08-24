@@ -73,11 +73,11 @@ export function usePdfWorkspace() {
     history.replaceState(null, "", url);
   }
 
-  function resetEvidence(): void {
+  function resetEvidence(persist = true): void {
     evidence.value = undefined;
     activeEvidenceId.value = "";
     evidenceStatus.value = EVIDENCE_HINT;
-    remember({ evidence_id: "" });
+    if (persist) remember({ evidence_id: "" });
   }
 
   async function selectEvidence(id: string): Promise<void> {
@@ -208,13 +208,13 @@ export function usePdfWorkspace() {
     } catch { notice.value = "network_temporary: 无法连接 Flori，请手动刷新状态。"; return undefined; }
   }
 
-  async function openJob(id: string, evidenceId = ""): Promise<void> {
+  async function openJob(id: string, evidenceId = "", persist = true): Promise<void> {
     const expected = ++generation;
     stopEvents();
     clearArtifacts();
-    resetEvidence();
+    resetEvidence(persist);
     jobId.value = id;
-    remember({ job_id: id, source_id: "", view: "content" });
+    if (persist) remember({ job_id: id, source_id: "", view: "content" });
     job.value = undefined;
     source.value = undefined;
     const current = await refreshJob(expected);
@@ -223,15 +223,15 @@ export function usePdfWorkspace() {
     if (evidenceId) await selectEvidence(evidenceId);
   }
 
-  function closeJob(): void {
+  function closeJob(persist = true): void {
     generation += 1;
     stopEvents();
     clearArtifacts();
-    resetEvidence();
+    resetEvidence(persist);
     job.value = undefined;
     source.value = undefined;
     jobId.value = "";
-    remember({ job_id: "", source_id: "", view: "library" });
+    if (persist) remember({ job_id: "", source_id: "", view: "library" });
   }
 
   async function submit(): Promise<void> {

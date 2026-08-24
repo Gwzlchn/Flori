@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 
 import type { components } from "../api/client";
 import UiIcon from "./UiIcon.vue";
@@ -17,11 +17,14 @@ const props = defineProps<{
   structure: components["schemas"]["DocumentStructure"] | undefined;
   projections: components["schemas"]["HtmlVisualProjection"][] | undefined;
   fileUrls: ReadonlyMap<string, string>;
+  activeVisualId: string;
 }>();
 const emit = defineEmits<{
-  locate: [page: number, bbox: components["schemas"]["PdfRect"], label: string];
-  locateHtml: [anchor: string, label: string];
+  locate: [id: string, page: number, bbox: components["schemas"]["PdfRect"], label: string];
+  locateHtml: [id: string, anchor: string, label: string];
 }>();
+const lightbox = ref<HTMLDialogElement>();
+const previewCard = ref<VisualCard>();
 
 const cards = computed<VisualCard[]>(() => {
   const result: VisualCard[] = [];
@@ -43,18 +46,25 @@ const cards = computed<VisualCard[]>(() => {
   }
   return result;
 });
-function jumpTo(card: VisualCard): void {
-  document.getElementById(`visual-${card.meta.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
 function projectionOf(card: VisualCard): components["schemas"]["HtmlVisualProjection"] | undefined {
   const kind = card.category === "Figure" ? "figure" : "table_region";
   return props.projections?.find((item) => item.kind === kind && item.artifact_name === card.meta.artifact_name);
 }
-function locate(card: VisualCard): void {
+function activate(card: VisualCard, scroll = false): void {
+  if (scroll) document.getElementById(`visual-${card.meta.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   const projection = projectionOf(card);
   if (projection?.status === "verified" && projection.html_anchor) {
-    emit("locateHtml", projection.html_anchor, card.meta.caption);
-  } else emit("locate", card.meta.page, card.meta.bbox, card.meta.caption);
+    emit("locateHtml", card.meta.id, projection.html_anchor, card.meta.caption);
+  } else emit("locate", card.meta.id, card.meta.page, card.meta.bbox, card.meta.caption);
+}
+function selectOffset(offset: number): void {
+  const index = Math.max(0, cards.value.findIndex((card) => card.meta.id === props.activeVisualId));
+  const target = cards.value[(index + offset + cards.value.length) % cards.value.length];
+  if (target) activate(target, true);
+}
+function preview(card: VisualCard): void {
+  previewCard.value = card;
+  lightbox.value?.showModal();
 }
 function sourceLabel(card: VisualCard): string {
   const projection = projectionOf(card);
@@ -64,6 +74,10 @@ function sourceLabel(card: VisualCard): string {
   return "PDF 原文";
 }
 function coordinate(value: number): string { return value.toFixed(1); }
+watch(() => [props.activeVisualId, cards.value, props.projections] as const, () => {
+  const card = cards.value.find((item) => item.meta.id === props.activeVisualId);
+  if (card) activate(card);
+}, { immediate: true, deep: true });
 </script>
 
 <template>
@@ -78,11 +92,26 @@ function coordinate(value: number): string { return value.toFixed(1); }
       <p class="eyebrow">
         图表目录
       </p>
+      <div class="visual-nav">
+        <button
+          type="button"
+          @click="selectOffset(-1)"
+        >
+          上一项
+        </button>
+        <button
+          type="button"
+          @click="selectOffset(1)"
+        >
+          下一项
+        </button>
+      </div>
       <button
         v-for="card in cards"
         :key="card.meta.id"
         type="button"
-        @click="jumpTo(card)"
+        :aria-current="activeVisualId === card.meta.id ? 'true' : undefined"
+        @click="activate(card, true)"
       >
         <span>{{ card.category }} {{ card.sequence }} · {{ card.meta.id }}</span>
         <small>{{ card.meta.caption }}</small>
@@ -94,6 +123,7 @@ function coordinate(value: number): string { return value.toFixed(1); }
         :id="`visual-${card.meta.id}`"
         :key="card.meta.id"
         class="visual-card"
+        :class="{ 'is-active': activeVisualId === card.meta.id }"
       >
         <header>
           <div>
@@ -105,7 +135,7 @@ function coordinate(value: number): string { return value.toFixed(1); }
           <button
             type="button"
             class="btn secondary compact"
-            @click="locate(card)"
+            @click="activate(card)"
           >
             <UiIcon
               name="external"
@@ -113,11 +143,18 @@ function coordinate(value: number): string { return value.toFixed(1); }
             />{{ sourceLabel(card) }}
           </button>
         </header>
-        <img
+        <button
           v-if="card.artifact && fileUrls.get(card.artifact.artifact_id)"
-          :src="fileUrls.get(card.artifact.artifact_id)"
-          :alt="card.meta.caption"
+          type="button"
+          class="visual-image"
+          :aria-label="`放大查看 ${card.meta.caption}`"
+          @click="preview(card)"
         >
+          <img
+            :src="fileUrls.get(card.artifact.artifact_id)"
+            :alt="card.meta.caption"
+          >
+        </button>
         <p class="visual-caption">
           {{ card.meta.caption }}
         </p>
@@ -139,6 +176,25 @@ function coordinate(value: number): string { return value.toFixed(1); }
         </dl>
       </article>
     </div>
+    <dialog
+      ref="lightbox"
+      class="visual-lightbox"
+      @click.self="lightbox?.close()"
+    >
+      <button
+        type="button"
+        aria-label="关闭图表预览"
+        @click="lightbox?.close()"
+      >
+        ×
+      </button>
+      <img
+        v-if="previewCard?.artifact && fileUrls.get(previewCard.artifact.artifact_id)"
+        :src="fileUrls.get(previewCard.artifact.artifact_id)"
+        :alt="previewCard.meta.caption"
+      >
+      <p>{{ previewCard?.meta.caption }}</p>
+    </dialog>
   </div>
   <p
     v-else
@@ -147,3 +203,14 @@ function coordinate(value: number): string { return value.toFixed(1); }
     没有提取到 Figure 或 Table 区域。
   </p>
 </template>
+
+<style scoped>
+.visual-nav { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.visual-nav button { justify-content: center; color: var(--muted); border: 1px solid var(--line); background: white; }
+.visual-catalog button[aria-current="true"], .visual-card.is-active { border-color: #a8cef0; background: var(--brand-soft); }
+.visual-text { max-height: 12em; overflow: auto; color: var(--muted); white-space: pre-wrap; }
+.visual-image { width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; }
+.visual-lightbox { width: min(1080px, 92vw); max-height: 90vh; padding: 38px 18px 18px; border: 0; border-radius: 8px; background: white; box-shadow: 0 20px 80px rgb(0 0 0 / 32%); }
+.visual-lightbox::backdrop { background: rgb(20 20 20 / 66%); }.visual-lightbox > button { position: absolute; top: 8px; right: 10px; border: 0; background: transparent; font-size: 24px; cursor: pointer; }
+.visual-lightbox img { display: block; max-width: 100%; max-height: 74vh; margin: auto; object-fit: contain; }.visual-lightbox p { margin: 10px auto 0; max-width: 82ch; }
+</style>

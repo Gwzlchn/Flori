@@ -12,8 +12,12 @@ const props = defineProps<{
   artifacts: components["schemas"]["ArtifactView"][];
   textContent: ReadonlyMap<string, string>;
   fileUrls: ReadonlyMap<string, string>;
+  selectedArtifactId: string;
 }>();
-const emit = defineEmits<{ loadArtifact: [artifact: components["schemas"]["ArtifactView"]] }>();
+const emit = defineEmits<{
+  loadArtifact: [artifact: components["schemas"]["ArtifactView"]];
+  artifactChange: [artifactId: string];
+}>();
 
 const labels: Record<string, string> = {
   acquire: "获取原文", extract: "解析文档", note: "生成智能笔记", translate: "全文翻译",
@@ -131,7 +135,9 @@ function originLabel(origin?: components["schemas"]["UsageOrigin"] | null): stri
               :artifact="artifact"
               :text="textContent.get(artifact.artifact_id)"
               :file-url="fileUrls.get(artifact.artifact_id)"
+              :active="selectedArtifactId === artifact.artifact_id"
               @load="emit('loadArtifact', $event)"
+              @select="emit('artifactChange', $event)"
             />
           </div>
         </div>

@@ -82,13 +82,24 @@ function close(): void { submittedQuery.value = ""; }
 function closeOutside(event: MouseEvent): void {
   if (root.value && event.target instanceof Node && !root.value.contains(event.target)) close();
 }
+function restoreQuery(): void {
+  const saved = new URL(window.location.href).searchParams.get("q") ?? "";
+  if (saved === query.value) return;
+  query.value = saved;
+  if (saved) void search();
+  else { requestSequence += 1; submittedQuery.value = ""; results.value = []; }
+}
 
 onMounted(() => {
   document.addEventListener("click", closeOutside);
+  window.addEventListener("popstate", restoreQuery);
   const saved = new URL(window.location.href).searchParams.get("q");
   if (saved !== null) { query.value = saved; void search(); }
 });
-onBeforeUnmount(() => document.removeEventListener("click", closeOutside));
+onBeforeUnmount(() => {
+  document.removeEventListener("click", closeOutside);
+  window.removeEventListener("popstate", restoreQuery);
+});
 </script>
 
 <template>

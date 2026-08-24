@@ -28,9 +28,20 @@ const props = defineProps<{
   status: string;
   textContent: ReadonlyMap<string, string>;
   fileUrls: ReadonlyMap<string, string>;
+  tab: ReaderTab;
+  selectedTaskKey: string;
+  selectedArtifactId: string;
+  selectedVisualId: string;
 }>();
-const emit = defineEmits<{ select: [evidenceId: string]; refresh: []; loadArtifact: [artifact: components["schemas"]["ArtifactView"]] }>();
-const tab = ref<ReaderTab>("artifacts");
+const emit = defineEmits<{
+  select: [evidenceId: string];
+  refresh: [];
+  loadArtifact: [artifact: components["schemas"]["ArtifactView"]];
+  tabChange: [tab: ReaderTab];
+  taskChange: [taskKey: string];
+  artifactChange: [artifactId: string];
+  visualChange: [visualId: string];
+}>();
 const visualLocation = ref<VisualLocation>();
 const visualHtml = ref<{ anchor: string; label: string }>();
 
@@ -55,16 +66,18 @@ const representationLabel = computed(() => showHtml.value
   ? htmlView.value?.provider === "arxiv" ? "arXiv HTML" : "ar5iv HTML"
   : "PDF canonical evidence");
 
-function locateVisual(page: number, bbox: components["schemas"]["PdfRect"], label: string): void {
+function locateVisual(id: string, page: number, bbox: components["schemas"]["PdfRect"], label: string, notify = true): void {
   visualHtml.value = undefined;
   visualLocation.value = { page, bbox, label };
+  if (notify) emit("visualChange", id);
 }
-function locateHtml(anchor: string, label: string): void {
+function locateHtml(id: string, anchor: string, label: string, notify = true): void {
   visualLocation.value = undefined;
   visualHtml.value = { anchor, label };
+  if (notify) emit("visualChange", id);
 }
 function selectTab(id: ReaderTab): void {
-  tab.value = id;
+  emit("tabChange", id);
   if (id !== "visuals") return;
   for (const artifact of props.job.artifacts) {
     if (artifact.kind === "figure" || artifact.kind === "table_region") emit("loadArtifact", artifact);
@@ -96,7 +109,7 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; vi
           :key="item.id"
           type="button"
           role="tab"
-          :aria-selected="tab === item.id"
+          :aria-selected="props.tab === item.id"
           :aria-controls="`panel-${item.id}`"
           @click="selectTab(item.id)"
         >
@@ -111,7 +124,7 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; vi
     <div class="reader-layout">
       <div class="reader-content">
         <section
-          v-if="tab === 'artifacts'"
+          v-if="props.tab === 'artifacts'"
           id="panel-artifacts"
           role="tabpanel"
           aria-labelledby="tab-artifacts"
@@ -170,13 +183,17 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; vi
             mode="artifacts"
             :text-content="textContent"
             :file-urls="fileUrls"
+            :selected-task-key="selectedTaskKey"
+            :selected-artifact-id="selectedArtifactId"
             @load-artifact="emit('loadArtifact', $event)"
             @refresh="emit('refresh')"
+            @task-change="emit('taskChange', $event)"
+            @artifact-change="emit('artifactChange', $event)"
           />
         </section>
 
         <section
-          v-else-if="tab === 'visuals'"
+          v-else-if="props.tab === 'visuals'"
           id="panel-visuals"
           role="tabpanel"
           aria-labelledby="tab-visuals"
@@ -194,20 +211,25 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; vi
             :structure="documentView?.structure"
             :projections="htmlView?.visuals"
             :file-urls="fileUrls"
+            :active-visual-id="selectedVisualId"
             @locate="locateVisual"
             @locate-html="locateHtml"
           />
         </section>
 
         <JobPanel
-          v-else-if="tab === 'pipeline'"
+          v-else-if="props.tab === 'pipeline'"
           id="panel-pipeline"
           :job="job"
           mode="pipeline"
           :text-content="textContent"
           :file-urls="fileUrls"
+          :selected-task-key="selectedTaskKey"
+          :selected-artifact-id="selectedArtifactId"
           @load-artifact="emit('loadArtifact', $event)"
           @refresh="emit('refresh')"
+          @task-change="emit('taskChange', $event)"
+          @artifact-change="emit('artifactChange', $event)"
         />
 
         <MetadataPanel

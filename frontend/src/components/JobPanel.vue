@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed } from "vue";
 
 import type { components } from "../api/client";
 import ArtifactPreview from "./ArtifactPreview.vue";
@@ -11,12 +11,15 @@ const props = defineProps<{
   mode: "pipeline" | "artifacts";
   textContent: ReadonlyMap<string, string>;
   fileUrls: ReadonlyMap<string, string>;
+  selectedTaskKey: string;
+  selectedArtifactId: string;
 }>();
-defineEmits<{
+const emit = defineEmits<{
   refresh: [];
   loadArtifact: [artifact: components["schemas"]["ArtifactView"]];
+  taskChange: [taskKey: string];
+  artifactChange: [artifactId: string];
 }>();
-const selectedTaskKey = ref("");
 
 const orderedTasks = computed(() => {
   const remaining = [...props.job.tasks];
@@ -31,12 +34,11 @@ const orderedTasks = computed(() => {
   }
   return ordered;
 });
-const selectedTask = computed(() => props.job.tasks.find((task) => task.task_key === selectedTaskKey.value)
+const selectedTask = computed(() => props.job.tasks.find((task) => task.task_key === props.selectedTaskKey)
   ?? orderedTasks.value[0]);
 const selectedArtifacts = computed(() => props.job.artifacts.filter((artifact) =>
   artifact.task_id === selectedTask.value?.task_id,
 ));
-watch(() => props.job.job_id, () => { selectedTaskKey.value = orderedTasks.value[0]?.task_key ?? ""; }, { immediate: true });
 </script>
 
 <template>
@@ -73,7 +75,7 @@ watch(() => props.job.job_id, () => { selectedTaskKey.value = orderedTasks.value
     <PipelineDag
       :tasks="job.tasks"
       :selected-task-id="selectedTask?.task_id"
-      @select="selectedTaskKey = $event"
+      @select="emit('taskChange', $event)"
     />
     <StepWorkbench
       v-if="selectedTask"
@@ -81,7 +83,9 @@ watch(() => props.job.job_id, () => { selectedTaskKey.value = orderedTasks.value
       :artifacts="selectedArtifacts"
       :text-content="textContent"
       :file-urls="fileUrls"
+      :selected-artifact-id="selectedArtifactId"
       @load-artifact="$emit('loadArtifact', $event)"
+      @artifact-change="emit('artifactChange', $event)"
     />
   </section>
 
@@ -102,7 +106,9 @@ watch(() => props.job.job_id, () => { selectedTaskKey.value = orderedTasks.value
           :artifact="artifact"
           :text="textContent.get(artifact.artifact_id)"
           :file-url="fileUrls.get(artifact.artifact_id)"
+          :active="selectedArtifactId === artifact.artifact_id"
           @load="$emit('loadArtifact', $event)"
+          @select="emit('artifactChange', $event)"
         />
       </div>
     </details>

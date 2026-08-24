@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
 import KnowledgeSidebar from "./components/KnowledgeSidebar.vue";
 import LibraryWorkspace from "./components/LibraryWorkspace.vue";
@@ -10,21 +10,20 @@ import SearchPanel from "./components/SearchPanel.vue";
 import SystemWorkspace from "./components/SystemWorkspace.vue";
 import AboutPanel from "./components/AboutPanel.vue";
 import { useKnowledgeNavigation } from "./composables/useKnowledgeNavigation";
+import { usePageNavigation } from "./composables/usePageNavigation";
 import { usePdfWorkspace } from "./composables/usePdfWorkspace";
 import UiIcon from "./components/UiIcon.vue";
 
-type AppView = "about" | "content" | "library" | "system";
-
-function initialView(): AppView {
-  const value = new URL(window.location.href).searchParams.get("view");
-  return value === "about" || value === "content" || value === "system" ? value : "library";
-}
-
 const workspace = usePdfWorkspace();
 const library = useKnowledgeNavigation();
+const navigation = usePageNavigation();
 const sidebarCollapsed = ref(localStorage.getItem("flori.sidebar.collapsed") === "true");
 const mobileSidebarOpen = ref(false);
-const activeView = ref<AppView>(initialView());
+const mobileMenu = ref<HTMLButtonElement>();
+const {
+  activeView, readerTab, selectedTaskKey, selectedArtifactId, selectedVisualId,
+  setView, setTab: setReaderTab, setTask, setArtifact, setVisual, clearReader,
+} = navigation;
 const {
   setup, selectedFile, job, source, busy, notice, evidence, activeEvidenceId, evidenceStatus,
   textContent, fileUrls, pdfUrl, noteText, summaryText, translationText, sourceTitle,
@@ -46,38 +45,53 @@ const showNotice = computed(() => !job.value || job.value.state !== "succeeded" 
 const pageTitle = computed(() => activeView.value === "system" ? "系统与 Runner"
   : activeView.value === "about" ? "关于 Flori" : job.value ? sourceTitle.value : "投递内容");
 
-function rememberPage(view: AppView): void {
-  activeView.value = view;
-  const url = new URL(window.location.href);
-  url.searchParams.set("view", view);
-  history.replaceState(null, "", url);
+function openEvidence(value: string): void { setVisual(""); void selectEvidence(value); }
+
+async function openSidebar(): Promise<void> {
+  mobileSidebarOpen.value = true;
+  await nextTick();
+  document.querySelector<HTMLButtonElement>(".sidebar-close")?.focus();
+}
+function closeSidebar(restoreFocus = true): void {
+  if (!mobileSidebarOpen.value) return;
+  mobileSidebarOpen.value = false;
+  if (restoreFocus) void nextTick(() => mobileMenu.value?.focus());
+}
+function trapSidebar(event: KeyboardEvent): void {
+  if (!mobileSidebarOpen.value) return;
+  const items = [...document.querySelectorAll<HTMLElement>(".sidebar a, .sidebar button:not([disabled])")];
+  const first = items[0];
+  const last = items.at(-1);
+  if (event.shiftKey && document.activeElement === first && last) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last && first) { event.preventDefault(); first.focus(); }
 }
 
 function chooseContext(domainId: string, collectionId = ""): void {
   selectContext(domainId, collectionId);
   setUploadContext(domainId, collectionId);
   closeJob();
-  rememberPage("library");
-  mobileSidebarOpen.value = false;
+  setView("library");
+  closeSidebar(false);
 }
 
 function startSubmission(): void {
   closeJob();
-  rememberPage("library");
-  mobileSidebarOpen.value = false;
+  setView("library");
+  closeSidebar(false);
   requestAnimationFrame(() => document.querySelector("#upload")?.scrollIntoView({ behavior: "smooth", block: "start" }));
 }
 
 function openContent(jobId: string, evidenceId?: string): void {
-  mobileSidebarOpen.value = false;
-  rememberPage("content");
+  closeSidebar(false);
+  clearReader();
+  setView("content");
   void openJob(jobId, evidenceId);
 }
 
 function navigate(view: "about" | "library" | "system"): void {
-  mobileSidebarOpen.value = false;
+  closeSidebar(false);
   if (view === "library") closeJob();
-  rememberPage(view);
+  setView(view);
 }
 
 function toggleSidebar(): void {
@@ -91,6 +105,27 @@ watch(source, (current) => {
   setUploadContext(current.domain_id, current.collection_ids[0] ?? "");
   void refreshLibrary();
 });
+watch(job, (current) => {
+  if (!current) return;
+  if (selectedTaskKey.value && !current.tasks.some((task) => task.task_key === selectedTaskKey.value)) setTask("");
+  if (selectedArtifactId.value
+    && !current.artifacts.some((artifact) => artifact.artifact_id === selectedArtifactId.value)) setArtifact("");
+});
+
+function restoreLocation(): void {
+  const params = new URL(window.location.href).searchParams;
+  navigation.restore();
+  const domain = domains.value.find((item) => item.domain_id === params.get("domain_id"));
+  const collection = collections.value.find((item) => item.collection_id === params.get("collection_id")
+    && item.domain_id === domain?.domain_id);
+  if (domain) selectContext(domain.domain_id, collection?.collection_id ?? "", false);
+  const requestedJob = params.get("job_id");
+  if (activeView.value === "content" && requestedJob) {
+    void openJob(requestedJob, params.get("evidence_id") ?? "", false);
+  } else if (job.value) closeJob(false);
+}
+onMounted(() => window.addEventListener("popstate", restoreLocation));
+onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
 
 </script>
 
@@ -98,6 +133,8 @@ watch(source, (current) => {
   <div
     class="app-shell"
     :class="{ 'sidebar-collapsed': sidebarCollapsed, 'mobile-sidebar-open': mobileSidebarOpen }"
+    @keydown.esc="closeSidebar()"
+    @keydown.tab="trapSidebar"
   >
     <KnowledgeSidebar
       :domains="domains"
@@ -112,7 +149,7 @@ watch(source, (current) => {
       @open="openContent"
       @select="chooseContext"
       @submit="startSubmission"
-      @close="mobileSidebarOpen = false"
+      @close="closeSidebar"
       @toggle="toggleSidebar"
       @navigate="navigate"
     />
@@ -120,16 +157,17 @@ watch(source, (current) => {
       type="button"
       class="sidebar-scrim"
       aria-label="关闭导航"
-      @click="mobileSidebarOpen = false"
+      @click="closeSidebar()"
     />
 
     <div class="app-main">
       <header class="topbar">
         <button
+          ref="mobileMenu"
           type="button"
           class="mobile-menu"
           aria-label="打开导航"
-          @click="mobileSidebarOpen = true"
+          @click="openSidebar"
         >
           <UiIcon name="menu" />
         </button>
@@ -233,9 +271,17 @@ watch(source, (current) => {
             :status="evidenceStatus"
             :text-content="textContent"
             :file-urls="fileUrls"
-            @select="selectEvidence"
+            :tab="readerTab"
+            :selected-task-key="selectedTaskKey"
+            :selected-artifact-id="selectedArtifactId"
+            :selected-visual-id="selectedVisualId"
+            @select="openEvidence"
             @load-artifact="loadArtifact"
             @refresh="refreshJob"
+            @tab-change="setReaderTab"
+            @task-change="setTask"
+            @artifact-change="setArtifact"
+            @visual-change="setVisual"
           />
           <RerunPanel
             v-if="job"
