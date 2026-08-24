@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use flori_core::{
     DocumentStructure, ErrorCode, Executor, ResolvedArtifact, ResolvedProfile, ResolvedPrompt,
-    ResolvedTaskInputs, Sha256Digest,
+    ResolvedTaskInputs, Sha256Digest, TranscriptManifest, VideoKeyframe,
 };
 use sha2::{Digest, Sha256};
 use tokio::fs;
@@ -12,7 +12,15 @@ use crate::RunnerClient;
 pub(super) struct PreparedInput {
     pub prompt: String,
     pub workspace: PathBuf,
-    pub document: Option<DocumentStructure>,
+    pub evidence: Option<EvidenceSource>,
+}
+
+pub(super) enum EvidenceSource {
+    Document(DocumentStructure),
+    Video {
+        transcript: TranscriptManifest,
+        keyframes: Vec<VideoKeyframe>,
+    },
 }
 
 pub(super) async fn prepare(
@@ -30,7 +38,7 @@ pub(super) async fn prepare(
         .await
         .map_err(|_| ErrorCode::StorageUnavailable)?;
 
-    let (prompt, document) = match (executor, inputs) {
+    let (prompt, evidence) = match (executor, inputs) {
         (
             Executor::AiDocumentTranslate,
             ResolvedTaskInputs::AiDocumentTranslate {
@@ -77,19 +85,125 @@ pub(super) async fn prepare(
                     document,
                     &document_text,
                 )?,
-                Some(structure),
+                Some(EvidenceSource::Document(structure)),
             )
         }
-        (Executor::AiVideoNote, ResolvedTaskInputs::AiVideoNote { .. }) => {
-            return Err(ErrorCode::ExecutorFailed);
+        (
+            Executor::AiVideoNote,
+            ResolvedTaskInputs::AiVideoNote {
+                transcript,
+                mechanical_note,
+                frames,
+                prompt,
+                profile,
+            },
+        ) => {
+            let transcript_text =
+                download_text(client, transcript, &input_dir.join("transcript.json")).await?;
+            let transcript_value = serde_json::from_str::<TranscriptManifest>(&transcript_text)
+                .map_err(|_| ErrorCode::EvidenceInvalid)?;
+            transcript_value
+                .validate()
+                .map_err(|_| ErrorCode::EvidenceInvalid)?;
+            let mechanical_text = download_text(
+                client,
+                mechanical_note,
+                &input_dir.join("mechanical-note.md"),
+            )
+            .await?;
+            let mut keyframes = Vec::with_capacity(frames.len());
+            let mut frame_text = String::new();
+            for frame in frames {
+                let keyframe = VideoKeyframe::from_artifact_name(frame.artifact_id, &frame.name)
+                    .map_err(|_| ErrorCode::EvidenceInvalid)?;
+                let path = input_dir.join(format!("keyframe-{:013}.jpg", keyframe.timestamp_ms));
+                client
+                    .download_artifact(frame, &path)
+                    .await
+                    .map_err(|error| error.code())?;
+                frame_text.push_str(&format!(
+                    "{} {} {} {}\n",
+                    frame.name,
+                    frame.artifact_id,
+                    keyframe.timestamp_ms,
+                    path.display()
+                ));
+                keyframes.push(keyframe);
+            }
+            (
+                compose_video(
+                    executor,
+                    prompt_snapshot_sha256,
+                    prompt,
+                    profile.as_ref(),
+                    transcript,
+                    &transcript_text,
+                    mechanical_note,
+                    &mechanical_text,
+                    &frame_text,
+                )?,
+                Some(EvidenceSource::Video {
+                    transcript: transcript_value,
+                    keyframes,
+                }),
+            )
         }
         _ => return Err(ErrorCode::CorruptState),
     };
     Ok(PreparedInput {
         prompt,
         workspace,
-        document,
+        evidence,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compose_video(
+    executor: Executor,
+    prompt_snapshot_sha256: &Sha256Digest,
+    prompt: &ResolvedPrompt,
+    profile: Option<&ResolvedProfile>,
+    transcript: &ResolvedArtifact,
+    transcript_text: &str,
+    mechanical: &ResolvedArtifact,
+    mechanical_text: &str,
+    frames: &str,
+) -> Result<String, ErrorCode> {
+    verify(prompt.content.as_bytes(), &prompt.sha256)?;
+    if let Some(profile) = profile {
+        verify(profile.content.as_bytes(), &profile.sha256)?;
+    }
+    let executor = serde_json::to_string(&executor).map_err(|_| ErrorCode::Internal)?;
+    let mut composed = String::new();
+    section(&mut composed, "EXECUTOR", executor.trim_matches('"'));
+    section(
+        &mut composed,
+        "PROMPT SNAPSHOT SHA256",
+        prompt_snapshot_sha256.as_str(),
+    );
+    section(&mut composed, "PROMPT", &prompt.content);
+    if let Some(profile) = profile {
+        section(&mut composed, "DOMAIN PROFILE", &profile.content);
+    }
+    section(
+        &mut composed,
+        "TRANSCRIPT ARTIFACT ID",
+        &transcript.artifact_id.to_string(),
+    );
+    section(
+        &mut composed,
+        "TRANSCRIPT SHA256",
+        transcript.sha256.as_str(),
+    );
+    section(&mut composed, "TRANSCRIPT", transcript_text);
+    section(
+        &mut composed,
+        "MECHANICAL NOTE SHA256",
+        mechanical.sha256.as_str(),
+    );
+    section(&mut composed, "MECHANICAL NOTE", mechanical_text);
+    section(&mut composed, "KEYFRAMES", frames);
+    Ok(composed)
 }
 
 async fn download_text(

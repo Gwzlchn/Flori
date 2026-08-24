@@ -39,14 +39,16 @@ pub async fn run(
         .map_err(|_| ErrorCode::StorageUnavailable)?;
     loop {
         let claim = tokio::select! {
-            result = client.poll() => result.map_err(|error| error.code())?,
+            biased;
             () = canceled(cancel) => return Ok(()),
+            result = client.poll() => result.map_err(|error| error.code())?,
         };
         match claim {
             Some(claim) => supervise(client, config, claim, cancel).await?,
             None => tokio::select! {
-                () = tokio::time::sleep(Duration::from_millis(250)) => {},
+                biased;
                 () = canceled(cancel) => return Ok(()),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {},
             },
         }
     }

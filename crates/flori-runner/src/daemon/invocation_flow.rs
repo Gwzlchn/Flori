@@ -1,16 +1,21 @@
 use flori_core::{
-    AiResultEnvelope, DocumentStructure, ErrorCode, Executor, TaskClaim, UsageUpdate,
-    validate_pdf_evidence,
+    AiResultEnvelope, ErrorCode, Executor, TaskClaim, UsageUpdate, validate_pdf_evidence,
+    validate_video_evidence,
 };
 use tokio::sync::watch;
 
 use crate::RunnerClient;
 
-use super::{DaemonConfig, input::PreparedInput, invoke, output};
+use super::{
+    DaemonConfig,
+    input::{EvidenceSource, PreparedInput},
+    invoke, output,
+};
 
 const PRIMARY: &str = "primary";
 const REPAIR: &str = "repair";
 const REPAIR_SUMMARY: &str = "evidence_invalid: return the complete corrected result. Every PDF evidence item must use the downloaded document's source_artifact_id, an existing page and bounded bbox, and an exact quote from the enclosing text, figure caption, or table. Every source fact, summary, and term must reference valid evidence IDs, and every candidate must be used.";
+const VIDEO_REPAIR_SUMMARY: &str = "evidence_invalid: return the complete corrected result. Every video evidence item must use the transcript source_artifact_id, an exact quote from the overlapping transcript cues, a bounded time range, and only a declared keyframe within that range. Every source fact, summary, and term must reference valid evidence IDs, and every candidate must be used.";
 
 pub(super) async fn run(
     client: &RunnerClient,
@@ -46,7 +51,7 @@ pub(super) async fn run(
         return fail(client, config, claim, &invocation_keys, &outcome, code).await;
     }
 
-    if precheck(claim.executor, prepared.document.as_ref(), &outcome)
+    if precheck(claim.executor, prepared.evidence.as_ref(), &outcome)
         == Err(ErrorCode::EvidenceInvalid)
     {
         if !start(client, config, claim, REPAIR).await? {
@@ -65,7 +70,7 @@ pub(super) async fn run(
             config,
             claim,
             REPAIR,
-            repair_prompt(&prepared.prompt),
+            repair_prompt(&prepared.prompt, claim.executor),
             &prepared.workspace,
             cancel,
         )
@@ -80,7 +85,7 @@ pub(super) async fn run(
         .as_ref()
         .err()
         .copied()
-        .or_else(|| precheck(claim.executor, prepared.document.as_ref(), &outcome).err());
+        .or_else(|| precheck(claim.executor, prepared.evidence.as_ref(), &outcome).err());
     if let Some(code) = error {
         return fail(client, config, claim, &invocation_keys, &outcome, code).await;
     }
@@ -143,16 +148,16 @@ async fn finalize_usage(
 
 fn precheck(
     executor: Executor,
-    document: Option<&DocumentStructure>,
+    evidence: Option<&EvidenceSource>,
     outcome: &invoke::InvocationOutcome,
 ) -> Result<(), ErrorCode> {
     let Ok(result) = &outcome.result else {
         return Ok(());
     };
-    match (executor, document, result) {
+    match (executor, evidence, result) {
         (
             Executor::AiDocumentNote,
-            Some(document),
+            Some(EvidenceSource::Document(document)),
             AiResultEnvelope::DocumentNote {
                 smart_note_markdown,
                 summary_markdown,
@@ -163,19 +168,46 @@ fn precheck(
             validate_pdf_evidence(document, terms, smart_note_markdown, summary_markdown).map(drop)
         }
         (Executor::AiDocumentNote, _, _) => Err(ErrorCode::CorruptState),
+        (
+            Executor::AiVideoNote,
+            Some(EvidenceSource::Video {
+                transcript,
+                keyframes,
+            }),
+            AiResultEnvelope::VideoNote {
+                smart_note_markdown,
+                summary_markdown,
+                terms,
+                ..
+            },
+        ) => validate_video_evidence(
+            transcript,
+            keyframes,
+            1,
+            terms,
+            smart_note_markdown,
+            summary_markdown,
+        )
+        .map(drop),
+        (Executor::AiVideoNote, _, _) => Err(ErrorCode::CorruptState),
         _ => Ok(()),
     }
 }
 
-fn repair_prompt(prompt: &str) -> String {
+fn repair_prompt(prompt: &str, executor: Executor) -> String {
     let mut repaired = prompt.to_owned();
     if !repaired.ends_with('\n') {
         repaired.push('\n');
     }
     repaired.push_str("EVIDENCE PRECHECK ERROR ");
-    repaired.push_str(&REPAIR_SUMMARY.len().to_string());
+    let summary = if executor == Executor::AiVideoNote {
+        VIDEO_REPAIR_SUMMARY
+    } else {
+        REPAIR_SUMMARY
+    };
+    repaired.push_str(&summary.len().to_string());
     repaired.push('\n');
-    repaired.push_str(REPAIR_SUMMARY);
+    repaired.push_str(summary);
     repaired.push('\n');
     repaired
 }
