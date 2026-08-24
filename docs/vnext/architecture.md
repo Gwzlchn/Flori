@@ -41,11 +41,12 @@ ECS 不保存业务数据库、任务队列或 Artifact，也不远程挂载家�
 - 按 sequence 推送日志，上传声明输出并请求原子完成。
 - 不访问数据库，不决定发布版本，不持有长期业务状态。
 
-同一个 Rust Runner 二进制用于所有镜像。镜像只因外部工具和凭据不同而拆分：
+Runner 镜像使用独立的薄二进制，按外部工具、凭据和网络边界拆分：
 
 | 镜像 | 外部能力 |
 |---|---|
-| `flori-runner-media` | PDF extractor、yt-dlp、yutto、FFmpeg、可选 Whisper |
+| `flori-runner-media` | PDF extractor、FFmpeg、可选 Whisper |
+| `flori-runner-download` | 固定版本 yt-dlp、yutto、ffprobe；平台代理与 cookie 隔离 |
 | `flori-runner-ai-qoder` | 固定版本 QoderCLI |
 | `flori-runner-ai-codex` | 固定版本 CodexCLI |
 

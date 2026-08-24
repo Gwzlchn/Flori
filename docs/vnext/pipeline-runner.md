@@ -152,7 +152,7 @@ publish:
 | `document.extract` | 结构、章节、Figure/caption、Table 页面区域 | `document_structure`、`figure`、`table_region` |
 | `ai.document_translate` | 可选全文翻译 | `translation` |
 | `ai.document_note` | 中文智能笔记、摘要、关键名词 | `smart_note`、`summary`、`terms` |
-| `video.acquire` | yt-dlp/yutto/本地输入、字幕、弹幕原文件、分P清单 | `source_original`、`subtitle`、`danmaku`、`parts_manifest` |
+| `video.acquire` | download Runner 使用 yt-dlp/yutto 或本地输入，输出字幕、弹幕原文件和分P清单 | `source_original`、`subtitle`、`danmaku`、`parts_manifest` |
 | `video.subscription` | 使用 yt-dlp/yutto 枚举频道最新条目，受 Collection fanout 限制 | `subscription_manifest` |
 | `video.transcribe` | 平台字幕优先，Whisper 兜底并标准化时间段 | `transcript` |
 | `video.frames` | 场景代表帧、长场景定时补帧和内部 pHash/SSIM 去重 | `keyframe` |
@@ -329,6 +329,8 @@ secret_inputs
 ```
 
 `resolved_inputs` 的 Artifact 只给经过授权、短期有效的 HTTPS 下载 URL和摘要。`secret_inputs` 只在目标 download Task claim 中带 cookie 值，不进入任何持久 Task JSON。
+
+YouTube download Task 只接受 canonical video ID，并要求 deployment 提供显式 HTTP proxy；Bilibili download Task 只接受 canonical BVID，并强制 yutto `--proxy no`。两个 adapter 不互相 fallback，不接受 playlist、频道、登录态限制或任意 Host。cookie 只在对应 Attempt 的私有文件中短暂存在，禁止进入 argv、环境、日志、事件和 Artifact。
 
 若 Task声明 `task_log`，认领事务同时创建唯一的服务端 upload ledger；logs endpoint只按sequence追加这个staging文件。`LogFrame.line` 是完整 `TaskLogLine` JSON，不是任意文本。NAS中的 `task_log` 是日志正文的唯一真相；SQLite只记录不含正文和摘要的 `log_cursor`。Attempt终态时Server计算摘要并按 `when=always` 提交已有日志；Runner不显式上传同名文件，也不把 `task_log` 计入终态manifest摘要。Runner失联时允许提交已收到的部分日志，但缺失的required log/audit只阻止Task成功，不阻止Attempt过期或Job失败。
 

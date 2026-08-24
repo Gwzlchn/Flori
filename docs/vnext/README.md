@@ -27,7 +27,7 @@
 
 WP01-WP11 已完成。PDF 上传、直接 URL 和 arXiv 使用同一 Pipeline；digital PDF 可经 media Runner 生成结构、Figure、Table 区域和严格 evidence，再由 QoderCLI 或 CodexCLI 生成并发布 current 成果。扫描 PDF 在 extractor 和 AI 前拒绝。真实 Qoder 验收已在单独授权下完成；它不构成生产部署授权。
 
-WP12-B 已闭合本地 MP4 的首条产品链：统一 media Runner 完成探测、离线 faster-whisper 转写、场景代表帧、长场景补帧、pHash/SSIM 去重和机械笔记，AI Runner 生成视频笔记后由 Home Core 校验时间 Evidence、发布 current 并进入 FTS；前端可播放视频、查看关键帧并按 Evidence 毫秒定位。平台下载、原生字幕与弹幕留在 WP12-C，频道订阅留在 WP12-D。WP13-A 已完成 current-only evidence、FTS 和 Artifact 读取投影；MCP 与其余知识库管理面仍待后续切片。WP14-A 至 WP14-H 已完成 PDF 上传、搜索、重跑和 evidence 阅读，并恢复领域、分类、内容三级知识库导航、HTML 优先阅读、Pipeline 工作台、丰富元信息、图表目录、System、Events、Runner 和 About 页面；前端只使用生成的 OpenAPI client。当前仍不是生产候选。
+WP12-B 已闭合本地 MP4 的首条产品链：media Runner 完成探测、离线 faster-whisper 转写、场景代表帧、长场景补帧、pHash/SSIM 去重和机械笔记，AI Runner 生成视频笔记后由 Home Core 校验时间 Evidence、发布 current 并进入 FTS；前端可播放视频、查看关键帧并按 Evidence 毫秒定位。WP12-C 已增加独立 download Runner：YouTube 单视频只使用自己的显式代理和可选 cookie，Bilibili 单视频强制禁用代理并使用独立可选 cookie；原生字幕优先，缺失时才由 media Runner 调用 Whisper，弹幕保留为原始 Artifact。频道订阅留在 WP12-D。WP13-A 已完成 current-only evidence、FTS 和 Artifact 读取投影；MCP 与其余知识库管理面仍待后续切片。WP14-A 至 WP14-H 已完成 PDF 上传、搜索、重跑和 evidence 阅读，并恢复领域、分类、内容三级知识库导航、HTML 优先阅读、Pipeline 工作台、丰富元信息、图表目录、System、Events、Runner 和 About 页面；前端只使用生成的 OpenAPI client。当前仍不是生产候选。
 
 WP15 已完成 Job 取消、Source 完整删除、旧 Job Artifact 保留清理、SSE、system health 和启动恢复。生产冷切换、现有数据删除、公网变更与旧 Python 退役仍只属于 WP16，必须单独授权。
 
@@ -44,7 +44,8 @@ WP15 已完成 Job 取消、Source 完整删除、旧 Job Artifact 保留清理�
 | WP11 | PDF 三入口、解析、AI 笔记、evidence、发布和读取 | 已完成 |
 | WP12-A | 本地视频离线黄金样本与共享类型验证 | 已完成 |
 | WP12-B | 本地视频 Pipeline、离线转写、AI 笔记、发布和阅读 | 已完成 |
-| WP12-C/D | 平台单视频、字幕/弹幕、频道订阅与 Collection fanout | 待后续切片 |
+| WP12-C | Bilibili/YouTube 公开单视频、字幕/弹幕与独立下载 Runner | 已完成 |
+| WP12-D | 频道订阅与 Collection fanout | 待后续切片 |
 | WP13-A | current evidence、FTS 和 Artifact 读取 | 已完成 |
 | WP13 | MCP 和其余知识库管理面 | 待后续切片 |
 | WP14-A | PDF 上传、Job、Artifact、搜索和 evidence 阅读 UI | 已完成 |

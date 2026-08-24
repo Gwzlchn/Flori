@@ -16,7 +16,7 @@ vNext 在同一仓库的 `rust-vnext` 分支开发。`main` 在 WP16 前仍是 P
 | WP09 Runner 协议 | 完成 | 出站 HTTP、日志、usage、Artifact 和恢复已闭环 |
 | WP10 AI Runner | 完成 | QoderCLI/CodexCLI锁版、执行和usage已闭环 |
 | WP11 PDF | 完成 | 三入口、解析、AI笔记、evidence、重跑和发布已闭环 |
-| WP12 视频 | 开放 | 已有离线黄金基线；完整视频产品链待实现 |
+| WP12 视频 | 开放 | 本地视频及 Bilibili/YouTube 公开单视频已闭环；频道订阅待 WP12-D |
 | WP13 知识库 | 开放 | current投影已完成；MCP和管理面待实现 |
 | WP14-A PDF UI | 完成 | 上传、Job DAG与Artifact读取闭环 |
 | WP14 其余UI | 开放 | 只消费生成契约，按页面垂直切片 |

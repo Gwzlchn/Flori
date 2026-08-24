@@ -118,7 +118,7 @@ cargo xtask diff-budget <base>
 cargo xtask janitor --dry-run|--apply
 ```
 
-`check` 依次验证 Rust 格式、Clippy、OpenAPI 导出和容器内前端检查。`test` 可省略目标运行整个 workspace，也可指定一个已声明 crate。`integration` 首版只有 `foundation`，`image` 只接受五个冻结镜像名。不得临时创建第二套脚本入口。
+`check` 依次验证 Rust 格式、Clippy、OpenAPI 导出和容器内前端检查。`test` 可省略目标运行整个 workspace，也可指定一个已声明 crate。`integration` 首版只有 `foundation`，`image` 只接受六个冻结镜像名。不得临时创建第二套脚本入口。
 
 前端生成文件只写入 `frontend/.generated`，不进入 Git。Node 检查通过 `compose.test.yml` 在容器内执行；宿主只需要锁定的 Rust 工具链和 Docker。
 
