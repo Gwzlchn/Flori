@@ -48,7 +48,7 @@ QoderCLI 和 CodexCLI 使用人工锁定版本。vNext首版固定为 QoderCLI `
 
 media、Qoder 和 Codex Runner 使用三个独立二进制与 Dockerfile，分别裁剪未使用的 media/Qoder/Codex 代码。任一 Runner 的工具层或代理变化不共用另一个 Runner 的构建图，镜像名仍固定为上面的五个。
 
-本地 Qoder 和 Codex build 分别只读取 `FLORI_QODER_BUILD_PROXY` 与 `FLORI_CODEX_BUILD_PROXY`，不设共享 fallback；media build 不读取这两个变量。GitHub build 不读取、不要求本地代理。BuildKit 缓存按镜像、CLI版本和依赖层复用，不在每次构建解析 latest。CI并行构建五个镜像，并在缓存填充后对每个 warm rebuild 执行120秒硬门；冷构建时间必须单独报告，不能冒充两分钟验收。
+本地 Qoder 和 Codex build 分别只读取 `FLORI_QODER_BUILD_PROXY` 与 `FLORI_CODEX_BUILD_PROXY`，不设共享 fallback；media build 不读取这两个变量。GitHub build 不读取、不要求本地代理。BuildKit 缓存按镜像、CLI版本和依赖层复用，不在每次构建解析 latest。CI从零时刻并行执行 check、test、foundation integration 和五个镜像的首次远端缓存恢复构建；最早 required Job 的 `startedAt` 到最晚 required Job 的 `completedAt` 必须不超过120秒。GitHub排队时间单独报告且不计入执行预算。同一Job内立即重建的零成本缓存命中不能作为验收证据。
 
 两个AI镜像必须在构建时以最终非root用户执行无费用版本和帮助探针。Qoder镜像核对精确版本与`--tools`，Codex镜像核对精确版本、`--search`、`exec --json`和`--output-schema`；任一不符直接构建失败。探针不登录、不调用模型。
 
