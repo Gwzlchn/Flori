@@ -1,16 +1,18 @@
 #[path = "../src/media/video.rs"]
-#[allow(dead_code, unused_imports)]
+#[allow(dead_code, unreachable_pub, unused_imports)]
 mod video;
 
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use flori_core::{ArtifactId, TranscriptManifest};
-use video::{VideoMediaError, extract_keyframes, mechanical_note, normalize_srt, probe_video};
+use video::{
+    VideoMediaError, extract_keyframes, mechanical_note_with_frames, normalize_srt, probe_video,
+};
 
 const SUBTITLE: &str = include_str!("../../../tests/fixtures/vnext/local-video.srt");
 const TRANSCRIPT: &str = include_str!("../../../tests/fixtures/vnext/expected/transcript.json");
@@ -29,7 +31,7 @@ fn normalizes_golden_subtitle_and_keeps_mechanical_note_faithful() {
     .expect("normalize golden SRT");
     assert_eq!(actual, expected);
 
-    let note = mechanical_note(&actual).expect("mechanical note");
+    let note = mechanical_note_with_frames(&actual, &[]).expect("mechanical note");
     assert_eq!(note, MECHANICAL_NOTE);
 }
 
@@ -55,7 +57,7 @@ fn rejects_overlapping_out_of_range_and_malformed_subtitles() {
     let mut invalid = normalize_srt(source, "en", 3_000, SUBTITLE).expect("valid baseline");
     invalid.cues[1].start_ms = 999;
     assert_eq!(
-        mechanical_note(&invalid),
+        mechanical_note_with_frames(&invalid, &[]),
         Err(VideoMediaError::InvalidSubtitle)
     );
 }
@@ -92,13 +94,16 @@ async fn extracts_bounded_named_frames_and_deduplicates_inside_executor() {
     let ffmpeg = temp.script(
         "ffmpeg",
         r#"seek=''
+raw='false'
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '-ss' ]; then shift; seek="$1"; fi
+  if [ "$1" = 'rawvideo' ]; then raw='true'; fi
   shift
 done
+if [ -z "$seek" ]; then printf '%s\n' '[Parsed_showinfo] pts_time:2.500' >&2; exit 0; fi
+if [ "$raw" = 'true' ]; then head -c 1024 /dev/zero; exit 0; fi
 case "$seek" in
-  1.000) printf 'jpeg-one' ;;
-  2.000) printf 'jpeg-two' ;;
+  0.500) printf 'jpeg-one' ;;
   *) exit 8 ;;
 esac
 "#,
@@ -107,21 +112,22 @@ esac
         &ffmpeg,
         Path::new("video.mp4"),
         3_000,
+        10,
+        1,
         2,
         Duration::from_secs(1),
         1_024,
     )
     .await
     .expect("frames");
-    assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0].logical_name, "frames/0000000001000.jpg");
-    assert_eq!(frames[1].logical_name, "frames/0000000002000.jpg");
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].logical_name, "frames/0000000000500.jpg");
     assert_eq!(
         frames[0]
             .keyframe(ArtifactId::generate())
             .unwrap()
             .timestamp_ms,
-        1_000
+        500
     );
     frames[0].logical_name = "frames/0000000000999.jpg".into();
     assert_eq!(
@@ -129,11 +135,25 @@ esac
         Err(VideoMediaError::InvalidFrameRequest)
     );
 
-    let duplicate = temp.script("ffmpeg-duplicate", "printf 'same-jpeg'\n");
+    let duplicate = temp.script(
+        "ffmpeg-duplicate",
+        r#"seek=''
+raw='false'
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-ss' ]; then shift; seek="$1"; fi
+  if [ "$1" = 'rawvideo' ]; then raw='true'; fi
+  shift
+done
+if [ -z "$seek" ]; then exit 0; fi
+if [ "$raw" = 'true' ]; then head -c 1024 /dev/zero; else printf 'same-jpeg'; fi
+"#,
+    );
     let frames = extract_keyframes(
         &duplicate,
         Path::new("video.mp4"),
         3_000,
+        10,
+        1,
         2,
         Duration::from_secs(1),
         1_024,
@@ -187,11 +207,7 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("flori-video-{}-{nonce}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("flori-video-{}", ArtifactId::generate()));
         fs::create_dir(&path).expect("create temp dir");
         Self(path)
     }

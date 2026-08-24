@@ -1,5 +1,5 @@
 #[path = "../src/media/video.rs"]
-#[allow(dead_code, unused_imports)]
+#[allow(dead_code, unreachable_pub, unused_imports)]
 mod video;
 
 use std::{
@@ -10,10 +10,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use sha2::{Digest, Sha256};
 use video::{extract_keyframes, probe_video};
 
 const CONTAINER_VIDEO: &str = "/fixtures/local-video.mp4";
-const GOLDEN_FRAME: &[u8] = include_bytes!("../../../tests/fixtures/vnext/keyframe-1000ms.jpg");
+const GOLDEN_FRAME_SHA256: &str =
+    "54c80e453ffe82278fc9a46bc8f56416f08c091c97b72c70b6ff51e67ee7fdf2";
 
 #[tokio::test]
 async fn locked_media_image_processes_real_golden_video() {
@@ -50,11 +52,14 @@ async fn locked_media_image_processes_real_golden_video() {
     assert_eq!(probe.duration_ms, 3_000);
     assert_eq!((probe.width, probe.height), (320, 180));
     assert_eq!((probe.frame_rate_num, probe.frame_rate_den), (10, 1));
+    assert_eq!(probe.audio_streams, 1);
 
     let frames = extract_keyframes(
         &ffmpeg,
         Path::new(CONTAINER_VIDEO),
         probe.duration_ms,
+        probe.frame_rate_num,
+        probe.frame_rate_den,
         2,
         Duration::from_secs(30),
         1024 * 1024,
@@ -63,10 +68,13 @@ async fn locked_media_image_processes_real_golden_video() {
     .expect("real ffmpeg");
     let frame = frames
         .iter()
-        .find(|frame| frame.timestamp_ms == 1_000)
-        .expect("1000 ms frame");
-    assert_eq!(frame.logical_name, "frames/0000000001000.jpg");
-    assert_eq!(frame.bytes, GOLDEN_FRAME);
+        .find(|frame| frame.timestamp_ms == 500)
+        .expect("static-scene representative");
+    assert_eq!(frame.logical_name, "frames/0000000000500.jpg");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&frame.bytes)),
+        GOLDEN_FRAME_SHA256
+    );
 }
 
 fn assert_locked_ffmpeg(image: &str) {

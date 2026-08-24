@@ -1,4 +1,4 @@
-use flori_core::{ArtifactId, TranscriptCue, TranscriptManifest, TranscriptSchema};
+use flori_core::{ArtifactId, TranscriptCue, TranscriptManifest, TranscriptSchema, VideoKeyframe};
 
 use super::VideoMediaError;
 
@@ -48,7 +48,10 @@ pub(crate) fn normalize_srt(
     Ok(transcript)
 }
 
-pub(crate) fn mechanical_note(transcript: &TranscriptManifest) -> Result<String, VideoMediaError> {
+pub(crate) fn mechanical_note_with_frames(
+    transcript: &TranscriptManifest,
+    frames: &[VideoKeyframe],
+) -> Result<String, VideoMediaError> {
     transcript
         .validate()
         .map_err(|_| VideoMediaError::InvalidSubtitle)?;
@@ -60,6 +63,16 @@ pub(crate) fn mechanical_note(transcript: &TranscriptManifest) -> Result<String,
             display_time(cue.end_ms),
             cue.text.trim()
         ));
+    }
+    if !frames.is_empty() {
+        note.push_str("\n## 关键帧\n\n");
+        for frame in frames {
+            note.push_str(&format!(
+                "- {}: `{}`\n",
+                display_time(frame.timestamp_ms),
+                frame.artifact_id
+            ));
+        }
     }
     note.push_str("\n本笔记只重组字幕中的事实，不添加原因、评价或外部知识。\n");
     Ok(note)

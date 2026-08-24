@@ -16,12 +16,30 @@ use tokio::{
 
 use super::VideoMediaError;
 
+pub(super) struct ToolOutput {
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
+}
+
 pub(super) async fn run_tool(
     program: &Path,
     arguments: &[OsString],
     timeout: Duration,
     max_output_bytes: usize,
 ) -> Result<Vec<u8>, VideoMediaError> {
+    Ok(
+        run_tool_output(program, arguments, timeout, max_output_bytes)
+            .await?
+            .stdout,
+    )
+}
+
+pub(super) async fn run_tool_output(
+    program: &Path,
+    arguments: &[OsString],
+    timeout: Duration,
+    max_output_bytes: usize,
+) -> Result<ToolOutput, VideoMediaError> {
     if !program.is_absolute() || timeout.is_zero() || max_output_bytes == 0 {
         return Err(VideoMediaError::ToolFailed);
     }
@@ -64,14 +82,16 @@ pub(super) async fn run_tool(
             return Err(VideoMediaError::OutputTooLarge);
         }
     };
-    let stdout = stdout_task.await.map_err(|_| VideoMediaError::ToolFailed)?;
-    stderr_task
+    let stdout = stdout_task
+        .await
+        .map_err(|_| VideoMediaError::ToolFailed)??;
+    let stderr = stderr_task
         .await
         .map_err(|_| VideoMediaError::ToolFailed)??;
     if !status.success() {
         return Err(VideoMediaError::ToolFailed);
     }
-    stdout
+    Ok(ToolOutput { stdout, stderr })
 }
 
 async fn read_bounded(
