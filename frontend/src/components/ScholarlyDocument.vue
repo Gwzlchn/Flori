@@ -47,7 +47,7 @@ onUnmounted(release);
       class="scholarly-viewer"
       :src="source"
       title="学术原文"
-      sandbox=""
+      sandbox="allow-same-origin"
       referrerpolicy="no-referrer"
     />
   </div>
