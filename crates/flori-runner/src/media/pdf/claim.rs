@@ -125,7 +125,7 @@ fn shape(
     Ok(())
 }
 
-pub(super) fn exact(
+pub(crate) fn exact(
     claim: &TaskClaim,
     kind: ArtifactKind,
 ) -> Result<&ArtifactDeclaration, ErrorCode> {
@@ -140,7 +140,7 @@ pub(super) fn exact(
     Ok(declaration)
 }
 
-pub(super) fn basename(name: &str) -> Result<&str, ErrorCode> {
+pub(crate) fn basename(name: &str) -> Result<&str, ErrorCode> {
     Path::new(name)
         .file_name()
         .and_then(|value| value.to_str())

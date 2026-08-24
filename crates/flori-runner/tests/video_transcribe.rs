@@ -1,5 +1,5 @@
 #[path = "../src/media/video.rs"]
-#[allow(dead_code, unused_imports)]
+#[allow(dead_code, unreachable_pub, unused_imports)]
 mod video;
 
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};

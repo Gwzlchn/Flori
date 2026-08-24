@@ -14,7 +14,7 @@ use crate::RunnerClient;
 
 const CHUNK_BYTES: usize = 1024 * 1024;
 
-pub(super) async fn file(
+pub(crate) async fn file(
     client: &RunnerClient,
     claim: &TaskClaim,
     declaration: &ArtifactDeclaration,

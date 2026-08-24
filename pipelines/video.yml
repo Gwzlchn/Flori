@@ -6,7 +6,7 @@ acquire:
   retry: 1
   timeout: 30m
   artifacts:
-    - { name: original, kind: source_original, path: output/source.mp4, required: true, when: on_success, max_bytes: 2147483648 }
+    - { name: videos, kind: source_original, path: output/videos/*, required: true, when: on_success, max_files: 1, max_bytes: 2147483648 }
     - { name: subtitle, kind: subtitle, path: output/subtitle.srt, required: false, when: on_success, max_bytes: 16777216 }
     - { name: danmaku, kind: danmaku, path: output/danmaku.xml, required: false, when: on_success, max_bytes: 67108864 }
     - { name: parts, kind: parts_manifest, path: output/parts.json, required: true, when: on_success, max_bytes: 1048576 }
@@ -15,7 +15,7 @@ acquire:
 transcribe:
   executor: video.transcribe
   with:
-    video: $needs.acquire.original
+    video: $needs.acquire.videos
     subtitle: $needs.acquire.subtitle
   needs: [acquire]
   tags: [media]
@@ -28,7 +28,7 @@ transcribe:
 frames:
   executor: video.frames
   with:
-    video: $needs.acquire.original
+    video: $needs.acquire.videos
     transcript: $needs.transcribe.transcript
   needs: [acquire, transcribe]
   tags: [media]

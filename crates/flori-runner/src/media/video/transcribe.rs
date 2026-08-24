@@ -7,11 +7,10 @@ use tokio::fs;
 use super::{VideoMediaError, process::run_tool};
 
 const TRANSCRIBER: &[u8] = include_bytes!("transcriber.py");
-pub(crate) const FASTER_WHISPER_VERSION: &str = "1.2.1";
 pub(crate) const WHISPER_MODEL_NAME: &str = "base";
 
 #[derive(Clone, Debug)]
-pub(crate) struct FasterWhisperConfig {
+pub struct FasterWhisperConfig {
     pub python: PathBuf,
     pub model_dir: PathBuf,
     pub model_name: String,

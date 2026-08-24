@@ -13,4 +13,4 @@ terms 应提取视频理解所需的关键术语。term 可保留公认英文写
 
 evidence_candidates 只能来自 Transcript.cues。quote 必须逐字复制一个或多个时间重叠 cue 的原文；start_ms、end_ms 必须形成有效时间段且不越过视频 duration_ms；source_artifact_id 必须原样复制 Transcript.source_artifact_id。不同结论应尽量使用不同时间段，不能把全部笔记绑定到同一条字幕。
 
-只有当关键帧的 timestamp_ms 位于 evidence 时间段内或紧邻该时间段时，才可在 locator 中引用它；artifact_id 和 timestamp_ms 必须从关键帧清单原样复制。没有合适关键帧时 keyframe 使用 null。不得编造引用、时间戳、Artifact ID、字幕、外部 URL 或画面内容。
+只有当关键帧的 timestamp_ms 位于 evidence 时间段内时，才可在 locator 中引用它；artifact_id 和 timestamp_ms 必须从关键帧清单原样复制。没有合适关键帧时 keyframe 使用 null。不得编造引用、时间戳、Artifact ID、字幕、外部 URL 或画面内容。

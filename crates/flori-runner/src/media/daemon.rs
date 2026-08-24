@@ -3,16 +3,38 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use flori_core::{AttemptState, ErrorCode, FailAttemptRequest, TaskClaim};
+use flori_core::{AttemptState, ErrorCode, Executor, FailAttemptRequest, TaskClaim};
 use tokio::{fs, sync::watch};
 
 use crate::{RunnerClient, manifest_sha256};
 
-use super::pdf::{claim, daemon::PdfDaemonConfig, log};
+use super::{
+    pdf::{claim, daemon::PdfDaemonConfig, log},
+    video_claim,
+    video_daemon::{self, VideoDaemonConfig},
+};
 
 pub(super) async fn run_pdf(
     client: &RunnerClient,
     config: &PdfDaemonConfig,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<(), ErrorCode> {
+    run(client, config, None, cancel).await
+}
+
+pub(super) async fn run_media(
+    client: &RunnerClient,
+    pdf: &PdfDaemonConfig,
+    video: &VideoDaemonConfig,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<(), ErrorCode> {
+    run(client, pdf, Some(video), cancel).await
+}
+
+async fn run(
+    client: &RunnerClient,
+    config: &PdfDaemonConfig,
+    video: Option<&VideoDaemonConfig>,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), ErrorCode> {
     if !config.work_root.is_absolute() || config.renew_interval.is_zero() {
@@ -23,14 +45,16 @@ pub(super) async fn run_pdf(
         .map_err(|_| ErrorCode::StorageUnavailable)?;
     loop {
         let claim = tokio::select! {
-            result = client.poll() => result.map_err(|error| error.code())?,
+            biased;
             () = canceled(cancel) => return Ok(()),
+            result = client.poll() => result.map_err(|error| error.code())?,
         };
         match claim {
-            Some(claim) => supervise(client, config, claim, cancel).await?,
+            Some(claim) => supervise(client, config, video, claim, cancel).await?,
             None => tokio::select! {
-                () = tokio::time::sleep(Duration::from_millis(250)) => {},
+                biased;
                 () = canceled(cancel) => return Ok(()),
+                () = tokio::time::sleep(Duration::from_millis(250)) => {},
             },
         }
     }
@@ -39,13 +63,14 @@ pub(super) async fn run_pdf(
 async fn supervise(
     client: &RunnerClient,
     config: &PdfDaemonConfig,
+    video: Option<&VideoDaemonConfig>,
     claim: TaskClaim,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), ErrorCode> {
     let exec_id = claim.exec_id;
     let mut lease_deadline = deadline(claim.lease_expires_at_ms)?;
     let (stop, receiver) = watch::channel(false);
-    let mut execution = Box::pin(execute(client, config, claim, receiver));
+    let mut execution = Box::pin(execute(client, config, video, claim, receiver));
     loop {
         tokio::select! {
             result = &mut execution => return result,
@@ -77,11 +102,12 @@ async fn supervise(
 async fn execute(
     client: &RunnerClient,
     config: &PdfDaemonConfig,
+    video: Option<&VideoDaemonConfig>,
     claim: TaskClaim,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<(), ErrorCode> {
     let workspace = config.work_root.join(claim.exec_id.to_string());
-    let result = execute_inner(client, config, &claim, &workspace, &mut cancel).await;
+    let result = execute_inner(client, config, video, &claim, &workspace, &mut cancel).await;
     match fs::remove_dir_all(&workspace).await {
         Ok(()) => result,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => result,
@@ -93,22 +119,60 @@ async fn execute(
 async fn execute_inner(
     client: &RunnerClient,
     config: &PdfDaemonConfig,
+    video: Option<&VideoDaemonConfig>,
     claim: &TaskClaim,
     workspace: &Path,
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<(), ErrorCode> {
-    if let Err(code) = claim::validate(claim) {
-        return fail(client, claim, code).await;
-    }
+    let task_kind = match claim.executor {
+        Executor::DocumentAcquire | Executor::DocumentExtract => {
+            if let Err(code) = claim::validate(claim) {
+                return fail(client, claim, code).await;
+            }
+            "PDF"
+        }
+        Executor::VideoAcquire
+        | Executor::VideoTranscribe
+        | Executor::VideoFrames
+        | Executor::VideoMechanicalNote => {
+            let Some(_) = video else {
+                return fail(client, claim, ErrorCode::CorruptState).await;
+            };
+            if let Err(code) = video_claim::validate(claim) {
+                return fail(client, claim, code).await;
+            }
+            "Video"
+        }
+        _ => return fail(client, claim, ErrorCode::CorruptState).await,
+    };
     if fs::create_dir(workspace).await.is_err() {
         return fail(client, claim, ErrorCode::StorageUnavailable).await;
     }
-    if let Err(code) = log::started(client, claim, "PDF").await {
+    if let Err(code) = log::started(client, claim, task_kind).await {
         return fail(client, claim, code).await;
     }
     let timeout = tokio::time::sleep(Duration::from_millis(claim.timeout_ms));
     tokio::pin!(timeout);
-    let work = super::pdf::daemon::run_task(client, config, claim, workspace);
+    let work = async {
+        match claim.executor {
+            Executor::DocumentAcquire | Executor::DocumentExtract => {
+                super::pdf::daemon::run_task(client, config, claim, workspace).await
+            }
+            Executor::VideoAcquire
+            | Executor::VideoTranscribe
+            | Executor::VideoFrames
+            | Executor::VideoMechanicalNote => {
+                video_daemon::run_task(
+                    client,
+                    video.ok_or(ErrorCode::CorruptState)?,
+                    claim,
+                    workspace,
+                )
+                .await
+            }
+            _ => Err(ErrorCode::CorruptState),
+        }
+    };
     tokio::pin!(work);
     let result = tokio::select! {
         result = &mut work => result,
