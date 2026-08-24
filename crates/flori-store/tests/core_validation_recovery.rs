@@ -40,6 +40,34 @@ async fn core_driver_reserves_ledger_before_committing_evidence() {
 }
 
 #[tokio::test]
+async fn concurrent_core_drivers_serialize_validation_and_publish() {
+    let fixture = Fixture::new().await;
+    let artifacts = fixture.artifacts();
+    let (one, two, three, four) = tokio::join!(
+        fixture.store.drive_core_once(&artifacts, 10),
+        fixture.store.drive_core_once(&artifacts, 10),
+        fixture.store.drive_core_once(&artifacts, 10),
+        fixture.store.drive_core_once(&artifacts, 10),
+    );
+    assert!(
+        [one, two, three, four]
+            .into_iter()
+            .all(|result| result.is_ok())
+    );
+    fixture
+        .store
+        .drive_core_once(&artifacts, 11)
+        .await
+        .expect("publish after concurrent validation");
+    let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id=?")
+        .bind(fixture.job_id.to_string())
+        .fetch_one(&fixture.pool)
+        .await
+        .expect("job state");
+    assert_eq!(state, "succeeded");
+}
+
+#[tokio::test]
 async fn core_validation_recovery_converges_every_file_commit_window() {
     for (point, state) in [
         (CrashPoint::LedgerOnly, "receiving"),

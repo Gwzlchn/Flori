@@ -17,7 +17,7 @@ use record::{corrupt, decode, stored, validation_rows};
 use reserve::PendingValidation;
 
 impl Store {
-    pub(in crate::sqlite) async fn resume_pdf_validation(
+    pub(in crate::sqlite) async fn resume_validation(
         &self,
         artifacts: &NasArtifactStore,
         job_id: JobId,
@@ -26,7 +26,7 @@ impl Store {
         now_ms: i64,
     ) -> Result<TaskState, StoreError> {
         let bytes = self
-            .pdf_evidence_bytes(artifacts, job_id)
+            .evidence_bytes(artifacts, job_id)
             .await
             .map_err(|error| {
                 if matches!(
@@ -41,12 +41,12 @@ impl Store {
                     error
                 }
             })?;
-        self.persist_pdf_validation(artifacts, job_id, task_id, attempt_id, None, &bytes, now_ms)
+        self.persist_validation(artifacts, job_id, task_id, attempt_id, None, &bytes, now_ms)
             .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn persist_pdf_validation(
+    pub(super) async fn persist_validation(
         &self,
         artifacts: &NasArtifactStore,
         job_id: JobId,

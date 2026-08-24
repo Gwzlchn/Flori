@@ -11,16 +11,17 @@ use crate::artifact::NasArtifactStore;
 
 use super::super::{Store, StoreError};
 
-struct InputArtifact {
-    id: ArtifactId,
-    kind: ArtifactKind,
-    size: u64,
-    sha256: Sha256Digest,
-    path: String,
+pub(super) struct InputArtifact {
+    pub(super) id: ArtifactId,
+    pub(super) name: String,
+    pub(super) kind: ArtifactKind,
+    pub(super) size: u64,
+    pub(super) sha256: Sha256Digest,
+    pub(super) path: String,
 }
 
 impl Store {
-    pub async fn validate_pdf_job(
+    pub async fn validate_job(
         &self,
         artifacts: &NasArtifactStore,
         job_id: JobId,
@@ -32,7 +33,7 @@ impl Store {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
         }
         let (source_id, declaration) = self.validate_task(job_id, task_id).await?;
-        let bytes = self.pdf_evidence_bytes(artifacts, job_id).await?;
+        let bytes = self.evidence_bytes(artifacts, job_id).await?;
         let size =
             u64::try_from(bytes.len()).map_err(|_| StoreError::new(ErrorCode::ArtifactTooLarge))?;
         if size > declaration.max_bytes {
@@ -40,7 +41,7 @@ impl Store {
         }
         let digest = digest(&bytes)?;
         let pending = self
-            .reserve_pdf_validation(
+            .reserve_validation(
                 artifacts,
                 source_id,
                 job_id,
@@ -52,7 +53,7 @@ impl Store {
                 now_ms,
             )
             .await?;
-        self.persist_pdf_validation(
+        self.persist_validation(
             artifacts,
             job_id,
             task_id,
@@ -62,6 +63,25 @@ impl Store {
             now_ms,
         )
         .await
+    }
+
+    pub(super) async fn evidence_bytes(
+        &self,
+        artifacts: &NasArtifactStore,
+        job_id: JobId,
+    ) -> Result<Vec<u8>, StoreError> {
+        let kind: String = sqlx::query_scalar(
+            "SELECT s.kind FROM jobs j JOIN sources s ON s.id=j.source_id WHERE j.id=?",
+        )
+        .bind(job_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| StoreError::new(ErrorCode::NotFound))?;
+        match kind.as_str() {
+            "arxiv" | "pdf_url" | "pdf_upload" => self.pdf_evidence_bytes(artifacts, job_id).await,
+            "local_video" => self.video_evidence_bytes(artifacts, job_id).await,
+            _ => Err(StoreError::new(ErrorCode::EvidenceInvalid)),
+        }
     }
 
     pub(super) async fn pdf_evidence_bytes(
@@ -126,11 +146,14 @@ impl Store {
         ))
     }
 
-    async fn validation_inputs(&self, job_id: JobId) -> Result<Vec<InputArtifact>, StoreError> {
+    pub(super) async fn validation_inputs(
+        &self,
+        job_id: JobId,
+    ) -> Result<Vec<InputArtifact>, StoreError> {
         let rows = sqlx::query(
-            "SELECT a.id,a.kind,a.size_bytes,a.sha256,a.relative_path FROM artifacts a \
+            "SELECT a.id,a.name,a.kind,a.size_bytes,a.sha256,a.relative_path FROM artifacts a \
              JOIN tasks t ON t.id=a.task_id WHERE a.job_id=? AND a.kind IN \
-             ('source_original','document_structure','smart_note','summary','terms') AND \
+             ('source_original','document_structure','transcript','keyframe','smart_note','summary','terms') AND \
              ((a.origin='produced' AND t.state='succeeded' AND a.attempt_id=t.current_attempt_id) \
               OR (a.origin='materialized' AND t.state='skipped' AND a.attempt_id IS NULL)) ORDER BY a.kind,a.id",
         )
@@ -147,6 +170,7 @@ impl Store {
                         .try_get::<String, _>("id")?
                         .parse()
                         .map_err(|_| corrupt())?,
+                    name: row.try_get("name")?,
                     kind,
                     size: row
                         .try_get::<i64, _>("size_bytes")?
@@ -161,7 +185,10 @@ impl Store {
     }
 }
 
-fn one(values: &[InputArtifact], kind: ArtifactKind) -> Result<&InputArtifact, StoreError> {
+pub(super) fn one(
+    values: &[InputArtifact],
+    kind: ArtifactKind,
+) -> Result<&InputArtifact, StoreError> {
     let mut matching = values.iter().filter(|item| item.kind == kind);
     let item = matching
         .next()
@@ -172,7 +199,10 @@ fn one(values: &[InputArtifact], kind: ArtifactKind) -> Result<&InputArtifact, S
     Ok(item)
 }
 
-fn read_text(artifacts: &NasArtifactStore, input: &InputArtifact) -> Result<String, StoreError> {
+pub(super) fn read_text(
+    artifacts: &NasArtifactStore,
+    input: &InputArtifact,
+) -> Result<String, StoreError> {
     let file = artifacts
         .open_verified_range(&input.path, input.size, &input.sha256, 0, input.size)
         .map_err(|error| StoreError::new(error.code()))?;

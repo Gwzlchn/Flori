@@ -17,7 +17,7 @@ pub(in crate::sqlite::scheduler) struct PendingValidation {
 
 impl Store {
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::sqlite::scheduler) async fn reserve_pdf_validation(
+    pub(in crate::sqlite::scheduler) async fn reserve_validation(
         &self,
         artifacts: &NasArtifactStore,
         source_id: SourceId,

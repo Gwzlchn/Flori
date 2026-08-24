@@ -1,4 +1,4 @@
-use std::{fmt, path::Path};
+use std::{fmt, path::Path, sync::atomic::AtomicBool};
 
 use flori_core::{
     AiTool, AiUsageId, AttemptId, CONTRACT_REVISION, ErrorCode, JobId, TaskId, UsageOrigin,
@@ -107,6 +107,7 @@ pub struct UsageRecord {
 
 pub struct Store {
     pool: SqlitePool,
+    core_driver: AtomicBool,
 }
 
 impl Store {
@@ -120,7 +121,10 @@ impl Store {
             .connect_with(options)
             .await?;
 
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            core_driver: AtomicBool::new(false),
+        };
         store.initialize_or_verify().await?;
         sqlx::query("PRAGMA journal_mode = WAL")
             .execute(&store.pool)

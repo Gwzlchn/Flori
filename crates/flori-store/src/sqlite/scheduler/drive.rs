@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use flori_core::{AttemptId, ErrorCode, JobId, TaskId};
 use sqlx::Row;
 
@@ -14,6 +16,14 @@ impl Store {
         artifacts: &NasArtifactStore,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        if self
+            .core_driver
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let _driver = CoreDriverGuard(&self.core_driver);
         if now_ms < 0 {
             return Err(StoreError::new(ErrorCode::InvalidRequest));
         }
@@ -49,11 +59,11 @@ impl Store {
         };
         let result = match row.try_get::<String, _>("executor")?.as_str() {
             "core.validate" if state == "leased" => self
-                .resume_pdf_validation(artifacts, job_id, task_id, attempt_id, now_ms)
+                .resume_validation(artifacts, job_id, task_id, attempt_id, now_ms)
                 .await
                 .map(|_| ()),
             "core.validate" => self
-                .validate_pdf_job(artifacts, job_id, task_id, attempt_id, now_ms)
+                .validate_job(artifacts, job_id, task_id, attempt_id, now_ms)
                 .await
                 .map(|_| ()),
             "core.publish" => {
@@ -149,6 +159,14 @@ impl Store {
         }
         transaction.commit().await?;
         Ok(())
+    }
+}
+
+struct CoreDriverGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for CoreDriverGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 

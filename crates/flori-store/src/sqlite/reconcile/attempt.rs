@@ -63,7 +63,7 @@ pub(super) async fn reconcile(
             .map_err(|_| corrupt())?;
         transaction.rollback().await?;
         store
-            .resume_pdf_validation(artifacts, job_id, task_id, attempt_id, now_ms)
+            .resume_validation(artifacts, job_id, task_id, attempt_id, now_ms)
             .await?;
         return Ok(());
     }
