@@ -79,7 +79,9 @@ impl Store {
         .ok_or_else(|| StoreError::new(ErrorCode::NotFound))?;
         match kind.as_str() {
             "arxiv" | "pdf_url" | "pdf_upload" => self.pdf_evidence_bytes(artifacts, job_id).await,
-            "local_video" => self.video_evidence_bytes(artifacts, job_id).await,
+            "bilibili_video" | "youtube_video" | "local_video" => {
+                self.video_evidence_bytes(artifacts, job_id).await
+            }
             _ => Err(StoreError::new(ErrorCode::EvidenceInvalid)),
         }
     }

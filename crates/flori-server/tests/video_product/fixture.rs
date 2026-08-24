@@ -95,16 +95,6 @@ async fn slot(
         .expect("runner slot")
 }
 
-pub(super) fn download_capabilities() -> RegisterRunnerRequest {
-    RegisterRunnerRequest {
-        tools: vec![RunnerToolCapability {
-            tool: RunnerTool::Ffprobe,
-            version: "5.1.9".into(),
-        }],
-        ai_models: vec![],
-    }
-}
-
 pub(super) fn media_capabilities() -> RegisterRunnerRequest {
     RegisterRunnerRequest {
         tools: [
@@ -193,10 +183,14 @@ pub(super) fn write_media_tools(root: &Path) -> MediaTools {
 esac
 "#,
     );
+    let marker = root.join("whisper-called");
     let python = script(
         &bin,
         "python",
-        "printf '%s' '{\"language\":\"en\",\"segments\":[{\"start_ms\":0,\"end_ms\":1500,\"text\":\"Hello video\"},{\"start_ms\":1500,\"end_ms\":3000,\"text\":\"Second cue\"}]}'\n",
+        &format!(
+            "printf x >> '{}'\nprintf '%s' '{{\"language\":\"en\",\"segments\":[{{\"start_ms\":0,\"end_ms\":1500,\"text\":\"Hello video\"}},{{\"start_ms\":1500,\"end_ms\":3000,\"text\":\"Second cue\"}}]}}'\n",
+            marker.display()
+        ),
     );
     MediaTools {
         ffmpeg,
@@ -213,7 +207,7 @@ pub(super) struct MediaTools {
     pub model: PathBuf,
 }
 
-fn script(root: &Path, name: &str, body: &str) -> PathBuf {
+pub(super) fn script(root: &Path, name: &str, body: &str) -> PathBuf {
     let path = root.join(name);
     fs::write(&path, format!("#!/bin/sh\n{body}")).expect("script");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("executable");

@@ -1,6 +1,8 @@
 use std::{net::SocketAddr, time::Duration};
 
-use flori_core::{CreateJobRequest, CreateUploadSource, CreatedJob, CreatedSource};
+use flori_core::{
+    CreateJobRequest, CreateRemoteSource, CreateUploadSource, CreatedJob, CreatedSource,
+};
 use serde::de::DeserializeOwned;
 use sqlx::SqlitePool;
 use tokio::{
@@ -49,6 +51,23 @@ pub(super) async fn create_job(
             address,
             "POST",
             &format!("/api/v1/sources/{}/jobs", source.source_id),
+            "Content-Type: application/json\r\n",
+            &body,
+        )
+        .await,
+    )
+}
+
+pub(super) async fn create_remote(
+    address: SocketAddr,
+    request: &CreateRemoteSource,
+) -> CreatedSource {
+    let body = serde_json::to_vec(request).expect("source request");
+    decode(
+        exchange(
+            address,
+            "POST",
+            "/api/v1/sources",
             "Content-Type: application/json\r\n",
             &body,
         )

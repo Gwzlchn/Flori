@@ -68,7 +68,7 @@ pub(super) async fn publish(
         subtitle,
         ArtifactKind::Subtitle,
         "subtitle.srt",
-        "text/srt",
+        "application/x-subrip",
         &output,
     )
     .await?;

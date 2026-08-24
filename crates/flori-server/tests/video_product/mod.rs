@@ -1,6 +1,9 @@
 mod fixture;
 mod http;
+mod platform;
 mod qoder;
+
+pub(crate) use platform::Case;
 
 use std::{fs, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
 
@@ -9,15 +12,14 @@ use flori_core::{
     SourceKind, VideoKeyframe,
 };
 use flori_runner::{
-    DaemonConfig, DownloadDaemonConfig, FasterWhisperConfig, PdfAcquireConfig, PdfDaemonConfig,
-    PdfExtractConfig, RunnerClient, VideoDaemonConfig, run_ai_daemon, run_download_daemon,
-    run_media_daemon,
+    DaemonConfig, FasterWhisperConfig, PdfAcquireConfig, PdfDaemonConfig, PdfExtractConfig,
+    RunnerClient, VideoDaemonConfig, run_ai_daemon, run_media_daemon,
 };
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
 use tokio::{net::TcpListener, sync::watch};
 
-pub(super) async fn run() {
+pub(super) async fn run(case: Case) {
     let root = std::env::temp_dir().join(format!(
         "flori-video-product-{}",
         flori_core::RequestId::generate()
@@ -51,19 +53,24 @@ pub(super) async fn run() {
     });
 
     let video = include_bytes!("../../../../tests/fixtures/vnext/local-video.mp4");
-    let uploaded = http::upload(
-        address,
-        &CreateUploadSource {
-            request_key: "video-upload".into(),
-            kind: SourceKind::LocalVideo,
-            title: Some("Local video golden".into()),
-            domain_id: domain,
-            collection_ids: vec![],
-            file_sha256: fixture::digest(video),
-        },
-        video,
-    )
-    .await;
+    let uploaded = match case {
+        Case::Local => {
+            http::upload(
+                address,
+                &CreateUploadSource {
+                    request_key: "video-upload".into(),
+                    kind: SourceKind::LocalVideo,
+                    title: Some("Local video golden".into()),
+                    domain_id: domain,
+                    collection_ids: vec![],
+                    file_sha256: fixture::digest(video),
+                },
+                video,
+            )
+            .await
+        }
+        Case::Youtube | Case::Bilibili => platform::create_source(address, domain, case).await,
+    };
     let job = http::create_job(
         address,
         &uploaded,
@@ -74,17 +81,6 @@ pub(super) async fn run() {
         },
     )
     .await;
-
-    let download_registration = RunnerClient::register(
-        &format!("http://{address}"),
-        fixture::DOWNLOAD_KEY,
-        &fixture::download_capabilities(),
-    )
-    .await
-    .expect("register download");
-    assert_eq!(download_registration.runner_id, download_id);
-    let download = RunnerClient::new(&format!("http://{address}"), download_registration.token)
-        .expect("download client");
 
     let media_registration = RunnerClient::register(
         &format!("http://{address}"),
@@ -97,17 +93,7 @@ pub(super) async fn run() {
     let media = RunnerClient::new(&format!("http://{address}"), media_registration.token)
         .expect("media client");
     let tools = fixture::write_media_tools(&root);
-    let download_config = DownloadDaemonConfig::new(
-        root.join("download-work"),
-        "/unused/yt-dlp".into(),
-        "/unused/yutto".into(),
-        tools.ffprobe.clone(),
-        flori_runner::ProxyUrl::parse("http://youtube-proxy.invalid:1080").expect("proxy"),
-    );
-    let (download_stop, mut download_cancel) = watch::channel(false);
-    let download_task = tokio::spawn(async move {
-        run_download_daemon(&download, &download_config, &mut download_cancel).await
-    });
+    let download = platform::start(address, download_id, &root, &tools.ffprobe, case).await;
     let media_config = VideoDaemonConfig {
         ffmpeg: tools.ffmpeg,
         ffprobe: tools.ffprobe,
@@ -255,12 +241,13 @@ pub(super) async fn run() {
         .fetch_one(&pool)
         .await
         .expect("artifacts");
-    assert_eq!(artifacts, 15);
+    assert_eq!(artifacts, if case == Case::Local { 15 } else { 16 });
+    platform::assert_transcription(&pool, job.job_id, &root, case).await;
 
     let _ = media_stop.send(true);
     let _ = ai_stop.send(true);
-    let _ = download_stop.send(true);
-    let download_result = download_task.await.expect("download join");
+    let _ = download.stop.send(true);
+    let download_result = download.task.await.expect("download join");
     assert!(
         download_result.is_ok(),
         "download daemon: {download_result:?}"
