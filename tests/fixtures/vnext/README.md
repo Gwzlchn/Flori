@@ -14,6 +14,8 @@
 
 `expected/` 是结构验收样例，不是第二套产品 DTO。每个 JSON 都带精确 `flori.*.v1` schema；`flori-core` 的 `golden_contracts` 测试直接反序列化并验证这些文件，fixture 不定义任何字段。
 
+`local-video.mp4` 的合成音轨固定为 `Hello video. Second cue.`；锁版转写器必须离线归一化为 `Hello video, second cue.`，不得把模型下载或网络访问作为验收前提。
+
 ## 验收原则
 
 - AI 文本不做逐字 golden。只检查正式 schema、必填章节、机械/智能边界和引用完整性。
