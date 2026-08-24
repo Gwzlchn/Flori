@@ -155,7 +155,7 @@ publish:
 | `video.acquire` | yt-dlp/yutto/本地输入、字幕、弹幕原文件、分P清单 | `source_original`、`subtitle`、`danmaku`、`parts_manifest` |
 | `video.subscription` | 使用 yt-dlp/yutto 枚举频道最新条目，受 Collection fanout 限制 | `subscription_manifest` |
 | `video.transcribe` | 平台字幕优先，Whisper 兜底并标准化时间段 | `transcript` |
-| `video.frames` | 关键帧选择和内部简单去重 | `keyframe` |
+| `video.frames` | 场景代表帧、长场景定时补帧和内部 pHash/SSIM 去重 | `keyframe` |
 | `video.mechanical_note` | 忠于字幕的易读机械笔记 | `mechanical_note` |
 | `ai.video_note` | 分析型智能笔记、摘要、关键名词 | `smart_note`、`summary`、`terms` |
 | `core.validate` | 校验 PDF/视频 locator、quote 和关键帧引用 | `evidence` |
