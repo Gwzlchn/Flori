@@ -27,7 +27,7 @@
 
 WP01-WP11 已完成。PDF 上传、直接 URL 和 arXiv 使用同一 Pipeline；digital PDF 可经 media Runner 生成结构、Figure、Table 区域和严格 evidence，再由 QoderCLI 或 CodexCLI 生成并发布 current 成果。扫描 PDF 在 extractor 和 AI 前拒绝。真实 Qoder 验收已在单独授权下完成；它不构成生产部署授权。
 
-WP12-A 只完成本地三秒视频的离线黄金基线，包括锁版 FFmpeg 探测、字幕规范化、关键帧和机械笔记；尚无视频 Pipeline 或 product daemon。WP13-A 已完成 current-only evidence、FTS 和 Artifact 读取投影；MCP 与其余知识库管理面仍待后续切片。WP14-A 至 WP14-C 已完成 PDF 上传、搜索、重跑和 evidence 阅读，并恢复领域、分类、内容三级知识库导航，以及产物、Pipeline、元信息、图表四个内容详情视图；前端只使用生成的 OpenAPI client。当前仍不是生产候选。
+WP12-A 只完成本地三秒视频的离线黄金基线，包括锁版 FFmpeg 探测、字幕规范化、关键帧和机械笔记；尚无视频 Pipeline 或 product daemon。WP13-A 已完成 current-only evidence、FTS 和 Artifact 读取投影；MCP 与其余知识库管理面仍待后续切片。WP14-A 至 WP14-H 已完成 PDF 上传、搜索、重跑和 evidence 阅读，并恢复领域、分类、内容三级知识库导航、HTML 优先阅读、Pipeline 工作台、丰富元信息、图表目录、System、Events、Runner 和 About 页面；前端只使用生成的 OpenAPI client。当前仍不是生产候选。
 
 WP15 已完成 Job 取消、Source 完整删除、旧 Job Artifact 保留清理、SSE、system health 和启动恢复。生产冷切换、现有数据删除、公网变更与旧 Python 退役仍只属于 WP16，必须单独授权。
 
@@ -48,7 +48,7 @@ WP15 已完成 Job 取消、Source 完整删除、旧 Job Artifact 保留清理�
 | WP13 | MCP 和其余知识库管理面 | 待后续切片 |
 | WP14-A | PDF 上传、Job、Artifact、搜索和 evidence 阅读 UI | 已完成 |
 | WP14-C | 知识库导航与 PDF 内容详情 | 已完成 |
-| WP14 | 其余保留页面 | 待后续切片 |
+| WP14-B～H | 响应式工作台、HTML 阅读、Pipeline、图表、System 与产品验收 | 已完成 |
 | WP15 | 删除、保留、观测和安全收口 | 已完成 |
 | WP16 | 生产冷切换与旧 Python 退役 | 单独授权 |
 
