@@ -19,12 +19,19 @@ use sqlx::SqlitePool;
 pub(super) const MODEL: &str = "fake-video-model";
 pub(super) const EFFORT: &str = "high";
 pub(super) const MEDIA_KEY: &str = "video-product-media";
+pub(super) const DOWNLOAD_KEY: &str = "video-product-download";
 pub(super) const AI_KEY: &str = "video-product-ai";
 
 pub(super) async fn seed(
     store: &Store,
     pool: &SqlitePool,
-) -> (flori_core::DomainId, PipelineId, RunnerId, RunnerId) {
+) -> (
+    flori_core::DomainId,
+    PipelineId,
+    RunnerId,
+    RunnerId,
+    RunnerId,
+) {
     let domain = flori_core::DomainId::generate();
     sqlx::query("INSERT INTO domains(id,slug,name,profile_text,created_at_ms,updated_at_ms) VALUES(?,?,'Video','Video knowledge.',0,0)")
         .bind(domain.to_string()).bind(format!("video-{domain}")).execute(pool).await.expect("domain");
@@ -49,14 +56,24 @@ pub(super) async fn seed(
         )
         .await
         .expect("pipeline revision");
-    let media = slot(store, "video-media", None, None, MEDIA_KEY).await;
-    let ai = slot(store, "video-ai", Some(MODEL), Some(EFFORT), AI_KEY).await;
-    (domain, pipeline, media, ai)
+    let download = slot(
+        store,
+        "video-download",
+        "download",
+        None,
+        None,
+        DOWNLOAD_KEY,
+    )
+    .await;
+    let media = slot(store, "video-media", "media", None, None, MEDIA_KEY).await;
+    let ai = slot(store, "video-ai", "ai", Some(MODEL), Some(EFFORT), AI_KEY).await;
+    (domain, pipeline, download, media, ai)
 }
 
 async fn slot(
     store: &Store,
     name: &str,
+    tag: &str,
     model: Option<&str>,
     effort: Option<&str>,
     key: &str,
@@ -65,7 +82,7 @@ async fn slot(
         .create_runner_slot(
             &CreateRunnerSlot {
                 name: name.into(),
-                tags: vec![if model.is_some() { "ai" } else { "media" }.into()],
+                tags: vec![tag.into()],
                 max_concurrency: 1,
                 default_model: model.map(str::to_owned),
                 default_effort: effort.map(str::to_owned),
@@ -76,6 +93,16 @@ async fn slot(
         )
         .await
         .expect("runner slot")
+}
+
+pub(super) fn download_capabilities() -> RegisterRunnerRequest {
+    RegisterRunnerRequest {
+        tools: vec![RunnerToolCapability {
+            tool: RunnerTool::Ffprobe,
+            version: "5.1.9".into(),
+        }],
+        ai_models: vec![],
+    }
 }
 
 pub(super) fn media_capabilities() -> RegisterRunnerRequest {

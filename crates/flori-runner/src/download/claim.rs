@@ -25,7 +25,7 @@ fn validate_source(claim: &TaskClaim, source: &ResolvedSource) -> Result<(), Err
     let credential = claim.secret_inputs.credential.as_ref();
     match source.kind {
         SourceKind::LocalVideo
-            if source.canonical_ref.starts_with("upload:")
+            if valid_upload(&source.canonical_ref)
                 && source.input.as_ref().is_some_and(|input| {
                     input.name == "original" && input.media_type == "video/mp4"
                 })
@@ -56,6 +56,15 @@ fn validate_source(claim: &TaskClaim, source: &ResolvedSource) -> Result<(), Err
         }
         _ => Err(ErrorCode::UnsupportedSource),
     }
+}
+
+fn valid_upload(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }
 
 fn valid_secret(value: &str) -> bool {

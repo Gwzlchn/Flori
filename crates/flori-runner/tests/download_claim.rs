@@ -105,7 +105,7 @@ fn accepts_only_strict_single_video_claims() {
     for (kind, reference) in [
         (
             SourceKind::LocalVideo,
-            "upload:01a0206f-7e01-7090-8399-60009ee8bdfe",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ),
         (SourceKind::YoutubeVideo, "youtube:dQw4w9WgXcQ"),
         (SourceKind::BilibiliVideo, "bilibili:BV1GJ411x7h7"),

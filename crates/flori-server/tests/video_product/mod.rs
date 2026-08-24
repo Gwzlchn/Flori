@@ -9,8 +9,9 @@ use flori_core::{
     SourceKind, VideoKeyframe,
 };
 use flori_runner::{
-    DaemonConfig, FasterWhisperConfig, PdfAcquireConfig, PdfDaemonConfig, PdfExtractConfig,
-    RunnerClient, VideoDaemonConfig, run_ai_daemon, run_media_daemon,
+    DaemonConfig, DownloadDaemonConfig, FasterWhisperConfig, PdfAcquireConfig, PdfDaemonConfig,
+    PdfExtractConfig, RunnerClient, VideoDaemonConfig, run_ai_daemon, run_download_daemon,
+    run_media_daemon,
 };
 use flori_store::{Store, artifact::NasArtifactStore};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions};
@@ -35,7 +36,7 @@ pub(super) async fn run() {
     .expect("pool");
     let artifacts =
         Arc::new(NasArtifactStore::new(&artifact_root, 128 * 1024 * 1024).expect("NAS"));
-    let (domain, pipeline, media_id, ai_id) = fixture::seed(&store, &pool).await;
+    let (domain, pipeline, download_id, media_id, ai_id) = fixture::seed(&store, &pool).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
     let address = listener.local_addr().expect("address");
     let base = format!("http://{address}");
@@ -74,6 +75,17 @@ pub(super) async fn run() {
     )
     .await;
 
+    let download_registration = RunnerClient::register(
+        &format!("http://{address}"),
+        fixture::DOWNLOAD_KEY,
+        &fixture::download_capabilities(),
+    )
+    .await
+    .expect("register download");
+    assert_eq!(download_registration.runner_id, download_id);
+    let download = RunnerClient::new(&format!("http://{address}"), download_registration.token)
+        .expect("download client");
+
     let media_registration = RunnerClient::register(
         &format!("http://{address}"),
         fixture::MEDIA_KEY,
@@ -85,6 +97,17 @@ pub(super) async fn run() {
     let media = RunnerClient::new(&format!("http://{address}"), media_registration.token)
         .expect("media client");
     let tools = fixture::write_media_tools(&root);
+    let download_config = DownloadDaemonConfig::new(
+        root.join("download-work"),
+        "/unused/yt-dlp".into(),
+        "/unused/yutto".into(),
+        tools.ffprobe.clone(),
+        flori_runner::ProxyUrl::parse("http://youtube-proxy.invalid:1080").expect("proxy"),
+    );
+    let (download_stop, mut download_cancel) = watch::channel(false);
+    let download_task = tokio::spawn(async move {
+        run_download_daemon(&download, &download_config, &mut download_cancel).await
+    });
     let media_config = VideoDaemonConfig {
         ffmpeg: tools.ffmpeg,
         ffprobe: tools.ffprobe,
@@ -236,6 +259,12 @@ pub(super) async fn run() {
 
     let _ = media_stop.send(true);
     let _ = ai_stop.send(true);
+    let _ = download_stop.send(true);
+    let download_result = download_task.await.expect("download join");
+    assert!(
+        download_result.is_ok(),
+        "download daemon: {download_result:?}"
+    );
     let media_result = media_task.await.expect("media join");
     assert!(media_result.is_ok(), "media daemon: {media_result:?}");
     let ai_result = ai_task.await.expect("AI join");
