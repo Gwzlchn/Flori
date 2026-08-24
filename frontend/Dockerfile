@@ -2,9 +2,11 @@
 
 FROM node:24-alpine AS dependencies
 WORKDIR /app
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+RUN --mount=type=cache,id=flori-frontend-npm,target=/root/.npm,sharing=locked \
+    npm ci --prefer-offline
 
 FROM dependencies AS check
 COPY tsconfig.json eslint.config.js vite.config.ts index.html ./
