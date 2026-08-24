@@ -9,7 +9,7 @@ use flori_core::{
     AiModelCapability, AiResultEnvelope, AiResultSchema, ArtifactId, CreateRunnerSlot,
     EvidenceEntry, EvidenceId, EvidenceLocator, PipelineId, PipelineRevisionId,
     RegisterRunnerRequest, RunnerId, RunnerTool, RunnerToolCapability, Sha256Digest, TermEntry,
-    TermsManifest, TermsManifestSchema, VideoKeyframe,
+    TermsManifest, TermsManifestSchema, TranscriptCue, VideoKeyframe,
 };
 use flori_pipeline::compile;
 use flori_store::Store;
@@ -125,9 +125,14 @@ pub(super) fn ai_capabilities() -> RegisterRunnerRequest {
     }
 }
 
-pub(super) fn envelope(source: ArtifactId, frame: VideoKeyframe, quote: &str) -> AiResultEnvelope {
+pub(super) fn envelope(
+    source: ArtifactId,
+    frame: Option<VideoKeyframe>,
+    cue: &TranscriptCue,
+) -> AiResultEnvelope {
     let evidence = EvidenceId::generate();
     let marker = format!("[[evidence:{evidence}]]");
+    let quote = &cue.text;
     AiResultEnvelope::VideoNote {
         schema: AiResultSchema::V1,
         smart_note_markdown: format!(
@@ -145,9 +150,9 @@ pub(super) fn envelope(source: ArtifactId, frame: VideoKeyframe, quote: &str) ->
                 evidence_id: evidence,
                 source_artifact_id: source,
                 locator: EvidenceLocator::Video {
-                    start_ms: 0,
-                    end_ms: 1_500,
-                    keyframe: Some(frame),
+                    start_ms: cue.start_ms,
+                    end_ms: cue.end_ms,
+                    keyframe: frame,
                 },
                 quote: quote.into(),
             }],
@@ -155,7 +160,7 @@ pub(super) fn envelope(source: ArtifactId, frame: VideoKeyframe, quote: &str) ->
     }
 }
 
-pub(super) fn write_media_tools(root: &Path) -> MediaTools {
+pub(super) fn write_media_tools(root: &Path, external: bool) -> MediaTools {
     let bin = root.join("tools");
     let model = root.join("model/base");
     fs::create_dir_all(&bin).expect("tools");
@@ -171,7 +176,10 @@ pub(super) fn write_media_tools(root: &Path) -> MediaTools {
     let ffprobe = script(
         &bin,
         "ffprobe",
-        "printf '%s' '{\"streams\":[{\"codec_type\":\"video\",\"width\":320,\"height\":180,\"avg_frame_rate\":\"10/1\"},{\"codec_type\":\"audio\"}],\"format\":{\"duration\":\"3.000000\"}}'\n",
+        &format!(
+            "printf '%s' '{{\"streams\":[{{\"codec_type\":\"video\",\"width\":320,\"height\":180,\"avg_frame_rate\":\"10/1\"}},{{\"codec_type\":\"audio\"}}],\"format\":{{\"duration\":\"{}\"}}}}'\n",
+            if external { "240.000000" } else { "3.000000" }
+        ),
     );
     let ffmpeg = script(
         &bin,

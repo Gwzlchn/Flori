@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use flori_core::{AiResultEnvelope, EvidenceLocator, JobId};
+use flori_core::{AiResultEnvelope, JobId};
 use sqlx::SqlitePool;
 
 pub(super) struct QoderFixture {
@@ -17,14 +17,7 @@ pub(super) fn invalid_then_repaired(root: &Path, repaired: &AiResultEnvelope) ->
     let AiResultEnvelope::VideoNote { terms, .. } = &mut invalid else {
         panic!("video envelope");
     };
-    let EvidenceLocator::Video {
-        keyframe: Some(keyframe),
-        ..
-    } = &mut terms.evidence_candidates[0].locator
-    else {
-        panic!("video keyframe");
-    };
-    keyframe.timestamp_ms += 1;
+    terms.evidence_candidates[0].quote.push_str(" invalid");
     let primary = root.join("qoder-primary.json");
     let repair = root.join("qoder-repair.json");
     fs::write(&primary, result(&invalid)).expect("primary output");

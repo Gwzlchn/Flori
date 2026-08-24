@@ -101,8 +101,9 @@ pub(super) async fn run(case: Case, mode: Mode) {
     assert_eq!(media_registration.runner_id, media_id);
     let media = RunnerClient::new(&format!("http://{address}"), media_registration.token)
         .expect("media client");
-    let tools = fixture::write_media_tools(&root);
-    let download = platform::start(address, download_id, &root, &tools.ffprobe, case, mode).await;
+    let tools = fixture::write_media_tools(&root, mode == Mode::External);
+    let mut download =
+        Some(platform::start(address, download_id, &root, &tools.ffprobe, case, mode).await);
     let media_config = VideoDaemonConfig {
         ffmpeg: tools.ffmpeg,
         ffprobe: tools.ffprobe,
@@ -136,6 +137,17 @@ pub(super) async fn run(case: Case, mode: Mode) {
         },
         renew_interval: Duration::from_millis(100),
     };
+    if mode == Mode::External {
+        http::wait_task_for(
+            &pool,
+            job.job_id,
+            "transcribe",
+            "ready",
+            Duration::from_secs(300),
+        )
+        .await;
+        download.take().expect("download runner").stop().await;
+    }
     let (media_stop, mut media_cancel) = watch::channel(false);
     let media_task = tokio::spawn(async move {
         run_media_daemon(&media, &pdf_config, &media_config, &mut media_cancel).await
@@ -193,8 +205,12 @@ pub(super) async fn run(case: Case, mode: Mode) {
         frame.try_get("name").expect("frame name"),
     )
     .expect("keyframe name");
-    let quote = transcript.cues.first().expect("first cue").text.clone();
-    let repaired = fixture::envelope(transcript.source_artifact_id, keyframe, &quote);
+    let cue = transcript.cues.first().expect("first cue");
+    let repaired = fixture::envelope(
+        transcript.source_artifact_id,
+        (mode == Mode::Fake).then_some(keyframe),
+        cue,
+    );
     let qoder = qoder::invalid_then_repaired(&root, &repaired);
     let ai_registration = RunnerClient::register(
         &format!("http://{address}"),
@@ -241,14 +257,16 @@ pub(super) async fn run(case: Case, mode: Mode) {
         (evidence.source_id, evidence.job_id),
         (uploaded.source_id, job.job_id)
     );
-    assert!(matches!(
-        evidence.locator,
-        EvidenceLocator::Video {
-            start_ms: 0,
-            end_ms: 1_500,
-            keyframe: Some(_)
-        }
-    ));
+    let EvidenceLocator::Video {
+        start_ms,
+        end_ms,
+        keyframe,
+    } = evidence.locator
+    else {
+        panic!("video evidence");
+    };
+    assert!(start_ms < end_ms);
+    assert_eq!(keyframe.is_some(), mode == Mode::Fake);
     let current: Option<String> =
         sqlx::query_scalar("SELECT current_job_id FROM sources WHERE id=?")
             .bind(uploaded.source_id.to_string())
@@ -267,7 +285,9 @@ pub(super) async fn run(case: Case, mode: Mode) {
 
     let _ = media_stop.send(true);
     let _ = ai_stop.send(true);
-    download.stop().await;
+    if let Some(download) = download {
+        download.stop().await;
+    }
     let media_result = media_task.await.expect("media join");
     assert!(media_result.is_ok(), "media daemon: {media_result:?}");
     let ai_result = ai_task.await.expect("AI join");
