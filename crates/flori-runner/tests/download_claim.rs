@@ -2,9 +2,9 @@
 mod claim;
 
 use flori_core::{
-    ArtifactDeclaration, ArtifactKind, ArtifactWhen, AttemptId, Executor, JobId, ResolvedSource,
-    ResolvedSourceInput, ResolvedTaskInputs, SecretInputs, Sha256Digest, SourceId, SourceInputId,
-    SourceKind, TaskClaim, TaskId,
+    ArtifactDeclaration, ArtifactKind, ArtifactWhen, AttemptId, CredentialKind, Executor, JobId,
+    ResolvedSource, ResolvedSourceInput, ResolvedTaskInputs, SecretCredential, SecretInputs,
+    Sha256Digest, SourceId, SourceInputId, SourceKind, TaskClaim, TaskId,
 };
 
 fn declaration(
@@ -124,4 +124,16 @@ fn accepts_only_strict_single_video_claims() {
     ] {
         assert!(claim::validate(&make_claim(kind, reference)).is_err());
     }
+}
+
+#[test]
+fn credential_and_artifact_drift_fail_closed() {
+    let mut value = make_claim(SourceKind::YoutubeVideo, "youtube:dQw4w9WgXcQ");
+    value.secret_inputs.credential = Some(SecretCredential {
+        kind: CredentialKind::BilibiliCookie,
+        value: "REDACTED".into(),
+    });
+    assert!(claim::validate(&value).is_err());
+    value.output_declarations[0].path = "output/escape/*".into();
+    assert!(claim::validate(&value).is_err());
 }
