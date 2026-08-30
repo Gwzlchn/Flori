@@ -46,6 +46,8 @@ const cards = computed<VisualCard[]>(() => {
   }
   return result;
 });
+const figureCards = computed(() => cards.value.filter((card) => card.category === "Figure"));
+const tableCards = computed(() => cards.value.filter((card) => card.category === "Table"));
 function projectionOf(card: VisualCard): components["schemas"]["HtmlVisualProjection"] | undefined {
   const kind = card.category === "Figure" ? "figure" : "table_region";
   return props.projections?.find((item) => item.kind === kind && item.artifact_name === card.meta.artifact_name);
@@ -106,16 +108,29 @@ watch(() => [props.activeVisualId, cards.value, props.projections] as const, () 
           下一项
         </button>
       </div>
-      <button
-        v-for="card in cards"
-        :key="card.meta.id"
-        type="button"
-        :aria-current="activeVisualId === card.meta.id ? 'true' : undefined"
-        @click="activate(card, true)"
+      <section
+        v-for="group in [{ label: '图', cards: figureCards }, { label: '表', cards: tableCards }]"
+        :key="group.label"
+        class="visual-nav-group"
       >
-        <span>{{ card.category }} {{ card.sequence }} · {{ card.meta.id }}</span>
-        <small>{{ card.meta.caption }}</small>
-      </button>
+        <h3>{{ group.label }} <span>{{ group.cards.length }}</span></h3>
+        <p
+          v-if="!group.cards.length"
+          class="meta"
+        >
+          无
+        </p>
+        <button
+          v-for="card in group.cards"
+          :key="card.meta.id"
+          type="button"
+          :aria-current="activeVisualId === card.meta.id ? 'true' : undefined"
+          @click="activate(card, true)"
+        >
+          <span>{{ card.category }} {{ card.sequence }} · {{ card.meta.id }}</span>
+          <small>{{ card.meta.caption }}</small>
+        </button>
+      </section>
     </nav>
     <div class="visual-cards">
       <article
@@ -207,6 +222,7 @@ watch(() => [props.activeVisualId, cards.value, props.projections] as const, () 
 <style scoped>
 .visual-nav { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .visual-nav button { justify-content: center; color: var(--muted); border: 1px solid var(--line); background: white; }
+.visual-nav-group h3 { display: flex; gap: 6px; margin: 8px 8px 3px; color: var(--muted); font-size: 12px; }.visual-nav-group h3 span { color: #aaa9a3; font-weight: 400; }
 .visual-catalog button[aria-current="true"], .visual-card.is-active { border-color: #a8cef0; background: var(--brand-soft); }
 .visual-text { max-height: 12em; overflow: auto; color: var(--muted); white-space: pre-wrap; }
 .visual-image { width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; }
