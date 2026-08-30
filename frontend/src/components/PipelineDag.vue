@@ -66,7 +66,7 @@ const graph = computed(() => {
     const level = depth.get(task.task_key) ?? 0;
     const row = levelCounts.get(level) ?? 0;
     levelCounts.set(level, row + 1);
-    return { task, x: 24 + level * 224, y: 34 + row * 104 };
+    return { task, x: 18 + level * 188, y: 30 + row * 86 };
   });
   const byKey = new Map(nodes.map((node) => [node.task.task_key, node]));
   const edges = nodes.flatMap((target) => target.task.spec.needs.flatMap((key) => {
@@ -80,8 +80,8 @@ const graph = computed(() => {
     ordered,
     nodes,
     edges,
-    width: Math.max(460, 208 + Math.max(0, ...nodes.map((node) => node.x))),
-    height: Math.max(174, 132 + Math.max(0, ...nodes.map((node) => node.y))),
+    width: Math.max(420, 166 + Math.max(0, ...nodes.map((node) => node.x))),
+    height: Math.max(150, 108 + Math.max(0, ...nodes.map((node) => node.y))),
   };
 });
 
@@ -151,7 +151,7 @@ function selectOffset(offset: number): void {
             v-for="edge in graph.edges"
             :key="edge.key"
             :class="{ active: edge.active }"
-            :d="`M ${edge.source.x + 176} ${edge.source.y + 38} C ${edge.source.x + 198} ${edge.source.y + 38}, ${edge.target.x - 22} ${edge.target.y + 38}, ${edge.target.x} ${edge.target.y + 38}`"
+            :d="`M ${edge.source.x + 152} ${edge.source.y + 30} C ${edge.source.x + 170} ${edge.source.y + 30}, ${edge.target.x - 18} ${edge.target.y + 30}, ${edge.target.x} ${edge.target.y + 30}`"
             :marker-end="edge.active ? 'url(#dag-arrow-active)' : 'url(#dag-arrow)'"
           />
         </svg>
@@ -169,11 +169,7 @@ function selectOffset(offset: number): void {
           @click="emit('select', node.task.task_key)"
         >
           <b>{{ labels[node.task.task_key] ?? node.task.task_key }}</b>
-          <small>{{ node.task.executor }}</small>
           <span>{{ states[node.task.state] }} · {{ duration(node.task) }} · {{ node.task.attempts.length }} attempt</span>
-          <em v-if="currentAttempt(node.task)?.model ?? node.task.selected_model">
-            {{ currentAttempt(node.task)?.model ?? node.task.selected_model }} / {{ currentAttempt(node.task)?.effort ?? node.task.selected_effort ?? "default" }}
-          </em>
         </button>
       </div>
     </div>
@@ -181,7 +177,7 @@ function selectOffset(offset: number): void {
 </template>
 
 <style scoped>
-.dag-frame { overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: linear-gradient(180deg, #fbfbfa, #f7f7f5); }
+.dag-frame { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); }
 .dag-legend { display: flex; flex-wrap: wrap; gap: 13px; padding: 9px 13px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .dag-legend span { display: flex; align-items: center; gap: 5px; }
 .dag-legend .legend-spacer { flex: 1; }
@@ -195,9 +191,8 @@ svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible
 svg path { fill: none; stroke: #bbb9b2; stroke-width: 1.4; }svg marker path { fill: #aaa9a3; stroke: none; }
 svg path.active { stroke: var(--brand); stroke-width: 2.3; }
 svg #dag-arrow-active path { fill: var(--brand); }
-.dag-node { position: absolute; display: grid; width: 176px; min-height: 76px; gap: 2px; padding: 9px 10px; border: 1px solid var(--line); border-left: 4px solid #bcbbb5; border-radius: 6px; color: var(--ink); text-align: left; background: white; cursor: pointer; box-shadow: var(--shadow); }
-.dag-node small,.dag-node span,.dag-node em { overflow: hidden; color: var(--muted); font-size: 10px; font-style: normal; text-overflow: ellipsis; white-space: nowrap; }
-.dag-node em { color: #566474; }
+.dag-node { position: absolute; display: grid; width: 152px; min-height: 60px; gap: 3px; padding: 8px 9px; border: 1px solid var(--line); border-left: 5px solid #bcbbb5; border-radius: 5px; color: var(--ink); text-align: left; background: white; cursor: pointer; box-shadow: var(--shadow); }
+.dag-node span { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .dag-node.is-active { border-color: var(--brand); box-shadow: 0 0 0 2px rgb(35 131 226 / 10%); }
 .dag-node.executor-core { border-left-color: #77746c; }.dag-node.executor-ai { border-left-color: var(--brand); }
 .dag-node.executor-media { border-left-color: #a06e2b; }

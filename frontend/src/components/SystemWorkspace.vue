@@ -51,8 +51,8 @@ onUnmounted(() => { if (timer !== undefined) window.clearInterval(timer); });
     <header class="system-heading">
       <div>
         <p class="eyebrow">
-          Home Core
-        </p><h1>系统与 Runner</h1><p>{{ status }}</p>
+          System
+        </p><h1>系统健康总览</h1>
       </div>
       <button
         class="btn secondary compact"
@@ -63,14 +63,19 @@ onUnmounted(() => { if (timer !== undefined) window.clearInterval(timer); });
         {{ loading ? "刷新中" : "刷新" }}
       </button>
     </header>
+    <section
+      v-if="system"
+      class="health-banner"
+      :class="`health-${system.status}`"
+      role="status"
+    >
+      <span /><div><b>{{ system.status === "healthy" ? "Home Core 正常" : "Home Core 已降级" }}</b><p>{{ status }}</p></div>
+    </section>
 
     <div
       v-if="system"
       class="metric-grid"
     >
-      <article class="card health">
-        <span :class="system.status" /><div><small>系统状态</small><b>{{ system.status === "healthy" ? "正常" : "已降级" }}</b></div>
-      </article>
       <article class="card">
         <small>等待任务</small><b>{{ system.queue_depth }}</b><em>仅汇总；当前 API 不提供队列明细</em>
       </article>
@@ -163,14 +168,14 @@ onUnmounted(() => { if (timer !== undefined) window.clearInterval(timer); });
 .system-workspace { display: grid; gap: 14px; }
 .system-heading, .runner-section > header { display: flex; align-items: end; justify-content: space-between; }
 .system-heading p { margin-bottom: 0; color: var(--muted); }
-.metric-grid { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 9px; }
+.health-banner { display: flex; gap: 12px; align-items: center; padding: 14px 16px; border: 1px solid var(--line); border-left: 4px solid #3f8f48; border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }.health-banner.health-degraded { border-left-color: #cb7b1f; }
+.health-banner > span { width: 10px; height: 10px; border-radius: 50%; background: #3f8f48; }.health-degraded > span { background: #cb7b1f; }.health-banner p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.metric-grid { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 9px; }
 .metric-grid article { display: grid; align-content: start; gap: 4px; min-height: 92px; padding: 13px; }
 .metric-grid small, .metric-grid em, .runner-section header > span { color: var(--muted); font-size: 11px; font-style: normal; }
 .metric-grid b { color: var(--ink); font-size: 19px; }
-.metric-grid .health { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
-.health > span, .runner-title > span { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); }
-.health > span.healthy, .runner-title > span.online { background: #3f8f48; }
-.health div { display: grid; }
+.runner-title > span { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); }
+.runner-title > span.online { background: #3f8f48; }
 .runner-section { overflow: hidden; }
 .runner-section > header { padding: 13px 16px; border-bottom: 1px solid var(--line); }
 .runner-section header p, .runner-section header h2 { margin-bottom: 0; }
