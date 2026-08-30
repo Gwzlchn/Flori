@@ -2,8 +2,8 @@
 import { computed, ref, watch } from "vue";
 
 import type { components } from "../api/client";
+import ArtifactReaderPanel from "./ArtifactReaderPanel.vue";
 import JobPanel from "./JobPanel.vue";
-import MarkdownContent from "./MarkdownContent.vue";
 import MetadataPanel from "./MetadataPanel.vue";
 import ScholarlyDocument from "./ScholarlyDocument.vue";
 import UiIcon from "./UiIcon.vue";
@@ -44,6 +44,8 @@ const emit = defineEmits<{
 }>();
 const visualLocation = ref<VisualLocation>();
 const visualHtml = ref<{ anchor: string; label: string }>();
+const artifactView = ref<"alternate" | "notes" | "source">("notes");
+const forcePdf = ref(false);
 
 const tabs = [
   { id: "artifacts", label: "产物", icon: "book" },
@@ -60,8 +62,10 @@ const viewerSrc = computed(() => {
 const htmlView = computed(() => props.documentView?.representation === "scholarly_html" ? props.documentView : undefined);
 const htmlAnchor = computed(() => visualHtml.value?.anchor ?? (htmlView.value?.crosswalk?.status === "verified"
   ? htmlView.value.crosswalk.html_anchor ?? undefined : undefined));
-const showHtml = computed(() => Boolean(props.documentHtml && htmlView.value && !visualLocation.value
+const showHtml = computed(() => Boolean(!forcePdf.value && props.documentHtml && htmlView.value && !visualLocation.value
   && (visualHtml.value || !props.activeEvidenceId || htmlAnchor.value)));
+const showContext = computed(() => props.tab === "visuals" || (props.tab === "artifacts"
+  && artifactView.value === "notes" && Boolean(props.activeEvidenceId)));
 const representationLabel = computed(() => showHtml.value
   ? htmlView.value?.provider === "arxiv" ? "arXiv HTML" : "ar5iv HTML"
   : "PDF canonical evidence");
@@ -90,14 +94,9 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; vi
 <template>
   <section
     class="reader-card card"
-    aria-labelledby="reader-title"
+    aria-label="内容工作台"
   >
     <div class="reader-heading">
-      <div>
-        <h2 id="reader-title">
-          内容工作台
-        </h2>
-      </div>
       <div
         class="reader-tabs"
         role="tablist"
@@ -121,7 +120,10 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; vi
       </div>
     </div>
 
-    <div class="reader-layout">
+    <div
+      class="reader-layout"
+      :class="{ 'has-context': showContext }"
+    >
       <div class="reader-content">
         <section
           v-if="props.tab === 'artifacts'"
@@ -130,66 +132,72 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; vi
           aria-labelledby="tab-artifacts"
           class="knowledge-output"
         >
-          <header class="output-heading">
-            <p class="eyebrow">
-              Research notes
-            </p><h2>智能笔记</h2>
-            <p class="meta">
-              引用标记可定位到右侧 PDF 的原文页与坐标。
-            </p>
-          </header>
-          <MarkdownContent
-            v-if="note"
-            :content="note"
-            :active-evidence-id="activeEvidenceId"
-            @select="emit('select', $event)"
-          />
-          <p
-            v-else
-            class="empty-state"
-          >
-            智能笔记尚未生成。Pipeline 完成后会在这里显示。
-          </p>
-          <section class="summary-note">
-            <p class="eyebrow">
-              中文摘要
-            </p>
-            <MarkdownContent
-              v-if="summary"
-              :content="summary"
-              :active-evidence-id="activeEvidenceId"
-              @select="emit('select', $event)"
-            />
-            <p
-              v-else
-              class="empty-state"
-            >
-              当前成果没有摘要。
-            </p>
-          </section>
-          <details
-            v-if="translation"
-            class="translation-block"
-          >
-            <summary>查看全文翻译</summary>
-            <MarkdownContent
-              :content="translation"
-              :active-evidence-id="activeEvidenceId"
-              @select="emit('select', $event)"
-            />
-          </details>
-          <JobPanel
+          <ArtifactReaderPanel
+            :view="artifactView"
+            source-label="原文"
+            alternate-label="译文"
+            :alternate-content="translation"
+            evidence-intro="引用标记仅会定位到经 Rust 校验的原文证据。"
             :job="job"
-            mode="artifacts"
+            :note="note"
+            :summary="summary"
+            :active-evidence-id="activeEvidenceId"
             :text-content="textContent"
             :file-urls="fileUrls"
             :selected-task-key="selectedTaskKey"
             :selected-artifact-id="selectedArtifactId"
+            @view-change="artifactView = $event"
+            @select="emit('select', $event)"
             @load-artifact="emit('loadArtifact', $event)"
             @refresh="emit('refresh')"
             @task-change="emit('taskChange', $event)"
             @artifact-change="emit('artifactChange', $event)"
-          />
+          >
+            <template #source>
+              <section class="source-reader">
+                <div
+                  v-if="documentHtml && htmlView && pdfUrl"
+                  class="representation-switch"
+                >
+                  <button
+                    type="button"
+                    :aria-pressed="showHtml"
+                    @click="forcePdf = false"
+                  >
+                    原文
+                  </button>
+                  <button
+                    type="button"
+                    :aria-pressed="!showHtml"
+                    @click="forcePdf = true"
+                  >
+                    原文 PDF
+                  </button>
+                </div>
+                <ScholarlyDocument
+                  v-if="showHtml && documentHtml && htmlView"
+                  :html="documentHtml"
+                  :resources="htmlView.resources"
+                  :file-urls="fileUrls"
+                  :anchor="htmlAnchor"
+                />
+                <object
+                  v-else-if="viewerSrc"
+                  :data="viewerSrc"
+                  type="application/pdf"
+                  class="pdf-viewer source-pdf"
+                >
+                  <p>浏览器无法内嵌 PDF，请在新窗口打开。</p>
+                </object>
+                <p
+                  v-else
+                  class="empty-state"
+                >
+                  缺少可验证的学术 HTML 与原始 PDF。
+                </p>
+              </section>
+            </template>
+          </ArtifactReaderPanel>
         </section>
 
         <section
@@ -244,6 +252,7 @@ watch(() => props.activeEvidenceId, () => { visualLocation.value = undefined; vi
       </div>
 
       <aside
+        v-if="showContext"
         class="evidence-panel"
         aria-label="PDF 证据定位"
       >
