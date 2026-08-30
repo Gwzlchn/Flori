@@ -2,6 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
 import { apiClient, apiError, type components } from "../api/client";
+import UiIcon from "./UiIcon.vue";
 
 const emit = defineEmits<{ open: [jobId: string, evidenceId?: string] }>();
 const query = ref("");
@@ -11,6 +12,7 @@ const status = ref("输入关键词，搜索当前发布成果。");
 const searching = ref(false);
 let requestSequence = 0;
 const root = ref<HTMLElement>();
+const input = ref<HTMLInputElement>();
 
 function normalizedQuery(): string { return query.value.trim().split(/\s+/u).filter(Boolean).join(" "); }
 function rememberQuery(value: string): void {
@@ -82,6 +84,11 @@ function close(): void { submittedQuery.value = ""; }
 function closeOutside(event: MouseEvent): void {
   if (root.value && event.target instanceof Node && !root.value.contains(event.target)) close();
 }
+function focusShortcut(event: KeyboardEvent): void {
+  if (event.key.toLowerCase() !== "k" || (!event.metaKey && !event.ctrlKey)) return;
+  event.preventDefault();
+  input.value?.focus();
+}
 function restoreQuery(): void {
   const saved = new URL(window.location.href).searchParams.get("q") ?? "";
   if (saved === query.value) return;
@@ -92,12 +99,14 @@ function restoreQuery(): void {
 
 onMounted(() => {
   document.addEventListener("click", closeOutside);
+  window.addEventListener("keydown", focusShortcut);
   window.addEventListener("popstate", restoreQuery);
   const saved = new URL(window.location.href).searchParams.get("q");
   if (saved !== null) { query.value = saved; void search(); }
 });
 onBeforeUnmount(() => {
   document.removeEventListener("click", closeOutside);
+  window.removeEventListener("keydown", focusShortcut);
   window.removeEventListener("popstate", restoreQuery);
 });
 </script>
@@ -116,9 +125,20 @@ onBeforeUnmount(() => {
         class="visually-hidden"
         for="knowledge-query"
       >搜索知识成果</label>
-      <span aria-hidden="true">⌕</span>
+      <button
+        type="submit"
+        class="search-trigger"
+        aria-label="搜索"
+        :disabled="searching"
+      >
+        <UiIcon
+          name="search"
+          :size="15"
+        />
+      </button>
       <input
         id="knowledge-query"
+        ref="input"
         v-model="query"
         type="search"
         maxlength="201"
@@ -126,13 +146,7 @@ onBeforeUnmount(() => {
         placeholder="搜索笔记、术语或内容…"
         :disabled="searching"
       >
-      <button
-        type="submit"
-        class="search-submit"
-        :disabled="searching"
-      >
-        {{ searching ? "搜索中" : "搜索" }}
-      </button>
+      <kbd aria-hidden="true">⌘ K</kbd>
     </form>
     <section
       v-if="submittedQuery"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { ref, watch } from "vue";
 
 import type { components } from "../api/client";
 import UiIcon from "./UiIcon.vue";
@@ -33,8 +33,6 @@ function sourcesOf(domainId: string, collectionId?: string): components["schemas
   return props.sources.filter((source) => source.domain_id === domainId
     && (collectionId ? source.collection_ids.includes(collectionId) : source.collection_ids.length === 0));
 }
-const selectedLabel = computed(() => props.collections.find((item) => item.collection_id === props.selectedCollectionId)?.name
-  ?? props.domains.find((item) => item.domain_id === props.selectedDomainId)?.name ?? "知识库");
 const expandedDomains = ref<Set<string>>(new Set());
 const expandedCollections = ref<Set<string>>(new Set());
 
@@ -73,11 +71,11 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
       aria-label="Flori 知识库"
       @click.prevent="emit('navigate', 'library')"
     >
-      <span class="brand-mark"><img
+      <span class="brand-logo"><img
         :src="floriLogo"
         alt=""
       ></span>
-      <span><strong>Flori</strong><small>Knowledge base</small></span>
+      <strong>Flori</strong>
     </a>
     <button
       type="button"
@@ -87,17 +85,26 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
     >
       ×
     </button>
-    <div class="sidebar-primary">
+    <div class="sidebar-top-row">
       <button
         type="button"
+        class="sidebar-submit"
         @click="emit('submit')"
       >
         <UiIcon name="send" /><span>投递内容</span>
       </button>
-      <span title="当前发布成果"><UiIcon
-        name="archive"
-        :size="17"
-      /></span>
+      <button
+        type="button"
+        class="sidebar-inbox"
+        title="当前发布成果"
+        aria-label="当前发布成果"
+        @click="emit('navigate', 'library')"
+      >
+        <UiIcon
+          name="archive"
+          :size="17"
+        />
+      </button>
     </div>
     <div class="library-heading">
       <span><UiIcon
@@ -194,16 +201,6 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
         </div>
       </section>
     </nav>
-    <button
-      class="sidebar-upload"
-      type="button"
-      @click="emit('submit')"
-    >
-      <UiIcon
-        name="send"
-        :size="14"
-      />投递到 {{ selectedLabel }}
-    </button>
     <nav
       class="sidebar-tools"
       aria-label="系统导航"
@@ -211,6 +208,8 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
       <button
         type="button"
         :class="{ 'is-active': activeView === 'system' }"
+        title="系统与 Runner"
+        aria-label="系统与 Runner"
         @click="emit('navigate', 'system')"
       >
         <UiIcon
@@ -221,6 +220,8 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
       <button
         type="button"
         :class="{ 'is-active': activeView === 'about' }"
+        title="关于 Flori"
+        aria-label="关于 Flori"
         @click="emit('navigate', 'about')"
       >
         <UiIcon
@@ -229,20 +230,18 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
         /><span>关于 Flori</span>
       </button>
     </nav>
-    <footer class="side-footer">
-      <button
-        type="button"
-        class="sidebar-toggle"
-        :aria-label="collapsed ? '展开导航' : '收起导航'"
-        :title="collapsed ? '展开导航' : '收起导航'"
-        @click="emit('toggle')"
-      >
-        <UiIcon
-          name="panel"
-          :size="16"
-        />
-      </button>
-    </footer>
+    <button
+      type="button"
+      class="sidebar-toggle"
+      :aria-label="collapsed ? '展开导航' : '收起导航'"
+      :title="collapsed ? '展开导航' : '收起导航'"
+      @click="emit('toggle')"
+    >
+      <UiIcon
+        name="panel"
+        :size="16"
+      />
+    </button>
   </aside>
 </template>
 
@@ -250,35 +249,32 @@ watch(() => [props.selectedDomainId, props.selectedCollectionId] as const, ([dom
 .sidebar-close, .sidebar-toggle { display: grid; place-items: center; border: 0; color: var(--muted); background: transparent; cursor: pointer; }
 .sidebar-close { position: absolute; top: 16px; right: 12px; display: none; width: 32px; height: 32px; border-radius: 5px; font-size: 22px; }
 .sidebar-close:hover, .sidebar-toggle:hover { color: var(--ink); background: var(--line-soft); }
-.side-footer { justify-content: flex-end; }
-.sidebar-tools { display: grid; gap: 2px; padding: 7px 3px; border-top: 1px solid var(--line-soft); }
-.sidebar-tools button { display: flex; gap: 8px; align-items: center; min-height: 31px; padding: 5px 8px; border: 0; border-radius: 5px; color: var(--muted); text-align: left; background: transparent; cursor: pointer; }
+.sidebar-tools { display: flex; gap: 6px; align-items: center; padding: 10px 3px 0; border-top: 1px solid var(--line-soft); }
+.sidebar-tools button { display: grid; width: 36px; height: 34px; place-items: center; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; }
 .sidebar-tools button:hover, .sidebar-tools button.is-active { color: var(--ink); background: var(--line-soft); }
-.sidebar-toggle { width: 30px; height: 30px; flex: none; border-radius: 5px; }
+.sidebar-toggle { margin-left: auto; }
 :global(.sidebar-collapsed) .sidebar { align-items: center; padding-inline: 8px; }
 :global(.sidebar-collapsed) .brand { padding-inline: 0; }
-:global(.sidebar-collapsed) .brand span:last-child,
+:global(.sidebar-collapsed) .brand strong,
 :global(.sidebar-collapsed) .library-heading,
 :global(.sidebar-collapsed) .library-tree,
-:global(.sidebar-collapsed) .sidebar-upload,
-:global(.sidebar-collapsed) .sidebar-primary button span,
+:global(.sidebar-collapsed) .sidebar-submit span,
 :global(.sidebar-collapsed) .sidebar-tools button span { display: none; }
 :global(.sidebar-collapsed) .sidebar-tools button { justify-content: center; padding-inline: 0; }
-:global(.sidebar-collapsed) .sidebar-primary { grid-template-columns: 34px; }
-:global(.sidebar-collapsed) .sidebar-primary button { justify-content: center; padding: 0; }
+:global(.sidebar-collapsed) .sidebar-top-row { flex-direction: column; }
+:global(.sidebar-collapsed) .sidebar-submit { width: 40px; padding: 0; }
 @media (max-width: 980px) {
   .sidebar-close { display: grid; }
   :global(.sidebar-collapsed) .sidebar { align-items: stretch; padding: 15px 12px; }
   :global(.sidebar-collapsed) .brand { padding: 2px 8px 12px; }
-  :global(.sidebar-collapsed) .brand span:last-child,
+  :global(.sidebar-collapsed) .brand strong,
   :global(.sidebar-collapsed) .library-heading,
   :global(.sidebar-collapsed) .library-tree,
-  :global(.sidebar-collapsed) .sidebar-upload,
-  :global(.sidebar-collapsed) .sidebar-primary button span,
+  :global(.sidebar-collapsed) .sidebar-submit span,
   :global(.sidebar-collapsed) .sidebar-tools button span { display: initial; }
   :global(.sidebar-collapsed) .sidebar-tools button { justify-content: flex-start; padding-inline: 8px; }
-  :global(.sidebar-collapsed) .sidebar-primary { grid-template-columns: minmax(0, 1fr) 34px; }
-  :global(.sidebar-collapsed) .sidebar-primary button { justify-content: flex-start; padding: 0 10px; }
+  :global(.sidebar-collapsed) .sidebar-top-row { flex-direction: row; }
+  :global(.sidebar-collapsed) .sidebar-submit { width: auto; padding: 0 10px; }
   .sidebar-toggle { display: none; }
 }
 .tree-domain :deep(.ui-icon), .tree-collection :deep(.ui-icon) { transition: transform .12s ease; }

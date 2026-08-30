@@ -3,26 +3,20 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 
 import KnowledgeSidebar from "./components/KnowledgeSidebar.vue";
 import LibraryWorkspace from "./components/LibraryWorkspace.vue";
-import DocumentHeader from "./components/DocumentHeader.vue";
-import PdfReader from "./components/PdfReader.vue";
-import VideoReader from "./components/VideoReader.vue";
-import { isVideoSource } from "./composables/useEvidenceNavigation";
+import ContentWorkspace from "./components/ContentWorkspace.vue";
 import UploadPanel from "./components/UploadPanel.vue";
-import RerunPanel from "./components/RerunPanel.vue";
-import SearchPanel from "./components/SearchPanel.vue";
 import SystemWorkspace from "./components/SystemWorkspace.vue";
+import TopBar from "./components/TopBar.vue";
 import AboutPanel from "./components/AboutPanel.vue";
 import { useKnowledgeNavigation } from "./composables/useKnowledgeNavigation";
 import { usePageNavigation } from "./composables/usePageNavigation";
 import { usePdfWorkspace } from "./composables/usePdfWorkspace";
-import UiIcon from "./components/UiIcon.vue";
 
 const workspace = usePdfWorkspace();
 const library = useKnowledgeNavigation();
 const navigation = usePageNavigation();
 const sidebarCollapsed = ref(localStorage.getItem("flori.sidebar.collapsed") === "true");
 const mobileSidebarOpen = ref(false);
-const mobileMenu = ref<HTMLButtonElement>();
 const {
   activeView, readerTab, selectedTaskKey, selectedArtifactId, selectedVisualId,
   setView, setTab: setReaderTab, setTask, setArtifact, setVisual, clearReader,
@@ -43,12 +37,14 @@ const collectionNames = computed(() => source.value?.collection_ids
   .filter((name): name is string => name !== undefined) ?? []);
 const activeDomainName = computed(() => domains.value.find((item) => item.domain_id === source.value?.domain_id)?.name
   ?? selectedDomain.value?.name ?? "知识库");
-const activeCollectionName = computed(() => source.value?.collection_ids.includes(selectedCollectionId.value)
-  ? selectedCollection.value?.name
-  : collectionNames.value[0]);
-const showNotice = computed(() => !job.value || job.value.state !== "succeeded" || !notice.value.startsWith("Job succeeded"));
+const activeCollectionId = computed(() => source.value?.collection_ids.includes(selectedCollectionId.value)
+  ? selectedCollectionId.value
+  : source.value?.collection_ids[0] ?? "");
+const activeCollectionName = computed(() => collections.value
+  .find((item) => item.collection_id === activeCollectionId.value)?.name);
 const pageTitle = computed(() => activeView.value === "system" ? "系统与 Runner"
   : activeView.value === "about" ? "关于 Flori" : job.value ? sourceTitle.value : "投递内容");
+const canGoBack = computed(() => activeView.value !== "library" || Boolean(job.value));
 
 function openEvidence(value: string): void { setVisual(""); void selectEvidence(value); }
 
@@ -60,11 +56,12 @@ async function openSidebar(): Promise<void> {
 function closeSidebar(restoreFocus = true): void {
   if (!mobileSidebarOpen.value) return;
   mobileSidebarOpen.value = false;
-  if (restoreFocus) void nextTick(() => mobileMenu.value?.focus());
+  if (restoreFocus) void nextTick(() => document.querySelector<HTMLButtonElement>(".mobile-menu")?.focus());
 }
 function trapSidebar(event: KeyboardEvent): void {
   if (!mobileSidebarOpen.value) return;
-  const items = [...document.querySelectorAll<HTMLElement>(".sidebar a, .sidebar button:not([disabled])")];
+  const items = [...document.querySelectorAll<HTMLElement>(".sidebar a, .sidebar button:not([disabled])")]
+    .filter((item) => item.getClientRects().length > 0 && getComputedStyle(item).visibility !== "hidden");
   const first = items[0];
   const last = items.at(-1);
   if (event.shiftKey && document.activeElement === first && last) { event.preventDefault(); last.focus(); }
@@ -97,6 +94,11 @@ function navigate(view: "about" | "library" | "system"): void {
   closeSidebar(false);
   if (view === "library") closeJob();
   setView(view);
+}
+
+function goBack(): void {
+  closeJob();
+  setView("library");
 }
 
 function toggleSidebar(): void {
@@ -161,28 +163,25 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
     <button
       type="button"
       class="sidebar-scrim"
+      tabindex="-1"
       aria-label="关闭导航"
       @click="closeSidebar()"
     />
 
     <div class="app-main">
-      <header class="topbar">
-        <button
-          ref="mobileMenu"
-          type="button"
-          class="mobile-menu"
-          aria-label="打开导航"
-          @click="openSidebar"
-        >
-          <UiIcon name="menu" />
-        </button>
-        <div class="breadcrumb">
-          <span>{{ activeDomainName }}</span><b>/</b>
-          <span v-if="activeView === 'content' && activeCollectionName">{{ activeCollectionName }}</span>
-          <b v-if="activeView === 'content' && activeCollectionName">/</b><strong>{{ pageTitle }}</strong>
-        </div>
-        <SearchPanel @open="openContent" />
-      </header>
+      <TopBar
+        :active-view="activeView"
+        :can-go-back="canGoBack"
+        :collection-name="activeCollectionName"
+        :domain-name="activeDomainName"
+        :title="pageTitle"
+        @back="goBack"
+        @collection="chooseContext(source?.domain_id ?? selectedDomainId, activeCollectionId)"
+        @domain="chooseContext(source?.domain_id ?? selectedDomainId)"
+        @library="navigate('library')"
+        @menu="openSidebar"
+        @open="openContent"
+      />
 
       <main
         id="workspace"
@@ -194,18 +193,41 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
         />
         <SystemWorkspace v-else-if="activeView === 'system'" />
         <AboutPanel v-else-if="activeView === 'about'" />
+        <ContentWorkspace
+          v-else-if="job"
+          :active-evidence-id="activeEvidenceId"
+          :collection-names="collectionNames"
+          :document-html="documentHtml"
+          :document-view="documentView"
+          :domain-name="activeDomainName"
+          :evidence="evidence"
+          :evidence-status="evidenceStatus"
+          :file-urls="fileUrls"
+          :job="job"
+          :note-text="noteText"
+          :notice="notice"
+          :pdf-url="pdfUrl"
+          :reader-tab="readerTab"
+          :selected-artifact-id="selectedArtifactId"
+          :selected-task-key="selectedTaskKey"
+          :selected-visual-id="selectedVisualId"
+          :source="source"
+          :source-title="sourceTitle"
+          :summary-text="summaryText"
+          :text-content="textContent"
+          :translation-text="translationText"
+          :video-url="videoUrl"
+          @artifact-change="setArtifact"
+          @created="openJob"
+          @load-artifact="loadArtifact"
+          @refresh="refreshJob"
+          @select="openEvidence"
+          @tab-change="setReaderTab"
+          @task-change="setTask"
+          @visual-change="setVisual"
+        />
         <template v-else>
-          <DocumentHeader
-            v-if="job"
-            :job="job"
-            :source="source"
-            :title="sourceTitle"
-            :domain-name="activeDomainName"
-            :collection-names="collectionNames"
-            @refresh="refreshJob"
-          />
           <LibraryWorkspace
-            v-else
             :domain="selectedDomain"
             :collection="selectedCollection"
             :collections="collections"
@@ -215,7 +237,6 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
           />
 
           <UploadPanel
-            v-if="!job"
             :busy="busy"
             :domain-name="selectedDomain?.name ?? '默认领域'"
             :collection-name="selectedCollection?.name"
@@ -226,72 +247,11 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
           />
 
           <p
-            v-if="showNotice"
             class="notice-bar"
             aria-live="polite"
           >
             {{ notice }}
           </p>
-
-          <PdfReader
-            v-if="job && source && !isVideoSource(source.kind)"
-            :job="job"
-            :source="source"
-            :domain-name="domains.find((item) => item.domain_id === source?.domain_id)?.name"
-            :collection-names="collectionNames"
-            :note="noteText"
-            :summary="summaryText"
-            :translation="translationText"
-            :pdf-url="pdfUrl"
-            :document-view="documentView"
-            :document-html="documentHtml"
-            :evidence="evidence"
-            :active-evidence-id="activeEvidenceId"
-            :status="evidenceStatus"
-            :text-content="textContent"
-            :file-urls="fileUrls"
-            :tab="readerTab"
-            :selected-task-key="selectedTaskKey"
-            :selected-artifact-id="selectedArtifactId"
-            :selected-visual-id="selectedVisualId"
-            @select="openEvidence"
-            @load-artifact="loadArtifact"
-            @refresh="refreshJob"
-            @tab-change="setReaderTab"
-            @task-change="setTask"
-            @artifact-change="setArtifact"
-            @visual-change="setVisual"
-          />
-          <VideoReader
-            v-else-if="job"
-            :job="job"
-            :source="source"
-            :domain-name="activeDomainName"
-            :collection-names="collectionNames"
-            :note="noteText"
-            :summary="summaryText"
-            :video-url="videoUrl"
-            :evidence="evidence"
-            :active-evidence-id="activeEvidenceId"
-            :status="evidenceStatus"
-            :text-content="textContent"
-            :file-urls="fileUrls"
-            :tab="readerTab"
-            :selected-task-key="selectedTaskKey"
-            :selected-artifact-id="selectedArtifactId"
-            @select="openEvidence"
-            @load-artifact="loadArtifact"
-            @refresh="refreshJob"
-            @tab-change="setReaderTab"
-            @task-change="setTask"
-            @artifact-change="setArtifact"
-          />
-          <RerunPanel
-            v-if="job"
-            :job="job"
-            @created="openJob"
-            @refresh="refreshJob"
-          />
         </template>
       </main>
     </div>
@@ -301,15 +261,13 @@ onUnmounted(() => window.removeEventListener("popstate", restoreLocation));
 <style scoped>
 .app-shell { transition: grid-template-columns .16s ease; }
 .app-shell.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
-.sidebar-scrim, .mobile-menu { display: none; }
-.mobile-menu { width: 34px; height: 34px; place-items: center; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; }
-.mobile-menu:hover { color: var(--ink); background: var(--line-soft); }
+.sidebar-scrim { display: none; }
 @media (max-width: 980px) {
   .app-shell, .app-shell.sidebar-collapsed { display: block; }
   .app-shell :deep(.sidebar) { position: fixed; z-index: 70; top: 0; bottom: 0; left: 0; width: min(320px, 86vw); height: 100dvh; border-right: 1px solid var(--line); border-bottom: 0; box-shadow: 0 20px 60px rgb(15 15 15 / 24%); transform: translateX(-105%); transition: transform .18s ease; }
   .app-shell.mobile-sidebar-open :deep(.sidebar) { transform: translateX(0); }
   .sidebar-scrim { position: fixed; z-index: 60; inset: 0; width: 100%; height: 100%; border: 0; background: rgb(15 15 15 / 35%); cursor: default; }
-  .mobile-sidebar-open .sidebar-scrim, .mobile-menu { display: grid; }
+  .mobile-sidebar-open .sidebar-scrim { display: grid; }
 }
 @media (prefers-reduced-motion: reduce) {
   .app-shell, .app-shell :deep(.sidebar) { transition: none; }
