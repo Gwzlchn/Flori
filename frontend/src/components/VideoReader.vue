@@ -2,8 +2,8 @@
 import { computed, nextTick, ref, watch } from "vue";
 
 import type { components } from "../api/client";
+import ArtifactReaderPanel from "./ArtifactReaderPanel.vue";
 import JobPanel from "./JobPanel.vue";
-import MarkdownContent from "./MarkdownContent.vue";
 import MetadataPanel from "./MetadataPanel.vue";
 import UiIcon from "./UiIcon.vue";
 
@@ -31,12 +31,15 @@ const emit = defineEmits<{
   tabChange: [tab: ReaderTab]; taskChange: [taskKey: string]; artifactChange: [artifactId: string];
 }>();
 const player = ref<HTMLVideoElement>();
+const artifactView = ref<"alternate" | "notes" | "source">("notes");
 const locator = computed(() => props.evidence?.locator.kind === "video" ? props.evidence.locator.value : undefined);
 const mechanical = computed(() => {
   const artifact = props.job.artifacts.find((item) => item.kind === "mechanical_note");
   return artifact ? props.textContent.get(artifact.artifact_id) : undefined;
 });
 const keyframes = computed(() => props.job.artifacts.filter((item) => item.kind === "keyframe"));
+const showContext = computed(() => props.tab === "visuals" || (props.tab === "artifacts"
+  && artifactView.value === "notes" && Boolean(props.activeEvidenceId)));
 const tabs = [
   { id: "artifacts", label: "产物", icon: "book" },
   { id: "pipeline", label: "流水线", icon: "pipeline" },
@@ -75,12 +78,9 @@ watch(locator, async (value) => {
 <template>
   <section
     class="reader-card card"
-    aria-labelledby="video-reader-title"
+    aria-label="视频阅读工作台"
   >
     <div class="reader-heading">
-      <h2 id="video-reader-title">
-        视频阅读工作台
-      </h2>
       <div
         class="reader-tabs"
         role="tablist"
@@ -101,66 +101,58 @@ watch(locator, async (value) => {
         </button>
       </div>
     </div>
-    <div class="reader-layout">
+    <div
+      class="reader-layout"
+      :class="{ 'has-context': showContext }"
+    >
       <div class="reader-content">
         <section
           v-if="tab === 'artifacts'"
           class="knowledge-output"
         >
-          <header class="output-heading">
-            <p class="eyebrow">
-              Video notes
-            </p><h2>智能笔记</h2>
-            <p class="meta">
-              引用标记会将右侧播放器定位到经过 Rust 校验的时间区间。
-            </p>
-          </header>
-          <MarkdownContent
-            v-if="note"
-            :content="note"
-            :active-evidence-id="activeEvidenceId"
-            @select="emit('select', $event)"
-          />
-          <p
-            v-else
-            class="empty-state"
-          >
-            智能笔记尚未生成。
-          </p>
-          <section class="summary-note">
-            <p class="eyebrow">
-              中文摘要
-            </p>
-            <MarkdownContent
-              v-if="summary"
-              :content="summary"
-              :active-evidence-id="activeEvidenceId"
-              @select="emit('select', $event)"
-            />
-          </section>
-          <details
-            v-if="mechanical"
-            class="translation-block"
-          >
-            <summary>字幕时间轴与机械笔记</summary>
-            <MarkdownContent
-              :content="mechanical"
-              :active-evidence-id="activeEvidenceId"
-              @select="emit('select', $event)"
-            />
-          </details>
-          <JobPanel
+          <ArtifactReaderPanel
+            :view="artifactView"
+            source-label="视频原文"
+            alternate-label="机械版"
+            :alternate-content="mechanical"
+            evidence-intro="引用标记仅会定位到经 Rust 校验的时间证据。"
             :job="job"
-            mode="artifacts"
+            :note="note"
+            :summary="summary"
+            :active-evidence-id="activeEvidenceId"
             :text-content="textContent"
             :file-urls="fileUrls"
             :selected-task-key="selectedTaskKey"
             :selected-artifact-id="selectedArtifactId"
+            @view-change="artifactView = $event"
+            @select="emit('select', $event)"
             @load-artifact="emit('loadArtifact', $event)"
             @refresh="emit('refresh')"
             @task-change="emit('taskChange', $event)"
             @artifact-change="emit('artifactChange', $event)"
-          />
+          >
+            <template #source>
+              <section class="source-reader">
+                <p class="source-reader-hint">
+                  视频原件按实际比例显示，字幕与 Evidence 使用毫秒定位。
+                </p>
+                <video
+                  v-if="videoUrl"
+                  ref="player"
+                  class="video-player source-video"
+                  :src="videoUrl"
+                  controls
+                  preload="metadata"
+                />
+                <p
+                  v-else
+                  class="empty-state"
+                >
+                  缺少已验证的视频原件。
+                </p>
+              </section>
+            </template>
+          </ArtifactReaderPanel>
         </section>
         <section
           v-else-if="tab === 'visuals'"
@@ -213,6 +205,7 @@ watch(locator, async (value) => {
         />
       </div>
       <aside
+        v-if="showContext"
         class="evidence-panel"
         aria-label="视频证据定位"
       >
