@@ -1,48 +1,27 @@
-# Runtime and user data
-data/
-artifacts/
-inbox/
-output/
-backups/
-cookies/
-*.db
-*.db-shm
-*.db-wal
-
-# Secrets and local configuration
-.env
-*.pem
-*.key
-deploy/edge/.env
-deploy/tunnel/ssh/
-
-# Rust
+# Build output
 target/
-**/target/
-
-# TypeScript
-node_modules/
-dist/
-frontend/.generated/
-
-# Python sidecar caches
+frontend/node_modules/
+frontend/dist/
 __pycache__/
 *.pyc
-.venv/
-*.egg-info/
-.pytest_cache/
 
-# Agent and local work
+# Local configuration and secrets
+.env
+dev.env
+*.pem
+*.key
+
+# Local work, agents and editors
 .local/
 .qoder/
 .codex/
+.claude/
 .playwright-mcp/
-.claude/*
-!.claude/skills
-LOCAL.md
 .githooks/
-
-# Editors and OS
 .vscode/
 .idea/
 .DS_Store
+
+# Untracked leftovers of the old stack, removed at cutover
+configs/
+deploy/

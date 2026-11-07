@@ -1,0 +1,49 @@
+# TLS terminates here on the NAS. ECS only relays raw TCP:
+#   ECS :8790 -> NAS :8790 (WebDAV), ECS :80 -> NAS :8791 (HTTP-01 for the IP cert).
+# 443 stays closed: the ECS is not ICP-filed and domain SNI on 443 gets reset.
+# DAV_DOMAIN (A record -> ECS) and DAV_IP (the ECS public IP) come from the environment.
+{
+	http_port 8791
+	https_port 8790
+	# Clients connecting by IP send no SNI; pick the IP certificate for them.
+	default_sni {$DAV_IP}
+	order webdav before file_server
+	servers {
+		protocols h1 h2
+	}
+}
+
+(dav) {
+	basic_auth {
+		{env.DAV_USER} {env.DAV_HASH}
+	}
+	webdav {
+		root /vault
+	}
+}
+
+{$DAV_DOMAIN} {
+	tls {
+		issuer acme {
+			dir {env.ACME_CA}
+			dns alidns {
+				access_key_id {env.ALIYUN_ACCESS_KEY_ID}
+				access_key_secret {env.ALIYUN_ACCESS_KEY_SECRET}
+			}
+			resolvers 223.5.5.5 223.6.6.6
+		}
+	}
+	import dav
+}
+
+# Let's Encrypt issues IP certificates only under the 6-day shortlived profile.
+{$DAV_IP} {
+	tls {
+		issuer acme {
+			dir {env.ACME_CA}
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+	import dav
+}

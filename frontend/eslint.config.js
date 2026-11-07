@@ -5,7 +5,7 @@ import vueParser from "vue-eslint-parser";
 
 export default tseslint.config(
   {
-    ignores: [".generated/", "dist/", "node_modules/"],
+    ignores: ["src/openapi.d.ts", "dist/", "node_modules/"],
   },
   eslint.configs.recommended,
   ...vue.configs["flat/recommended"],
@@ -54,19 +54,7 @@ export default tseslint.config(
         {
           selector:
             "TSInterfaceDeclaration[id.name=/(Api|Dto|DTO|Request|Response)$/], TSTypeAliasDeclaration[id.name=/(Api|Dto|DTO|Request|Response)$/]",
-          message: "API DTOs must come from frontend/.generated.",
-        },
-      ],
-    },
-  },
-  {
-    files: ["src/api/**/*.ts"],
-    rules: {
-      "no-restricted-syntax": [
-        "error",
-        {
-          selector: "TSInterfaceDeclaration, TSTypeAliasDeclaration, TSTypeLiteral",
-          message: "API types must come from frontend/.generated.",
+          message: "API types must come from src/openapi.d.ts.",
         },
       ],
     },

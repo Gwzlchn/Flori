@@ -5,12 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "generate": "openapi-typescript .generated/openapi.json -o .generated/api.d.ts",
+    "generate": "openapi-typescript ../docs/openapi.json -o src/openapi.d.ts",
     "typecheck": "vue-tsc --noEmit",
     "lint": "eslint .",
-    "knip": "knip --no-config-hints",
-    "check": "npm run generate && npm run typecheck && npm run lint && npm run knip",
-    "build": "npm run generate && vue-tsc --noEmit && vite build"
+    "build": "vite build"
   },
   "dependencies": {
     "markdown-it": "14.3.0",
@@ -35,10 +33,5 @@
   },
   "allowScripts": {
     "esbuild@0.28.1": true
-  },
-  "knip": {
-    "ignore": [
-      "dist/**"
-    ]
   }
 }

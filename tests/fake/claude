@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Fake `claude -p --output-format json` for tests. Markers in the prompt pick the behaviour:
+FAKE_AUTH, FAKE_RATE_LIMIT, FAKE_FAIL, FAKE_EMPTY, FAKE_HANG. Otherwise the reply echoes the text
+after the last line `---FLORI-INPUT---`, or a fixed note when there is none.
+Every call appends one JSON line to $HOME/fake-ai.log so tests can count calls."""
+
+import json
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+model = args[args.index("--model") + 1] if "--model" in args else None
+prompt = sys.stdin.read()
+with open(os.path.join(os.environ.get("HOME", "/tmp"), "fake-ai.log"), "a") as log:
+    log.write(json.dumps({"tool": "claude", "model": model, "args": args, "bytes": len(prompt)}) + "\n")
+
+
+def reply(result, is_error=False, subtype="success", code=0):
+    usage = {model: {"inputTokens": 1, "outputTokens": 1}} if model else {}
+    out = {"type": "result", "subtype": subtype, "is_error": is_error, "result": result,
+           "modelUsage": usage, "total_cost_usd": 0.0}
+    print(json.dumps(out))
+    sys.exit(code)
+
+
+if "--model" not in args:
+    print("fake claude: --model is required in tests", file=sys.stderr)
+    sys.exit(2)
+if "FAKE_HANG" in prompt:
+    time.sleep(3600)
+if "FAKE_AUTH" in prompt:
+    reply("Not logged in · Please run /login", is_error=True, code=1)
+if "FAKE_RATE_LIMIT" in prompt:
+    reply("You've hit your limit · resets 5am", is_error=True, code=1)
+if "FAKE_FAIL" in prompt:
+    reply("", is_error=True, subtype="error_max_turns", code=1)
+if "FAKE_EMPTY" in prompt:
+    reply("")
+marker = "---FLORI-INPUT---\n"
+reply(prompt.rsplit(marker, 1)[1] if marker in prompt else "# 笔记\n\n这是假笔记。\n")

@@ -1,46 +1,46 @@
-[workspace]
-members = [
-  "crates/flori-core",
-  "crates/flori-store",
-  "crates/flori-pipeline",
-  "crates/flori-server",
-  "crates/flori-runner",
-  "xtask",
-]
-resolver = "3"
-
-[workspace.package]
-edition = "2024"
-license = "MIT"
-rust-version = "1.95"
+[package]
+name = "flori"
 version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
 
-[workspace.dependencies]
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "multipart", "query", "tokio"] }
-flori-core = { path = "crates/flori-core", version = "=0.0.0" }
-flori-pipeline = { path = "crates/flori-pipeline", version = "=0.0.0" }
-lol_html = "=3.0.1"
-reqwest = { version = "=0.13.4", default-features = false, features = ["json", "rustls"] }
-rustix = { version = "=1.1.4", default-features = false, features = ["fs", "process", "std"] }
+# No HTTP client and no TLS: downloads, scraping and feed listing run as child processes.
+# A new dependency needs a reason in its commit message.
+[dependencies]
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+base64 = "=0.22.1"
+rustix = { version = "=1.1.4", default-features = false, features = ["process", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["raw_value"] }
-serde_yaml_ng = "=0.10.0"
+serde_json = "1.0.151"
 sha2 = "=0.10.9"
-sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "macros"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["derive", "macros", "migrate", "runtime-tokio", "sqlite-bundled"] }
+time = { version = "0.3.55", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "=1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util = { version = "=0.7.19", features = ["io"] }
-utoipa = "5.5.0"
-uuid = { version = "1.24.1", features = ["serde", "v7"] }
+tower-http = { version = "=0.6.11", features = ["fs"] }
+unicode-normalization = "=0.1.25"
+utoipa = "=5.5.0"
 
-[workspace.lints.rust]
+[dev-dependencies]
+http-body-util = "=0.1.5"
+tempfile = "=3.27.0"
+tower = { version = "=0.5.3", features = ["util"] }
+
+[lints.rust]
 unsafe_code = "forbid"
-unreachable_pub = "warn"
 unused_must_use = "deny"
 
-[workspace.lints.clippy]
+[lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 lto = "thin"

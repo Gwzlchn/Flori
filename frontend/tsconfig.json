@@ -22,7 +22,6 @@
     "noEmit": true
   },
   "include": [
-    ".generated/**/*.d.ts",
     "src/**/*.ts",
     "src/**/*.vue",
     "vite.config.ts"

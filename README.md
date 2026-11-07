@@ -1,44 +1,34 @@
-# Flori vNext
+# Flori
 
-Flori 是自托管的个人知识库，把 PDF、arXiv、Bilibili、YouTube 和本地视频转换为易读笔记，并让每个结论可以回到 PDF 页、字幕时间段或关键帧。
+把 B站、YouTube 视频和 arXiv 论文变成 Obsidian 笔记的家庭 NAS 应用。
 
-`rust-vnext` 是 clean-slate Rust 重写分支。旧 Python 生产系统只保留在 `main` 和 Git 历史，本分支不维护旧代码、旧 schema、旧 Artifact 或兼容层。
+- 网页投递链接,看流水线与日志,预览 Markdown,播放视频,管理领域、集合和订阅。
+- 视频:下载 → 字幕或 whisper 转写 → 关键帧 → AI 笔记 → 非中文时自动翻译 → 发布。
+- arXiv:官方 HTML(回退 ar5iv)→ Markdown → AI 笔记 → 自动翻译 → 发布。
+- 发布即把笔记文件夹原子写入 vault;Obsidian 用 Remotely Save 经 WebDAV 同步。
 
-## 当前阶段
+契约见 [docs/contracts.md](docs/contracts.md),开发约定见 [CLAUDE.md](CLAUDE.md)。
 
-WP01-WP03 已冻结流程、黄金样本和首版契约。WP04 提供 Rust/TypeScript 工程骨架、统一开发命令和 CI 硬门；WP05-WP07 才开始 SQLite、Artifact 和 Pipeline 业务实现。当前分支仍不是可部署产品。
+## 开发
 
-进度见 [ROADMAP.md](ROADMAP.md)，设计从 [docs/vnext/README.md](docs/vnext/README.md) 开始。
-
-## 目标架构
-
-```text
-Browser -> ECS Edge -> reverse SSH tunnel -> Home Rust Server
-                                                |-- SQLite
-                                                `-- NAS Artifacts
-
-Internal Runner -> outbound HTTPS -> ECS Edge -> Home Rust Server
+```sh
+just check     # fmt、clippy、Rust 测试、前端类型与构建、Python 测试
+just openapi   # 改了 src/api.rs 后重新生成 docs/openapi.json 与前端类型
 ```
 
-- Rust Home Core：API、Pipeline DAG、SQLite、NAS、MCP 和发布。
-- Rust Runner：内网出站认领任务，调用成熟 PDF/媒体/AI 工具并回传声明 Artifact。
-- Vue 3 + strict TypeScript：只消费 Rust 生成的 OpenAPI 类型。
-- QoderCLI 和 CodexCLI：两个明确的 AI Runner，不建立通用 Provider 平台。
+依赖:Rust 1.95(rust-toolchain.toml)、Node 24、Python 3.11、just。
 
-## 第一版范围
+## 布局
 
-保留 digital PDF/arXiv、视频与频道订阅、机械笔记、AI 智能笔记、翻译、证据定位、阅读器、FTS、Domain、Collection、Glossary、Concept 和 MCP。
+```text
+src/          Rust 服务端、执行器与内置步骤
+steps/        Python 步骤:arxiv.py、feed.py、whisper.py
+migrations/   SQLite 迁移
+frontend/     Vue 3 + TypeScript
+docker/       镜像与部署
+tests/        fixtures、假步骤与假 AI CLI、Python 测试
+```
 
-不做 HTML、音频、RSS、扫描 PDF OCR、Ask、Radar、Study、Redis、MinIO、备份导入、旧数据迁移和永久兼容。
+## License
 
-完整取舍见 [产品范围](docs/vnext/product.md)。
-
-## 开发原则
-
-- 个人项目以快速、可验证的垂直切片为主。
-- 一个领域类型只在 Rust 手写一次；OpenAPI 和 TypeScript 单向生成。
-- 新架构原语默认预算为 0，第三个真实调用方前不抽通用框架。
-- 宿主 Cargo 做快速循环，Python/Node/媒体工具走容器，生产全 Docker。
-- 生产合并、部署、删除和最终冷切换单独授权。
-
-协作规则见 [CLAUDE.md](CLAUDE.md) 和 [vNext 开发规范](docs/vnext/development.md)。
+MIT
