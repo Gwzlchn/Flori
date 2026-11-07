@@ -37,6 +37,9 @@ export default tseslint.config(
     },
     rules: {
       "@typescript-eslint/no-explicit-any": "error",
+      // Short elements stay on one line; these two layout rules only multiply template height.
+      "vue/max-attributes-per-line": "off",
+      "vue/singleline-html-element-content-newline": "off",
     },
   },
   {
