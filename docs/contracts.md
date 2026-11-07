@@ -20,7 +20,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 自动重试间隔 30s、120s;AI 步骤只尝试 1 次,不自动重试。达到尝试次数上限后,步骤和 job 都记为 failed。
 - 按步骤名找前序产物:`steps/*-<name>/manifest.json`(`pipeline::find_step`)。
 - translate=off 时不排入 translate。auto 时总是排入;判为中文或 unknown 时照常建目录,manifest 只带 `meta.skipped_reason`。
-- 正文图片一律写 `assets/<basename>`。publish 按步骤顺序合并 manifest.files,同名时后面的步骤覆盖前面的,只允许 translate 覆盖 transcript.md;assets 重名按 20 处理;translate 不输出 assets,只引用 video-frames 的 assets。
+- 正文图片一律放 `assets/<basename>`,Markdown 里写 `![](assets/<basename>)`。publish 按步骤顺序合并 manifest.files,同名时后面的步骤覆盖前面的,只允许 translate 覆盖 transcript;assets 重名按 20 处理;translate 不输出 assets,只引用 video-frames 的 assets。
 - B站多 P 只取 P1。
 
 ### job.json
@@ -57,6 +57,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-fetch(youtube) | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY |
 | video-fetch(bilibili) | FLORI_BILI_SESSDATA(服务端有值时才传);不带代理 |
 | video-transcribe | FLORI_WHISPER_MODEL、FLORI_STEPS_DIR |
+| publish | FLORI_VAULT_DIR=$DATA/vault |
 | note、translate | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY;CLAUDE_CODE_DISABLE_CLAUDE_MDS=1;DISABLE_AUTOUPDATER=1;DISABLE_UPDATES=1;CLAUDE_CODE_OAUTH_TOKEN(存在时);CODEX_HOME(tool=codex 时);translate 另加 FLORI_CACHE_DIR |
 | feed.py(不是步骤,同样 env_clear) | FLORI_PROXY(只经 yt-dlp `--proxy` 使用,B站请求显式不走代理)、FLORI_BILI_SESSDATA |
 
@@ -71,9 +72,29 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | arxiv-convert | cpu | original.md、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$` | 10m | 2 |
 | note | ai | note.md(读原文,中文输出,只有正文);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json 写双语 transcript.md;每块调用超时 600s | 3h | 1 |
-| publish | local | meta.vault_path | 5m | 2 |
+| publish | local | meta: vault_path(相对 FLORI_VAULT_DIR,含 vault 名), note_file(主笔记文件名) | 5m | 2 |
 
 全局 Semaphore(2) 限制同时运行的步骤数,whisper 与 ai 各另有 Semaphore(1),local 不占全局名额。
+
+### manifest.files 逻辑名
+
+后续步骤和 publish 只按逻辑名找文件,不猜文件名。
+
+| 步骤 | files | assets |
+|---|---|---|
+| video-fetch | video、subtitle(有字幕时) | 无 |
+| video-transcribe | transcript_json | 无 |
+| video-frames | transcript、sections | frame-<ms>.jpg |
+| arxiv-fetch | page | 无;资源原件只作为普通文件留在步骤目录 |
+| arxiv-convert | original | 正文图片 |
+| note | note | 无 |
+| translate | arXiv:translation;视频:transcript(覆盖 video-frames 的) | 无 |
+| publish | 无 | 无 |
+
+- 进 vault 的逻辑名只有 note、transcript、original、translation:note 写成 `<标题>.md`,其余写成 `<逻辑名>.md`;合并后的 assets 放进 `assets/`。其余逻辑名只留在 job 目录。
+- 标题取步骤顺序中第一个非 null 的 manifest.title。
+- transcript.json:`{"language": str|null, "segments": [{"start_ms": int, "end_ms": int, "text": str}]}`。
+- translate 的 meta 总有 language(str)与 translated(bool);跳过时另有 skipped_reason(chinese、unknown、too_long),too_long 时另有 chunks(int)。
 
 - arxiv-fetch:官方 HTML 偶尔返回 200 但内容被截断,必须检查完整闭合;ar5iv 对没有 HTML 的论文返回 200 落地页,必须识别;两者都不可用时退出 20,不回退 PDF。
 - translate:
@@ -139,7 +160,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | POST /api/collections/{id}/feed/jobs | {items:[{platform,source_id}], translate?};每批 1–20 条,超出 400 invalid_request;服务端校验 ID 并自己拼 URL;一个事务内插入;返回 {created, skipped},每项带 job |
 | POST /api/jobs | {url, domain_id, collection_id?, translate?};识别不了 400 invalid_url;领域或集合不存在 404;重复 409 conflict 并带 job_id;成功 201 |
 | GET /api/jobs?limit= | 按 id 倒序,默认 200 条;筛选在前端做 |
-| GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url |
+| GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url;obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB)与 next_offset;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
 | GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range |
