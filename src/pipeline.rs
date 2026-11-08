@@ -443,5 +443,197 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
     })
 }
 
+/// A submitted link or bare arXiv id. The URL in the result is always rebuilt by the server.
+/// Bilibili `?p=` is dropped (only P1 is processed); b23.tv needs a network lookup and is refused.
+pub fn parse_source(input: &str) -> Option<Source> {
+    let input = input.trim();
+    let bare = input.strip_prefix("arXiv:").unwrap_or(input);
+    if let Some(id) = arxiv_id(bare) {
+        return Some(source(Platform::Arxiv, id));
+    }
+    let url = split_url(input)?;
+    match (url.host.as_str(), url.segs.as_slice()) {
+        ("bilibili.com", ["video", id]) => video_source(Platform::Bilibili, id),
+        ("youtu.be", [id]) | ("youtube.com", ["shorts" | "embed" | "live", id]) => {
+            video_source(Platform::Youtube, id)
+        }
+        ("youtube.com", ["watch"]) => video_source(Platform::Youtube, query(url.query, "v")?),
+        ("arxiv.org", ["abs" | "pdf" | "html", rest @ ..]) => {
+            let id = rest.join("/");
+            arxiv_id(id.strip_suffix(".pdf").unwrap_or(&id)).map(|id| source(Platform::Arxiv, id))
+        }
+        _ => None,
+    }
+}
+
+/// A feed pick or link ID after its shape check: `BV` + 10 alphanumerics, or an 11-character
+/// YouTube id.
+pub fn video_source(platform: Platform, id: &str) -> Option<Source> {
+    let ok = match platform {
+        Platform::Bilibili => id.len() == 12 && id.starts_with("BV") && token(&id[2..], b""),
+        Platform::Youtube => id.len() == 11 && token(id, b"-_"),
+        Platform::Arxiv => false,
+    };
+    ok.then(|| source(platform, id.to_owned()))
+}
+
+fn source(platform: Platform, id: String) -> Source {
+    let url = match platform {
+        Platform::Bilibili => format!("https://www.bilibili.com/video/{id}"),
+        Platform::Youtube => format!("https://www.youtube.com/watch?v={id}"),
+        Platform::Arxiv => format!("https://arxiv.org/abs/{id}"),
+    };
+    Source { platform, id, url }
+}
+
+/// arXiv id without its version: `2401.12345`, or old style `hep-th/9711200`, `math.GT/0309136`.
+fn arxiv_id(s: &str) -> Option<String> {
+    let base = match s.rsplit_once('v') {
+        Some((base, version)) if !base.is_empty() && number(version) => base,
+        _ => s,
+    };
+    let digits = |s: &str, lens: &[usize]| lens.contains(&s.len()) && number(s);
+    let ok = match base.split_once('/') {
+        None => base
+            .split_once('.')
+            .is_some_and(|(yymm, n)| digits(yymm, &[4]) && digits(n, &[4, 5])),
+        Some((archive, n)) => {
+            let (name, sub_ok) = match archive.split_once('.') {
+                None => (archive, true),
+                Some((name, sub)) => (
+                    name,
+                    sub.len() == 2 && sub.bytes().all(|b| b.is_ascii_uppercase()),
+                ),
+            };
+            sub_ok
+                && !name.is_empty()
+                && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+                && digits(n, &[7])
+        }
+    };
+    ok.then(|| base.to_owned())
+}
+
+fn number(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A collection feed URL, normalized to one form per kind (feed.py parses these forms):
+/// `https://space.bilibili.com/<mid>`, `.../<mid>/lists/<sid>?type=season|series`,
+/// `.../<mid>/favlist?fid=<media_id>`, `https://www.youtube.com/<@handle | channel/<id> |
+/// c/<name> | user/<name>>/videos`, `https://www.youtube.com/playlist?list=<id>`.
+pub fn parse_feed(input: &str) -> Option<(FeedKind, String)> {
+    let url = split_url(input)?;
+    let lists = |mid: &str, sid: &str, kind| {
+        let name = if kind == FeedKind::BiliSeason {
+            "season"
+        } else {
+            "series"
+        };
+        number(sid).then(|| {
+            (
+                kind,
+                format!("https://space.bilibili.com/{mid}/lists/{sid}?type={name}"),
+            )
+        })
+    };
+    let yt = |kind, path: String| Some((kind, format!("https://www.youtube.com/{path}")));
+    match (url.host.as_str(), url.segs.as_slice()) {
+        ("space.bilibili.com", [mid, rest @ ..]) if number(mid) => match rest {
+            [] | ["video" | "upload" | "dynamic", ..] => Some((
+                FeedKind::BiliUp,
+                format!("https://space.bilibili.com/{mid}"),
+            )),
+            ["channel", "collectiondetail"] => {
+                lists(mid, query(url.query, "sid")?, FeedKind::BiliSeason)
+            }
+            ["channel", "seriesdetail"] => {
+                lists(mid, query(url.query, "sid")?, FeedKind::BiliSeries)
+            }
+            ["lists", sid] => match query(url.query, "type")? {
+                "season" => lists(mid, sid, FeedKind::BiliSeason),
+                "series" => lists(mid, sid, FeedKind::BiliSeries),
+                _ => None,
+            },
+            ["favlist"] => query(url.query, "fid").filter(|f| number(f)).map(|fid| {
+                (
+                    FeedKind::BiliFav,
+                    format!("https://space.bilibili.com/{mid}/favlist?fid={fid}"),
+                )
+            }),
+            _ => None,
+        },
+        ("youtube.com", [handle, ..])
+            if handle.len() > 1 && handle.starts_with('@') && token(&handle[1..], b"-_.%") =>
+        {
+            yt(FeedKind::YtChannel, format!("{handle}/videos"))
+        }
+        ("youtube.com", [kind @ ("channel" | "c" | "user"), name, ..]) if token(name, b"-_.%") => {
+            yt(FeedKind::YtChannel, format!("{kind}/{name}/videos"))
+        }
+        ("youtube.com", ["playlist"]) => {
+            let list = query(url.query, "list").filter(|l| token(l, b"-_"))?;
+            yt(FeedKind::YtPlaylist, format!("playlist?list={list}"))
+        }
+        _ => None,
+    }
+}
+
+/// The `<kind>` argument of `feed.py list`.
+pub fn feed_kind_arg(kind: FeedKind) -> &'static str {
+    match kind {
+        FeedKind::BiliUp => "bili_up",
+        FeedKind::BiliSeason => "bili_season",
+        FeedKind::BiliSeries => "bili_series",
+        FeedKind::BiliFav => "bili_fav",
+        FeedKind::YtChannel => "yt_channel",
+        FeedKind::YtPlaylist => "yt_playlist",
+    }
+}
+
+struct Url<'a> {
+    /// Lowercased, without a leading `www.` or `m.`.
+    host: String,
+    segs: Vec<&'a str>,
+    query: &'a str,
+}
+
+fn split_url(input: &str) -> Option<Url<'_>> {
+    let s = input.trim();
+    let s = ["https://", "http://"]
+        .iter()
+        .find_map(|p| {
+            s.get(..p.len())
+                .filter(|h| h.eq_ignore_ascii_case(p))
+                .map(|_| &s[p.len()..])
+        })
+        .unwrap_or(s);
+    let s = s.split('#').next()?;
+    let (s, query) = s.split_once('?').unwrap_or((s, ""));
+    let (host, path) = s.split_once('/').unwrap_or((s, ""));
+    let host = host.to_ascii_lowercase();
+    let host = ["www.", "m."]
+        .iter()
+        .find_map(|p| host.strip_prefix(p))
+        .unwrap_or(&host)
+        .to_owned();
+    let segs = path.split('/').filter(|s| !s.is_empty()).collect();
+    Some(Url { host, segs, query })
+}
+
+fn query<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+        .filter(|v| !v.is_empty())
+}
+
+/// Non-empty ASCII alphanumerics plus the given extra bytes.
+fn token(s: &str, extra: &[u8]) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
+}
+
 #[cfg(test)]
 mod tests;
