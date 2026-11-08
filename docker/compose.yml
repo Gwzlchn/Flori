@@ -1,0 +1,77 @@
+# NAS stack. Always run through `just up`, which passes two env files from .local/:
+#   deploy.env   host values: FLORI_DATA_DIR, FLORI_PUBLIC_URL, CLAUDE_HOME, DAV_DOMAIN, DAV_IP
+#   secrets.env  secrets; each service takes only the names listed here
+# flori never receives the AliDNS key or the WebDAV password.
+name: flori-home
+
+services:
+  flori:
+    image: flori:${FLORI_TAG:-local}
+    container_name: flori
+    user: "1000:10"
+    init: true
+    restart: unless-stopped
+    ports:
+      - "8780:8780"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      HOME: /home/flori
+      FLORI_DATA_DIR: /data
+      FLORI_PUBLIC_URL: ${FLORI_PUBLIC_URL:?}
+      # Pinned before the first publish: it names the top vault folder.
+      FLORI_VAULT_NAME: flori
+      FLORI_PROXY: http://host.docker.internal:11081
+      FLORI_AI_TOOL: claude
+      FLORI_AI_MODEL_NOTE: claude-opus-5-5
+      FLORI_AI_MODEL_TRANSLATE: claude-sonnet-5-5
+      FLORI_WEB_USER: ${FLORI_WEB_USER:?}
+      FLORI_WEB_PASSWORD: ${FLORI_WEB_PASSWORD:?}
+      FLORI_BILI_SESSDATA: ${BILI_SESSDATA:-}
+    volumes:
+      - ${FLORI_DATA_DIR:?}:/data
+      # Writable HOME for yt-dlp caches and the CLI's own .claude.json; never the host one.
+      - ${FLORI_DATA_DIR:?}/home:/home/flori
+      # Shared login with the host CLI. Mount the directory, not single files: token refresh
+      # replaces files by rename. The container must run as the owner of this directory.
+      - ${CLAUDE_HOME:?}:/home/flori/.claude
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  flori-dav:
+    image: flori-dav:local
+    container_name: flori-dav
+    user: "1000:10"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    ports:
+      - "8790:8790"
+      - "8791:8791"
+    environment:
+      DAV_DOMAIN: ${DAV_DOMAIN:?}
+      DAV_IP: ${DAV_IP:?}
+      DAV_USER: ${DAV_USER:?}
+      DAV_HASH: ${DAV_HASH:?}
+      ALIYUN_ACCESS_KEY_ID: ${ALIYUN_ACCESS_KEY_ID:?}
+      ALIYUN_ACCESS_KEY_SECRET: ${ALIYUN_ACCESS_KEY_SECRET:?}
+      ACME_CA: https://acme-v02.api.letsencrypt.org/directory
+    volumes:
+      - ./dav.Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and the ACME account; kept outside FLORI_DATA_DIR so flori never sees them.
+      - ../.local/flori-dav/data:/data
+      - ../.local/flori-dav/config:/config
+      - ${FLORI_DATA_DIR:?}/vault:/vault
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

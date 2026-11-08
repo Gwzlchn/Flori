@@ -1,14 +1,7 @@
-.git
-.local
-.qoder
-.claude
-.codex
-target
-frontend/node_modules
-frontend/dist
-configs
-deploy
-tests
+# Build context is the repo root. Only the tools inputs and the host-built app pieces are needed.
+*
+!steps/
+!docker/claude.json
+!target/release/flori
+!frontend/dist/
 **/__pycache__
-.env
-dev.env
