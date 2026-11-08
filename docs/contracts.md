@@ -18,6 +18,8 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - `<nn>` 是从 01 开始的两位序号,即 steps 表的 seq。
 - 子进程放进独立进程组。超时或取消时先给进程组发 SIGTERM,10s 后 SIGKILL。
 - 自动重试间隔 30s、120s;AI 步骤只尝试 1 次,不自动重试。达到尝试次数上限后,步骤和 job 都记为 failed。
+- FLORI_ATTEMPT 与日志头里的 attempt 是该步骤的累计尝试次数,手动 retry 后继续累加。超时按可重试处理,steps.exit_code 记 null。
+- 取消时执行器给步骤进程组发 SIGTERM。AI 步骤收到 SIGTERM 后立即 SIGKILL 自己的 CLI 进程组并退出 10;job 与步骤状态以 HTTP 层写入的 canceled 为准。
 - 按步骤名找前序产物:`steps/*-<name>/manifest.json`(`pipeline::find_step`)。
 - translate=off 时不排入 translate。auto 时总是排入;判为中文或 unknown 时照常建目录,manifest 只带 `meta.skipped_reason`。
 - 正文图片一律放 `assets/<basename>`,Markdown 里写 `![](assets/<basename>)`。publish 按步骤顺序合并 manifest.files,同名时后面的步骤覆盖前面的,只允许 translate 覆盖 transcript;assets 重名按 20 处理;translate 不输出 assets,只引用 video-frames 的 assets。
@@ -68,7 +70,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt;meta: title, uploader, duration_ms, published | 30m | 3 |
 | video-transcribe | whisper | transcript.json;字幕优先;meta: origin, language, language_probability | 2h | 2 |
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节)、由它渲染的 transcript.md | 1h | 2 |
-| arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version, title, authors, abstract, html_source(arxiv\|ar5iv) | 15m | 3 |
+| arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv);官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
 | arxiv-convert | cpu | original.md、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$` | 10m | 2 |
 | note | ai | note.md(读原文,中文输出,只有正文);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json 写双语 transcript.md;每块调用超时 600s | 3h | 1 |
@@ -94,7 +96,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 进 vault 的逻辑名只有 note、transcript、original、translation:note 写成 `<标题>.md`,其余写成 `<逻辑名>.md`;合并后的 assets 放进 `assets/`。其余逻辑名只留在 job 目录。
 - 标题取步骤顺序中第一个非 null 的 manifest.title。
 - transcript.json:`{"language": str|null, "segments": [{"start_ms": int, "end_ms": int, "text": str}]}`。
-- translate 的 meta 总有 language(str)与 translated(bool);跳过时另有 skipped_reason(chinese、unknown、too_long),too_long 时另有 chunks(int)。
+- translate 的 meta 总有 language 与 translated(bool);language 取 zh、ja、ko、en(拉丁等字母为主,不细分语种)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long),too_long 时另有 chunks(int)。
 
 - arxiv-fetch:官方 HTML 偶尔返回 200 但内容被截断,必须检查完整闭合;ar5iv 对没有 HTML 的论文返回 200 落地页,必须识别;两者都不可用时退出 20,不回退 PDF。
 - translate:
@@ -129,7 +131,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 ```
 
 - 日期取 job.json 的 created(+08:00),retry 不会换文件夹。arXiv 的 source_id 去掉版本号,`/` 换成 `_`,如 `hep-th_9711200`。
-- 主笔记用标题命名。标题清洗:NFC,去掉 `\/:*?"<>|#^[]` 与控制字符,压缩空白,不超过 100 UTF-8 字节,截断不切开字符。
+- 主笔记用标题命名。标题清洗:NFC,去掉 `\/:*?"<>|#^[]` 与控制字符,压缩空白,去掉首尾的点(点开头在 Obsidian 里是隐藏文件),不超过 100 UTF-8 字节,截断不切开字符。
 - 发布:删除残留的 publish.tmp 后重新组装;`mkdir -p` 父目录后 rename 到最终路径。目标已存在且主笔记 frontmatter 的 job_url 指向本 job → 视为上次已发布,补写 manifest 后退出 0;其它"已存在"退出 20。同一文件系统内 rename 是原子的。
 - 文件夹名建好后不能改,因为 Remotely Save 把改名当成删除加新增。服务端从不修改或删除 vault 里已有的内容。
 - 视频文件不进 vault,留在 jobs/<id>/,网页详情页可播放。
@@ -154,7 +156,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | 端点 | 说明 |
 |---|---|
 | GET/POST /api/domains,DELETE /api/domains/{id} | name 即 slug `^[a-z0-9][a-z0-9-]{0,47}$`,不可改;不合法 400 invalid_name;重名 409;仍有集合或 job 时删除 409 |
-| GET/POST /api/collections,DELETE /api/collections/{id} | 同上,属于某个领域,同一领域内不重名;领域不存在 404;有 job 时删除 409 |
+| GET/POST /api/collections,DELETE /api/collections/{id} | 同上,属于某个领域,同一领域内不重名;`unsorted` 保留给无集合的 job,不能用作集合名(400 invalid_name);领域不存在 404;有 job 时删除 409 |
 | PUT /api/collections/{id}/feed | {url\|null};解析为 6 种 kind 之一并规范化后存 feed_url;解析不了 400 invalid_url;null 解绑 |
 | GET /api/collections/{id}/feed?limit=30 | 同步调用 feed.py(limit 1–100,超时 60s),每条附 job:{id,status}\|null;未绑定 400 invalid_request;已有刷新在跑 409;上游失败 502 upstream,message 取 feed.py stderr 最后一行 |
 | POST /api/collections/{id}/feed/jobs | {items:[{platform,source_id}], translate?};每批 1–20 条,超出 400 invalid_request;服务端校验 ID 并自己拼 URL;一个事务内插入;返回 {created, skipped},每项带 job |
@@ -178,8 +180,18 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 - 时间字段都是 RFC 3339,时区 +08:00。
 - 非 /api 路径返回静态文件,找不到时返回 index.html;前端手工解析 pathname,不用 vue-router。
 - feed.py:`python3 -I $FLORI_STEPS_DIR/feed.py list <kind> <normalized_url> --limit N`,超时 60s。stdout `{"title":str,"items":[{"platform":"bilibili"|"youtube","source_id":str,"title":str,"published":"YYYY-MM-DD"|null,"duration_s":int|null}]}`;退出码沿用契约 1。
-  - kind 封闭:bili_up、bili_season、bili_series、bili_fav、yt_channel、yt_playlist。
-  - B站用 4 个公开 JSON 接口,带 UA 与 Referer,匿名可用;遇到 412 或 -352 时等 5s 重试 1 次。SESSDATA 存在时只发给 api.bilibili.com。
+  - kind 封闭,规范 URL 由服务端解析投递链接后生成,feed.py 只接受下表形式(整串匹配),其它一律退出 20:
+
+    | kind | 规范 URL |
+    |---|---|
+    | bili_up | `https://space.bilibili.com/<mid>` |
+    | bili_season | `https://space.bilibili.com/<mid>/lists/<season_id>?type=season` |
+    | bili_series | `https://space.bilibili.com/<mid>/lists/<series_id>?type=series` |
+    | bili_fav | `https://www.bilibili.com/medialist/detail/ml<media_id>`(收藏夹链接不一定带 mid) |
+    | yt_channel | `https://www.youtube.com/@<handle>/videos`,或把 `@<handle>` 换成 `channel/<id>`、`c/<name>`、`user/<name>` |
+    | yt_playlist | `https://www.youtube.com/playlist?list=<id>` |
+
+  - B站用 4 个公开 JSON 接口,带 UA 与 Referer,匿名可用;遇到 HTTP 412 或 code -352、-412 时等 5s 重试 1 次。SESSDATA 存在时只发给 api.bilibili.com。
   - YouTube 用 `yt-dlp --flat-playlist --playlist-end N --extractor-args youtubetab:approximate_date -J --proxy $FLORI_PROXY`。
-  - 除 yt_playlist 按列表顺序外,其余新的在前。
+  - 除 yt_playlist 按列表顺序、bili_fav 按收藏时间外,其余按发布时间新的在前。
 - 内部接口:`AppState{db, exec, config}`;`ExecHandle::{wake(), cancel(job_id)}`;`pipeline::plan(pipeline, translate) -> Vec<StepSpec>`。
