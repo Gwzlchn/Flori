@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta content="text/html; charset=utf-8" http-equiv="content-type"/>
+<title>Direct Preference Optimization:Your Language Model is Secretly a Reward Model</title>
+
+
+
+
+
+
+
+
+
+
+
+
+</head>
+<body>
+
+<header class="arxiv-html-header">
+<div class="html-header-logo">
+<a href="/"><img alt="arXiv logo" class="logo desktop-only" src="/static/base/1.0.1/images/arxiv-logo-primary-light.svg" width="100"/>
+<span class="sr-only">Back to arXiv</span>
+</a>
+</div>
+
+<nav class="html-header-nav">
+<a class="header-button hover-effect desktop-only" href="https://info.arxiv.org/about/accessible_HTML.html" target="_blank">Why HTML?</a>
+<a class="header-button" href="#" onclick="event.preventDefault(); showModalForm();" title="Report an Issue">
+<svg aria-hidden="true" class="mobile-only toggle-icon" height="1.25rem" role="presentation" viewbox="0 0 640 640">
+<path d="M224 160C224 107 267 64 320 64C373 64 416 107 416 160L416 163.6C416 179.3 403.3 192 387.6 192L252.5 192C236.8 192 224.1 179.3 224.1 163.6L224.1 160zM569.6 172.8C580.2 186.9 577.3 207 563.2 217.6L465.4 290.9C470.7 299.8 474.7 309.6 477.2 320L576 320C593.7 320 608 334.3 608 352C608 369.7 593.7 384 576 384L480 384L480 416C480 418.6 479.9 421.3 479.8 423.9L563.2 486.4C577.3 497 580.2 517.1 569.6 531.2C559 545.3 538.9 548.2 524.8 537.6L461.7 490.3C438.5 534.5 395.2 566.5 344 574.2L344 344C344 330.7 333.3 320 320 320C306.7 320 296 330.7 296 344L296 574.2C244.8 566.5 201.5 534.5 178.3 490.3L115.2 537.6C101.1 548.2 81 545.3 70.4 531.2C59.8 517.1 62.7 497 76.8 486.4L160.2 423.9C160.1 421.3 160 418.7 160 416L160 384L64 384C46.3 384 32 369.7 32 352C32 334.3 46.3 320 64 320L162.8 320C165.3 309.6 169.3 299.8 174.6 290.9L76.8 217.6C62.7 207 59.8 186.9 70.4 172.8C81 158.7 101.1 155.8 115.2 166.4L224 248C236.3 242.9 249.8 240 264 240L376 240C390.2 240 403.7 242.8 416 248L524.8 166.4C538.9 155.8 559 158.7 569.6 172.8z"></path>
+</svg>
+<span class="desktop-only">Report Issue</span></a>
+
+<a aria-label="Back to abstract page" class="header-button" href="/abs/2305.18290v3" title="Back to abstract page">
+<svg aria-hidden="true" class="mobile-only toggle-icon" fill="#ffffff" height="1.25rem" role="presentation" viewbox="0 0 512 512">
+<path d="M502.6 278.6c12.5-12.5 12.5-32.8 0-45.3l-128-128c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L402.7 224 192 224c-17.7 0-32 14.3-32 32s14.3 32 32 32l210.7 0-73.4 73.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l128-128zM160 96c17.7 0 32-14.3 32-32s-14.3-32-32-32L96 32C43 32 0 75 0 128L0 384c0 53 43 96 96 96l64 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-64 0c-17.7 0-32-14.3-32-32l0-256c0-17.7 14.3-32 32-32l64 0z">
+</path>
+</svg>
+<span class="desktop-only">Back to Abstract</span>
+</a>
+
+<a class="header-button" href="/pdf/2305.18290v3" target="_blank" title="Download PDF">
+<svg class="mobile-only toggle-icon" height="1.25rem" role="presentation" viewbox="0 0 576 542">
+<path d="M208 48L96 48c-8.8 0-16 7.2-16 16l0 384c0 8.8 7.2 16 16 16l80 0 0 48-80 0c-35.3 0-64-28.7-64-64L32 64C32 28.7 60.7 0 96 0L229.5 0c17 0 33.3 6.7 45.3 18.7L397.3 141.3c12 12 18.7 28.3 18.7 45.3l0 149.5-48 0 0-128-88 0c-39.8 0-72-32.2-72-72l0-88zM348.1 160L256 67.9 256 136c0 13.3 10.7 24 24 24l68.1 0zM240 380l32 0c33.1 0 60 26.9 60 60s-26.9 60-60 60l-12 0 0 28c0 11-9 20-20 20s-20-9-20-20l0-128c0-11 9-20 20-20zm32 80c11 0 20-9 20-20s-9-20-20-20l-12 0 0 40 12 0zm96-80l32 0c28.7 0 52 23.3 52 52l0 64c0 28.7-23.3 52-52 52l-32 0c-11 0-20-9-20-20l0-128c0-11 9-20 20-20zm32 128c6.6 0 12-5.4 12-12l0-64c0-6.6-5.4-12-12-12l-12 0 0 88 12 0zm76-108c0-11 9-20 20-20l48 0c11 0 20 9 20 20s-9 20-20 20l-28 0 0 24 28 0c11 0 20 9 20 20s-9 20-20 20l-28 0 0 44c0 11-9 20-20 20s-20-9-20-20l0-128z"></path>
+</svg>
+<span class="desktop-only">Download PDF</span></a>
+
+<a aria-label="Toggle navigation" class="header-button toggle-icon" href="javascript:toggleNavTOC();" title="Toggle navigation">
+<svg height="1.25rem" role="presentation" viewbox="0 0 512 512">
+<path d="M40 48C26.7 48 16 58.7 16 72v48c0 13.3 10.7 24 24 24H88c13.3 0 24-10.7 24-24V72c0-13.3-10.7-24-24-24H40zM192 64c-17.7 0-32 14.3-32 32s14.3 32 32 32H480c17.7 0 32-14.3 32-32s-14.3-32-32-32H192zm0 160c-17.7 0-32 14.3-32 32s14.3 32 32 32H480c17.7 0 32-14.3 32-32s-14.3-32-32-32H192zm0 160c-17.7 0-32 14.3-32 32s14.3 32 32 32H480c17.7 0 32-14.3 32-32s-14.3-32-32-32H192zM16 232v48c0 13.3 10.7 24 24 24H88c13.3 0 24-10.7 24-24V232c0-13.3-10.7-24-24-24H40c-13.3 0-24 10.7-24 24zM40 368c-13.3 0-24 10.7-24 24v48c0 13.3 10.7 24 24 24H88c13.3 0 24-10.7 24-24V392c0-13.3-10.7-24-24-24H40z">
+</path>
+</svg>
+</a>
+
+<a class="header-button toggle-icon" href="javascript:toggleReadingMode();" title="Disable reading mode, show header and footer">
+<svg height="1.25rem" role="presentation" viewbox="0 0 448 512">
+<path d="M32 32C14.3 32 0 46.3 0 64l0 96c0 17.7 14.3 32 32 32s32-14.3 32-32l0-64 64 0c17.7 0 32-14.3 32-32s-14.3-32-32-32L32 32zM64 352c0-17.7-14.3-32-32-32S0 334.3 0 352l0 96c0 17.7 14.3 32 32 32l96 0c17.7 0 32-14.3 32-32s-14.3-32-32-32l-64 0 0-64zM320 32c-17.7 0-32 14.3-32 32s14.3 32 32 32l64 0 0 64c0 17.7 14.3 32 32 32s32-14.3 32-32l0-96c0-17.7-14.3-32-32-32l-96 0zM448 352c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 64-64 0c-17.7 0-32 14.3-32 32s14.3 32 32 32l96 0c17.7 0 32-14.3 32-32l0-96z"></path>
+</svg>
+</a>
+
+<button aria-label="Toggle color scheme" class="header-button color-tog" onclick="toggleColorScheme();" title="Toggle dark/light mode" type="button">
+<span aria-hidden="true" class="toggle-icon automatic-tog">
+<svg height="1.25rem" role="presentation" viewbox="0 0 24 24">
+<path d="m14.3 16-.7-2h-3.2l-.7 2H7.8L11 7h2l3.2 9h-1.9M20 8.69V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69m-9.15 3.96h2.3L12 9l-1.15 3.65Z">
+</path>
+</svg>
+</span>
+<span aria-hidden="true" class="toggle-icon light-tog">
+<svg height="1.25rem" role="presentation" viewbox="0 0 24 24">
+<path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69Z">
+</path>
+</svg>
+</span>
+<span aria-hidden="true" class="toggle-icon dark-tog">
+<svg height="1.25rem" role="presentation" viewbox="0 0 24 24">
+<path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12c0-2.42-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12 20 8.69Z">
+</path>
+</svg>
+</span>
+</button>
+</nav>
+</header><nav class="ltx_page_navbar">
+<nav class="ltx_TOC">
+<ol class="ltx_toclist">
+<li class="ltx_tocentry ltx_tocentry_abstract"><a class="ltx_ref" href="#abstract1" title="In Direct Preference Optimization:Your Language Model is Secretly a Reward Model"><span class="ltx_text ltx_ref_title">Abstract</span></a></li>
+<li class="ltx_tocentry ltx_tocentry_section"><a class="ltx_ref" href="#S1" title="In Direct Preference Optimization:Your Language Model is Secretly a Reward Model"><span class="ltx_text ltx_ref_title"><span class="ltx_tag ltx_tag_ref">1 </span>Introduction</span></a></li>
+
+
+
+
+
+
+
+
+
+
+
+</ol></nav>
+</nav>
+<div class="ltx_page_main">
+<div class="infobox" id="infobox">
+<a href="https://info.arxiv.org/help/license/index.html#licenses-available" id="license-tr">
+    License: CC BY 4.0
+  </a>
+<div id="watermark-tr">
+arXiv:2305.18290v3 [cs.LG] 29 Jul 2024</div>
+</div><div class="ltx_page_content">
+<article class="ltx_document ltx_authors_1line">
+<h1 class="ltx_title ltx_title_document">Direct Preference Optimization:
+<br class="ltx_break"/>Your Language Model is Secretly a Reward Model</h1>
+<div class="ltx_authors">
+<span class="ltx_creator ltx_role_author">
+<span class="ltx_personname">Rafael Rafailov  <span class="ltx_note ltx_role_footnotemark" id="footnotex1"><sup class="ltx_note_mark">2</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">2</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">2</span>
+</span></span></span>
+</span><span class="ltx_note ltx_note_frontmatter ltx_thanks_contribution ltx_role_thanks" id="id1"><sup class="ltx_note_mark">†</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">†</sup><span class="ltx_note_type">thanks: </span>Equal contribution; more junior authors listed earlier.</span></span></span></span>
+<span class="ltx_author_before">  </span><span class="ltx_creator ltx_role_author">
+<span class="ltx_personname">Archit Sharma<span class="ltx_note ltx_role_footnotemark" id="footnotex2"><sup class="ltx_note_mark">1</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">1</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">1</span>
+</span></span></span>  <span class="ltx_note ltx_role_footnotemark" id="footnotex3"><sup class="ltx_note_mark">2</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">2</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">2</span>
+</span></span></span>
+</span></span>
+<span class="ltx_author_before">  </span><span class="ltx_creator ltx_role_author">
+<span class="ltx_personname">Eric Mitchell<span class="ltx_note ltx_role_footnotemark" id="footnotex4"><sup class="ltx_note_mark">1</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">1</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">1</span>
+</span></span></span>  <span class="ltx_note ltx_role_footnotemark" id="footnotex5"><sup class="ltx_note_mark">2</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">2</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">2</span>
+</span></span></span>
+</span></span>
+<span class="ltx_author_before">  </span><span class="ltx_creator ltx_role_author">
+<span class="ltx_personname">Stefano Ermon<span class="ltx_note ltx_role_footnotemark" id="footnotex6"><sup class="ltx_note_mark">2</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">2</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">2</span>
+</span></span></span>  <span class="ltx_note ltx_role_footnotemark" id="footnotex7"><sup class="ltx_note_mark">3</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">3</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">3</span>
+</span></span></span>
+</span></span>
+<span class="ltx_author_before">  </span><span class="ltx_creator ltx_role_author">
+<span class="ltx_personname">Christopher D. Manning<span class="ltx_note ltx_role_footnotemark" id="footnotex8"><sup class="ltx_note_mark">2</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">2</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">2</span>
+</span></span></span>
+</span></span>
+<span class="ltx_author_before">  </span><span class="ltx_creator ltx_role_author">
+<span class="ltx_personname">Chelsea Finn<span class="ltx_note ltx_role_footnotemark" id="footnotex9"><sup class="ltx_note_mark">2</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">2</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">2</span>
+</span></span></span>
+</span></span>
+<span class="ltx_author_before">  </span><span class="ltx_creator ltx_role_author">
+<span class="ltx_personname"><span class="ltx_note ltx_role_footnotemark" id="footnotex10"><sup class="ltx_note_mark">2</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">2</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">2</span>
+</span></span></span>  Stanford University <span class="ltx_note ltx_role_footnotemark" id="footnotex11"><sup class="ltx_note_mark">3</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">3</sup><span class="ltx_note_type">footnotemark: </span>
+<span class="ltx_tag ltx_tag_note">3</span>
+</span></span></span>  CZ Biohub
+</span><span class="ltx_author_notes"><span class="ltx_author_notes_content">
+<span class="ltx_contact ltx_role_email"><span class="ltx_contact_name">Email: </span><a href="mailto:"><span class="ltx_text ltx_font_typewriter" id="id2">{rafailov,architsh,eric.mitchell}@cs.stanford.edu</span></a>
+</span></span></span></span></div>
+<div class="ltx_abstract" id="abstract1"><h6 class="ltx_title ltx_title_abstract">Abstract</h6>
+<p class="ltx_p" id="abstract1.1">While large-scale unsupervised language models (LMs) learn broad world knowledge and some reasoning skills, achieving precise control of their behavior is difficult due to the completely unsupervised nature of their training.
+Existing methods for gaining such steerability collect human labels of the relative quality of model generations and fine-tune the unsupervised LM to align with these preferences, often with reinforcement learning from human feedback (RLHF).
+However, RLHF is a complex and often unstable procedure, first fitting a reward model that reflects the human preferences, and then fine-tuning the large unsupervised LM using reinforcement learning to maximize this estimated reward without drifting too far from the original model.
+In this paper we introduce a new parameterization of the reward model in RLHF that enables extraction of the corresponding optimal policy in closed form, allowing us to solve the standard RLHF problem with only a simple classification loss.
+The resulting algorithm, which we call <span class="ltx_text ltx_font_italic" id="abstract1.1.1">Direct Preference Optimization</span> (DPO), is stable, performant, and computationally lightweight, eliminating the need for  sampling from the LM during fine-tuning or performing significant hyperparameter tuning.
+Our experiments show that DPO can fine-tune LMs to align with human preferences as well as or better than existing methods. Notably, fine-tuning with DPO exceeds PPO-based RLHF in ability to control sentiment of generations, and matches or improves response quality in summarization and single-turn dialogue while being substantially simpler to implement and train.</p>
+</div>
+<section class="ltx_section" id="S1">
+<h2 class="ltx_title ltx_title_section"><span class="ltx_tag ltx_tag_section">1 </span>Introduction</h2>
+<div class="ltx_para" id="S1.p1">
+<p class="ltx_p" id="S1.p1.1">Large unsupervised language models (LMs) trained on very large datasets
+acquire surprising capabilities <cite class="ltx_cite ltx_citemacro_citep">[<a class="ltx_ref" href="#bib.bib11" title="">11</a>, <a class="ltx_ref" href="#bib.bib7" title="">7</a>, <a class="ltx_ref" href="#bib.bib42" title="">42</a>, <a class="ltx_ref" href="#bib.bib8" title="">8</a>]</cite>. However, these models are trained on data generated by humans with a wide variety of goals, priorities, and skillsets. Some of these goals and skillsets may not be desirable to imitate; for example, while we may want our AI coding assistant to <span class="ltx_text ltx_font_italic" id="S1.p1.1.1">understand</span> common programming mistakes in order to correct them, nevertheless, when generating code, we would like to bias our model toward the (potentially rare) high-quality coding ability present in its training data. Similarly, we might want our language model to be <span class="ltx_text ltx_font_italic" id="S1.p1.1.2">aware</span> of a common misconception believed by 50% of people, but we certainly do not want the model to claim this misconception to be true in 50% of queries about it! In other words, selecting the model’s <em class="ltx_emph ltx_font_italic" id="S1.p1.1.3">desired responses and behavior</em> from its very wide <span class="ltx_text ltx_font_italic" id="S1.p1.1.4">knowledge and abilities</span> is crucial to building AI systems that are safe, performant, and controllable <cite class="ltx_cite ltx_citemacro_citep">[<a class="ltx_ref" href="#bib.bib28" title="">28</a>]</cite>. While existing methods typically steer LMs to match human preferences using reinforcement learning (RL), we will show that the RL-based objective used by existing methods can be optimized exactly with a simple binary cross-entropy objective, greatly simplifying the preference learning pipeline.</p>
+</div>
+<figure class="ltx_figure" id="S1.F1"><img alt="Refer to caption" class="ltx_graphics ltx_centering ltx_img_landscape" height="96" id="S1.F1.g1" src="2305.18290v3/figures/diagrams/teaser.png" style="aspect-ratio:476/96;" width="476"/>
+<figcaption class="ltx_caption ltx_centering"><span class="ltx_tag ltx_tag_figure">Figure 1: </span><span class="ltx_text ltx_font_bold" id="S1.F1.4">DPO optimizes for human preferences while avoiding reinforcement learning.</span> Existing methods for fine-tuning language models with human feedback first fit a reward model to a dataset of prompts and human preferences over pairs of responses, and then use RL to find a policy that maximizes the learned reward. In contrast, DPO directly optimizes for the policy best satisfying the preferences with a simple classification objective, fitting an <span class="ltx_text ltx_font_italic" id="S1.F1.5">implicit</span> reward model whose corresponding optimal policy can be extracted in closed form.</figcaption>
+</figure>
+
+
+
+</section>
+
+
+<section class="ltx_section" id="S4">
+<h2 class="ltx_title ltx_title_section"><span class="ltx_tag ltx_tag_section">4 </span>Direct Preference Optimization</h2>
+
+
+<div class="ltx_para" id="S4.p3">
+<p class="ltx_p" id="S4.p3.1">Now that we have
+the probability of human preference data in terms of the optimal policy rather than the reward model, we can formulate a maximum likelihood objective for a parametrized policy <math alttext="\pi_{\theta}" class="ltx_Math" display="inline" id="S4.p3.m1" intent=":literal"><semantics><msub><mi>π</mi><mi>θ</mi></msub><annotation encoding="application/x-tex">\pi_{\theta}</annotation></semantics></math>. Analogous to the reward modeling approach (i.e. Eq. <a class="ltx_ref" href="#S3.E2" title="In 3 Preliminaries ‣ Direct Preference Optimization:Your Language Model is Secretly a Reward Model"><span class="ltx_text ltx_ref_tag">2</span></a>), our policy objective becomes:</p>
+<table class="ltx_equation ltx_eqn_table" id="S4.E7">
+<tbody><tr class="ltx_equation ltx_eqn_row ltx_align_baseline">
+<td class="ltx_eqn_cell ltx_eqn_center_padleft"></td>
+<td class="ltx_eqn_cell ltx_align_center"><math alttext="\mathcal{L}_{\text{DPO}}(\pi_{\theta};\pi_{\text{ref}})=-\mathbb{E}_{(x,y_{w},y_{l})\sim\mathcal{D}}\left[\log\sigma\left(\beta\log\frac{\pi_{\theta}(y_{w}\mid x)}{\pi_{\text{ref}}(y_{w}\mid x)}-\beta\log\frac{\pi_{\theta}(y_{l}\mid x)}{\pi_{\text{ref}}(y_{l}\mid x)}\right)\right]." class="ltx_Math" display="block" id="S4.E7.m1" intent=":literal"><semantics><mrow><mrow><mrow><msub><mi class="ltx_font_mathcaligraphic">ℒ</mi><mtext>DPO</mtext></msub><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><msub><mi>π</mi><mi>θ</mi></msub><mo>,</mo><msub><mi>π</mi><mtext>ref</mtext></msub><mo stretchy="false">)</mo></mrow></mrow><mo>=</mo><mrow><mo>−</mo><mrow><msub><mi>𝔼</mi><mrow><mrow><mo stretchy="false">(</mo><mi>x</mi><mo>,</mo><msub><mi>y</mi><mi>w</mi></msub><mo>,</mo><msub><mi>y</mi><mi>l</mi></msub><mo stretchy="false">)</mo></mrow><mo>∼</mo><mi class="ltx_font_mathcaligraphic">𝒟</mi></mrow></msub><mo lspace="0em" rspace="0em">​</mo><mrow><mo>[</mo><mrow><mi>log</mi><mo lspace="0.167em">⁡</mo><mrow><mi>σ</mi><mo>⁡</mo><mrow><mo>(</mo><mrow><mrow><mi>β</mi><mo lspace="0.167em" rspace="0em">​</mo><mrow><mi>log</mi><mo lspace="0.167em">⁡</mo><mfrac><mrow><msub><mi>π</mi><mi>θ</mi></msub><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><msub><mi>y</mi><mi>w</mi></msub><mo fence="true" lspace="0em" rspace="0em">∣</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow><mrow><msub><mi>π</mi><mtext>ref</mtext></msub><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><msub><mi>y</mi><mi>w</mi></msub><mo fence="true" lspace="0em" rspace="0em">∣</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow></mfrac></mrow></mrow><mo>−</mo><mrow><mi>β</mi><mo lspace="0.167em" rspace="0em">​</mo><mrow><mi>log</mi><mo lspace="0.167em">⁡</mo><mfrac><mrow><msub><mi>π</mi><mi>θ</mi></msub><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><msub><mi>y</mi><mi>l</mi></msub><mo fence="true" lspace="0em" rspace="0em">∣</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow><mrow><msub><mi>π</mi><mtext>ref</mtext></msub><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><msub><mi>y</mi><mi>l</mi></msub><mo fence="true" lspace="0em" rspace="0em">∣</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow></mfrac></mrow></mrow></mrow><mo>)</mo></mrow></mrow></mrow><mo>]</mo></mrow></mrow></mrow></mrow><mo lspace="0em">.</mo></mrow><annotation encoding="application/x-tex">\mathcal{L}_{\text{DPO}}(\pi_{\theta};\pi_{\text{ref}})=-\mathbb{E}_{(x,y_{w},y_{l})\sim\mathcal{D}}\left[\log\sigma\left(\beta\log\frac{\pi_{\theta}(y_{w}\mid x)}{\pi_{\text{ref}}(y_{w}\mid x)}-\beta\log\frac{\pi_{\theta}(y_{l}\mid x)}{\pi_{\text{ref}}(y_{l}\mid x)}\right)\right].</annotation></semantics></math></td>
+<td class="ltx_eqn_cell ltx_eqn_center_padright"></td>
+<td class="ltx_eqn_cell ltx_eqn_eqno ltx_align_middle ltx_align_right" rowspan="1"><span class="ltx_tag ltx_tag_equation ltx_align_right">(7)</span></td></tr></tbody>
+</table>
+<p class="ltx_p" id="S4.p3.2">This way, we fit an implicit reward using an alternative parameterization, whose optimal policy is simply <math alttext="\pi_{\theta}" class="ltx_Math" display="inline" id="S4.p3.m2" intent=":literal"><semantics><msub><mi>π</mi><mi>θ</mi></msub><annotation encoding="application/x-tex">\pi_{\theta}</annotation></semantics></math>. Moreover, since our procedure is equivalent to fitting a reparametrized Bradley-Terry model, it enjoys certain theoretical properties, such as consistencies under suitable assumption of the preference data distribution <cite class="ltx_cite ltx_citemacro_cite">[<a class="ltx_ref" href="#bib.bib4" title="">4</a>]</cite>. In Section <a class="ltx_ref" href="#S5" title="5 Theoretical Analysis of DPO ‣ Direct Preference Optimization:Your Language Model is Secretly a Reward Model"><span class="ltx_text ltx_ref_tag">5</span></a>, we further discuss theoretical properties of DPO in relation to other works.</p>
+</div>
+
+
+</section>
+<section class="ltx_section" id="S5">
+<h2 class="ltx_title ltx_title_section"><span class="ltx_tag ltx_tag_section">5 </span>Theoretical Analysis of DPO</h2>
+
+<section class="ltx_subsection" id="S5.SS1">
+<h3 class="ltx_title ltx_title_subsection"><span class="ltx_tag ltx_tag_subsection">5.1 </span>Your Language Model Is Secretly a Reward Model</h3>
+
+
+
+<div class="ltx_theorem ltx_theorem_lemma" id="Thmlemma1">
+<h6 class="ltx_title ltx_runin ltx_title_theorem"><span class="ltx_tag ltx_tag_theorem"><span class="ltx_text ltx_font_bold" id="Thmlemma1.2">Lemma 1</span></span><span class="ltx_text ltx_font_bold" id="Thmlemma1.3">.</span></h6>
+<div class="ltx_para" id="Thmlemma1.p1">
+<p class="ltx_p" id="Thmlemma1.p1.1"><span class="ltx_text ltx_font_italic" id="Thmlemma1.p1.1.1">Under the Plackett-Luce, and in particular the Bradley-Terry, preference framework, two reward functions from the same class induce the same preference distribution.</span></p>
+</div>
+</div>
+
+
+
+
+
+</section>
+
+</section>
+<section class="ltx_section" id="S6">
+<h2 class="ltx_title ltx_title_section"><span class="ltx_tag ltx_tag_section">6 </span>Experiments</h2>
+
+<div class="ltx_para" id="S6.p2">
+<p class="ltx_p" id="S6.p2.1"><span class="ltx_text ltx_font_bold" id="S6.p2.1.1">Tasks.</span> Our experiments explore three different open-ended text generation tasks. For all experiments, algorithms learn a policy from a dataset of preferences <math alttext="\mathcal{D}=\bigl\{x^{(i)},y_{w}^{(i)},y_{l}^{(i)}\bigr\}_{i=1}^{N}" class="ltx_Math" display="inline" id="S6.p2.m1" intent=":literal"><semantics><mrow><mi class="ltx_font_mathcaligraphic">𝒟</mi><mo>=</mo><msubsup><mrow><mo stretchy="false">{</mo><msup><mi>x</mi><mrow><mo stretchy="false">(</mo><mi>i</mi><mo stretchy="false">)</mo></mrow></msup><mo>,</mo><msubsup><mi>y</mi><mi>w</mi><mrow><mo stretchy="false">(</mo><mi>i</mi><mo stretchy="false">)</mo></mrow></msubsup><mo>,</mo><msubsup><mi>y</mi><mi>l</mi><mrow><mo stretchy="false">(</mo><mi>i</mi><mo stretchy="false">)</mo></mrow></msubsup><mo stretchy="false">}</mo></mrow><mrow><mi>i</mi><mo>=</mo><mn>1</mn></mrow><mi>N</mi></msubsup></mrow><annotation encoding="application/x-tex">\mathcal{D}=\bigl\{x^{(i)},y_{w}^{(i)},y_{l}^{(i)}\bigr\}_{i=1}^{N}</annotation></semantics></math>. In <span class="ltx_text ltx_font_bold" id="S6.p2.1.2">controlled sentiment generation</span>, <math alttext="x" class="ltx_Math" display="inline" id="S6.p2.m2" intent=":literal"><semantics><mi>x</mi><annotation encoding="application/x-tex">x</annotation></semantics></math> is a prefix of a movie review from the IMDb dataset <cite class="ltx_cite ltx_citemacro_cite">[<a class="ltx_ref" href="#bib.bib24" title="">24</a>]</cite>, and the policy must generate <math alttext="y" class="ltx_Math" display="inline" id="S6.p2.m3" intent=":literal"><semantics><mi>y</mi><annotation encoding="application/x-tex">y</annotation></semantics></math> with positive sentiment. In order to perform a controlled evaluation, for this experiment we <span class="ltx_text ltx_font_italic" id="S6.p2.1.3">generate</span> preference pairs over generations using a pre-trained sentiment classifier, where <math alttext="p(\text{positive}\mid x,y_{w})&gt;p(\text{positive}\mid x,y_{l})" class="ltx_Math" display="inline" id="S6.p2.m4" intent=":literal"><semantics><mrow><mrow><mi>p</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mtext>positive</mtext><mo fence="true" lspace="0em" rspace="0em">∣</mo><mrow><mi>x</mi><mo>,</mo><msub><mi>y</mi><mi>w</mi></msub></mrow><mo stretchy="false">)</mo></mrow></mrow><mo>&gt;</mo><mrow><mi>p</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mtext>positive</mtext><mo fence="true" lspace="0em" rspace="0em">∣</mo><mrow><mi>x</mi><mo>,</mo><msub><mi>y</mi><mi>l</mi></msub></mrow><mo stretchy="false">)</mo></mrow></mrow></mrow><annotation encoding="application/x-tex">p(\text{positive}\mid x,y_{w})&gt;p(\text{positive}\mid x,y_{l})</annotation></semantics></math>. For SFT, we fine-tune GPT-2-large until convergence on reviews from the train split of the IMDB dataset (further details in App <a class="ltx_ref" href="#A3.SS1" title="C.1 IMDb Sentiment Experiment and Baseline Details ‣ Appendix C Further Details on the Experimental Set-Up ‣ Direct Preference Optimization:Your Language Model is Secretly a Reward Model"><span class="ltx_text ltx_ref_tag">C.1</span></a>). In <span class="ltx_text ltx_font_bold" id="S6.p2.1.4">summarization</span>, <math alttext="x" class="ltx_Math" display="inline" id="S6.p2.m5" intent=":literal"><semantics><mi>x</mi><annotation encoding="application/x-tex">x</annotation></semantics></math> is a forum post from Reddit; the policy must generate a summary <math alttext="y" class="ltx_Math" display="inline" id="S6.p2.m6" intent=":literal"><semantics><mi>y</mi><annotation encoding="application/x-tex">y</annotation></semantics></math> of the main points in the post. Following prior work, we use the Reddit TL;DR summarization dataset <cite class="ltx_cite ltx_citemacro_citep">[<a class="ltx_ref" href="#bib.bib43" title="">43</a>]</cite> along with human preferences gathered by <cite class="ltx_cite ltx_citemacro_citeauthor"><a class="ltx_ref" href="#bib.bib40" title="">Stiennon et al.</a></cite>. We use an SFT model fine-tuned on human-written forum post summaries<span class="ltx_note ltx_role_footnote" id="footnote1"><sup class="ltx_note_mark">1</sup><span class="ltx_note_outer"><span class="ltx_note_content"><sup class="ltx_note_mark">1</sup>
+<span class="ltx_tag ltx_tag_note">1</span>
+<a class="ltx_ref ltx_url ltx_font_typewriter" href="https://huggingface.co/CarperAI/openai_summarize_tldr_sft" title="">https://huggingface.co/CarperAI/openai_summarize_tldr_sft</a></span></span></span> with the TRLX <cite class="ltx_cite ltx_citemacro_citep">[<a class="ltx_ref" href="#bib.bib44" title="">44</a>]</cite> framework for RLHF. The human preference dataset was gathered by <cite class="ltx_cite ltx_citemacro_citeauthor"><a class="ltx_ref" href="#bib.bib40" title="">Stiennon et al.</a></cite> on samples from a different, but similarly-trained, SFT model. Finally, in <span class="ltx_text ltx_font_bold" id="S6.p2.1.5">single-turn dialogue</span>,
+<math alttext="x" class="ltx_Math" display="inline" id="S6.p2.m7" intent=":literal"><semantics><mi>x</mi><annotation encoding="application/x-tex">x</annotation></semantics></math> is a human query, which may be anything from a question about astrophysics to a request for relationship advice. A policy must produce an engaging and helpful response <math alttext="y" class="ltx_Math" display="inline" id="S6.p2.m8" intent=":literal"><semantics><mi>y</mi><annotation encoding="application/x-tex">y</annotation></semantics></math> to a user’s query; we use the Anthropic Helpful and Harmless dialogue dataset <cite class="ltx_cite ltx_citemacro_citep">[<a class="ltx_ref" href="#bib.bib1" title="">1</a>]</cite>, containing 170k dialogues between a human and an automated assistant. Each transcript ends with a pair of responses generated by a large (although unknown) language model along with a preference label denoting the human-preferred response. In this setting, no pre-trained SFT model is available; we therefore fine-tune an off-the-shelf language model on only the preferred completions to form the SFT model.</p>
+</div>
+<figure class="ltx_figure" id="S6.F2">
+<div class="ltx_flex_figure">
+<div class="ltx_flex_cell ltx_flex_size_2"><object class="ltx_graphics ltx_centering ltx_figure_panel ltx_img_landscape" data="2305.18290v3/frontier.svg" height="179" id="S6.F2.g1" style="aspect-ratio:238/179;" type="image/svg+xml" width="238"></object></div><div class="ltx_flex_cell ltx_flex_size_2"><object class="ltx_graphics ltx_centering ltx_figure_panel ltx_img_landscape" data="2305.18290v3/tldr_winrate_vs_temp.svg" height="175" id="S6.F2.g2" style="aspect-ratio:234/175;" type="image/svg+xml" width="234"></object></div></div>
+<figcaption class="ltx_caption ltx_centering"><span class="ltx_tag ltx_tag_figure">Figure 2: </span><span class="ltx_text ltx_font_bold" id="S6.F2.4">Left.</span> The frontier of expected reward vs KL to the reference policy. DPO provides the highest expected reward for all KL values, demonstrating the quality of the optimization. <span class="ltx_text ltx_font_bold" id="S6.F2.5">Right.</span> TL;DR summarization win rates vs. human-written summaries, using GPT-4 as evaluator. DPO exceeds PPO’s best-case performance on summarization, while being more robust to changes in the sampling temperature.</figcaption>
+</figure>
+
+
+
+
+<section class="ltx_subsection" id="S6.SS3">
+<h3 class="ltx_title ltx_title_subsection"><span class="ltx_tag ltx_tag_subsection">6.3 </span>Generalization to a new input distribution</h3>
+<figure class="ltx_table ltx_align_floatright" id="S6.T1" style="width:37%;">
+<table class="ltx_tabular ltx_guessed_headers ltx_align_middle" id="S6.T1.2">
+<tbody class="ltx_tbody">
+<tr class="ltx_tr" id="S6.T1.2.1">
+<th class="ltx_td ltx_th ltx_th_row ltx_border_tt" id="S6.T1.2.1.1"></th>
+<td class="ltx_td ltx_align_center ltx_border_tt" colspan="2" id="S6.T1.2.1.2"><span class="ltx_text ltx_font_bold" id="S6.T1.2.1.2.1" style="font-size:90%;">Win rate vs. ground truth</span></td></tr>
+<tr class="ltx_tr" id="S6.T1.2.2">
+<th class="ltx_td ltx_align_center ltx_th ltx_th_row" id="S6.T1.2.2.1"><span class="ltx_text ltx_font_bold" id="S6.T1.2.2.1.1" style="font-size:90%;">Alg.</span></th>
+<td class="ltx_td ltx_align_center ltx_border_t" id="S6.T1.2.2.2"><span class="ltx_text" id="S6.T1.2.2.2.1" style="font-size:90%;">Temp <math alttext="0" class="ltx_Math" display="inline" id="S6.T1.m1" intent=":literal"><semantics><mn>0</mn><annotation encoding="application/x-tex">0</annotation></semantics></math></span></td>
+<td class="ltx_td ltx_align_center ltx_border_t" id="S6.T1.2.2.3"><span class="ltx_text" id="S6.T1.2.2.3.1" style="font-size:90%;">Temp <math alttext="0.25" class="ltx_Math" display="inline" id="S6.T1.m2" intent=":literal"><semantics><mn>0.25</mn><annotation encoding="application/x-tex">0.25</annotation></semantics></math></span></td></tr>
+<tr class="ltx_tr" id="S6.T1.2.3">
+<th class="ltx_td ltx_align_center ltx_th ltx_th_row ltx_border_t" id="S6.T1.2.3.1"><span class="ltx_text" id="S6.T1.2.3.1.1" style="font-size:90%;">DPO</span></th>
+<td class="ltx_td ltx_align_center ltx_border_t" id="S6.T1.2.3.2"><span class="ltx_text" id="S6.T1.2.3.2.1" style="font-size:90%;">0.36</span></td>
+<td class="ltx_td ltx_align_center ltx_border_t" id="S6.T1.2.3.3"><span class="ltx_text" id="S6.T1.2.3.3.1" style="font-size:90%;">0.31</span></td></tr>
+<tr class="ltx_tr" id="S6.T1.2.4">
+<th class="ltx_td ltx_align_center ltx_th ltx_th_row ltx_border_bb" id="S6.T1.2.4.1"><span class="ltx_text" id="S6.T1.2.4.1.1" style="font-size:90%;">PPO</span></th>
+<td class="ltx_td ltx_align_center ltx_border_bb" id="S6.T1.2.4.2"><span class="ltx_text" id="S6.T1.2.4.2.1" style="font-size:90%;">0.26</span></td>
+<td class="ltx_td ltx_align_center ltx_border_bb" id="S6.T1.2.4.3"><span class="ltx_text" id="S6.T1.2.4.3.1" style="font-size:90%;">0.23</span></td></tr>
+</tbody>
+</table>
+<figcaption class="ltx_caption" style="font-size:90%;"><span class="ltx_tag ltx_tag_table">Table 1: </span>GPT-4 win rates vs. ground truth summaries for out-of-distribution CNN/DailyMail input articles.</figcaption>
+</figure>
+
+</section>
+
+</section>
+
+
+<section class="ltx_bibliography" id="bib">
+<h2 class="ltx_title ltx_title_bibliography">References</h2>
+<ul class="ltx_biblist">
+<li class="ltx_bibitem" id="bib.bib1"><span class="ltx_tag ltx_role_refnum ltx_tag_bibitem">[1]</span>
+<span class="ltx_bibblock">
+Y. Bai, A. Jones, K. Ndousse, A. Askell, A. Chen, N. DasSarma, D. Drain,
+S. Fort, D. Ganguli, T. Henighan, N. Joseph, S. Kadavath, J. Kernion,
+T. Conerly, S. El-Showk, N. Elhage, Z. Hatfield-Dodds, D. Hernandez, T. Hume,
+S. Johnston, S. Kravec, L. Lovitt, N. Nanda, C. Olsson, D. Amodei, T. Brown,
+J. Clark, S. McCandlish, C. Olah, B. Mann, and J. Kaplan.
+
+</span>
+<span class="ltx_bibblock">Training a helpful and harmless assistant with reinforcement learning
+from human feedback, 2022a.
+
+</span></li>
+<li class="ltx_bibitem" id="bib.bib2"><span class="ltx_tag ltx_role_refnum ltx_tag_bibitem">[2]</span>
+<span class="ltx_bibblock">
+Y. Bai, S. Kadavath, S. Kundu, A. Askell, J. Kernion, A. Jones, A. Chen,
+A. Goldie, A. Mirhoseini, C. McKinnon, C. Chen, C. Olsson, C. Olah,
+D. Hernandez, D. Drain, D. Ganguli, D. Li, E. Tran-Johnson, E. Perez,
+J. Kerr, J. Mueller, J. Ladish, J. Landau, K. Ndousse, K. Lukosuite,
+L. Lovitt, M. Sellitto, N. Elhage, N. Schiefer, N. Mercado, N. DasSarma,
+R. Lasenby, R. Larson, S. Ringer, S. Johnston, S. Kravec, S. E. Showk,
+S. Fort, T. Lanham, T. Telleen-Lawton, T. Conerly, T. Henighan, T. Hume,
+S. R. Bowman, Z. Hatfield-Dodds, B. Mann, D. Amodei, N. Joseph,
+S. McCandlish, T. Brown, and J. Kaplan.
+
+</span>
+<span class="ltx_bibblock">Constitutional ai: Harmlessness from ai feedback, 2022b.
+
+</span></li>
+<li class="ltx_bibitem" id="bib.bib3"><span class="ltx_tag ltx_role_refnum ltx_tag_bibitem">[3]</span>
+<span class="ltx_bibblock">
+S. Biderman, H. Schoelkopf, Q. Anthony, H. Bradley, K. O’Brien, E. Hallahan,
+M. A. Khan, S. Purohit, U. S. Prashanth, E. Raff, A. Skowron, L. Sutawika,
+and O. van der Wal.
+
+</span>
+<span class="ltx_bibblock">Pythia: A suite for analyzing large language models across training
+and scaling, 2023.
+
+</span></li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</ul>
+</section>
+
+
+<section class="ltx_appendix" id="A1">
+<h2 class="ltx_title ltx_title_appendix"><span class="ltx_tag ltx_tag_appendix">Appendix A </span>Mathematical Derivations</h2>
+<section class="ltx_subsection" id="A1.SS1">
+<h3 class="ltx_title ltx_title_subsection"><span class="ltx_tag ltx_tag_subsection">A.1 </span>Deriving the Optimum of the KL-Constrained Reward Maximization Objective</h3>
+
+
+
+<div class="ltx_para" id="A1.SS1.p4">
+<p class="ltx_p" id="A1.SS1.p4.1">which is a valid probability distribution as <math alttext="\pi^{*}(y|x)\geq 0" class="ltx_Math" display="inline" id="A1.SS1.p4.m1" intent=":literal"><semantics><mrow><mrow><msup><mi>π</mi><mo>∗</mo></msup><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><mi>y</mi><mo lspace="0em" rspace="0em">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow><mo>≥</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">\pi^{*}(y|x)\geq 0</annotation></semantics></math> for all <math alttext="y" class="ltx_Math" display="inline" id="A1.SS1.p4.m2" intent=":literal"><semantics><mi>y</mi><annotation encoding="application/x-tex">y</annotation></semantics></math> and <math alttext="\sum_{y}\pi^{*}(y|x)=1" class="ltx_Math" display="inline" id="A1.SS1.p4.m3" intent=":literal"><semantics><mrow><mrow><msub><mo>∑</mo><mi>y</mi></msub><mrow><msup><mi>π</mi><mo>∗</mo></msup><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><mi>y</mi><mo lspace="0em" rspace="0em">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow></mrow><mo>=</mo><mn>1</mn></mrow><annotation encoding="application/x-tex">\sum_{y}\pi^{*}(y|x)=1</annotation></semantics></math>. Since <math alttext="Z(x)" class="ltx_Math" display="inline" id="A1.SS1.p4.m4" intent=":literal"><semantics><mrow><mi>Z</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow><annotation encoding="application/x-tex">Z(x)</annotation></semantics></math> is not a function of <math alttext="y" class="ltx_Math" display="inline" id="A1.SS1.p4.m5" intent=":literal"><semantics><mi>y</mi><annotation encoding="application/x-tex">y</annotation></semantics></math>, we can then re-organize the final objective in Eq <a class="ltx_ref" href="#A1.Ex1" title="In A.1 Deriving the Optimum of the KL-Constrained Reward Maximization Objective ‣ Appendix A Mathematical Derivations ‣ Direct Preference Optimization:Your Language Model is Secretly a Reward Model"><span class="ltx_text ltx_ref_tag">12</span></a> as:</p>
+<table class="ltx_equationgroup ltx_eqn_align ltx_eqn_table" id="A1.EGx2">
+<tbody id="A1.E13"><tr class="ltx_equation ltx_eqn_row ltx_align_baseline">
+<td class="ltx_eqn_cell ltx_eqn_center_padleft"></td>
+<td class="ltx_td ltx_align_right ltx_eqn_cell"><math alttext="\displaystyle\min_{\pi}\mathbb{E}_{x\sim\mathcal{D}}\left[\mathbb{E}_{y\sim\pi(y|x)}\left[\log\frac{\pi(y|x)}{\pi^{*}(y|x)}\right]-\log Z(x)\right]=" class="ltx_Math" display="inline" id="A1.E13.m1" intent=":literal"><semantics><mrow><mrow><mrow><munder><mi>min</mi><mi>π</mi></munder><mo lspace="0.167em">⁡</mo><msub><mi>𝔼</mi><mrow><mi>x</mi><mo>∼</mo><mi class="ltx_font_mathcaligraphic">𝒟</mi></mrow></msub></mrow><mo lspace="0em" rspace="0em">​</mo><mrow><mo>[</mo><mrow><mrow><msub><mi>𝔼</mi><mrow><mi>y</mi><mo>∼</mo><mrow><mi>π</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mi>y</mi><mo lspace="0em" rspace="0em">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow></mrow></msub><mo lspace="0em" rspace="0em">​</mo><mrow><mo>[</mo><mrow><mi>log</mi><mo lspace="0.167em">⁡</mo><mstyle displaystyle="true"><mfrac><mrow><mi>π</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mi>y</mi><mo lspace="0em" rspace="0em">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow><mrow><msup><mi>π</mi><mo>∗</mo></msup><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><mi>y</mi><mo lspace="0em" rspace="0em">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow></mfrac></mstyle></mrow><mo>]</mo></mrow></mrow><mo>−</mo><mrow><mi>log</mi><mo lspace="0.167em">⁡</mo><mrow><mi>Z</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow></mrow></mrow><mo>]</mo></mrow></mrow><mo>=</mo><mphantom></mphantom></mrow><annotation encoding="application/x-tex">\displaystyle\min_{\pi}\mathbb{E}_{x\sim\mathcal{D}}\left[\mathbb{E}_{y\sim\pi(y|x)}\left[\log\frac{\pi(y|x)}{\pi^{*}(y|x)}\right]-\log Z(x)\right]=</annotation></semantics></math></td>
+<td class="ltx_eqn_cell ltx_eqn_center_padright"></td>
+<td class="ltx_eqn_cell ltx_eqn_eqno ltx_align_middle ltx_align_right" rowspan="1"><span class="ltx_tag ltx_tag_equation ltx_align_right">(13)</span></td></tr></tbody>
+<tbody id="A1.E14"><tr class="ltx_equation ltx_eqn_row ltx_align_baseline">
+<td class="ltx_eqn_cell ltx_eqn_center_padleft"></td>
+<td class="ltx_td ltx_align_right ltx_eqn_cell"><math alttext="\displaystyle\min_{\pi}\mathbb{E}_{x\sim\mathcal{D}}\left[\mathbb{D}_{\text{KL}}(\pi(y|x)\mid\mid\pi^{*}(y|x))-\log Z(x)\right]" class="ltx_math_unparsed" display="inline" id="A1.E14.m1" intent=":literal"><semantics><mrow><munder><mi>min</mi><mi>π</mi></munder><msub><mi>𝔼</mi><mrow><mi>x</mi><mo>∼</mo><mi class="ltx_font_mathcaligraphic">𝒟</mi></mrow></msub><mrow><mo>[</mo><msub><mi>𝔻</mi><mtext>KL</mtext></msub><mrow><mo stretchy="false">(</mo><mi>π</mi><mrow><mo stretchy="false">(</mo><mi>y</mi><mo fence="false" rspace="0.167em" stretchy="false">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow><mo lspace="0em" rspace="0.0835em">∣</mo><mo lspace="0.0835em" rspace="0.167em">∣</mo><msup><mi>π</mi><mo>∗</mo></msup><mrow><mo stretchy="false">(</mo><mi>y</mi><mo fence="false" rspace="0.167em" stretchy="false">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow><mo stretchy="false">)</mo></mrow><mo>−</mo><mi>log</mi><mi>Z</mi><mrow><mo stretchy="false">(</mo><mi>x</mi><mo stretchy="false">)</mo></mrow><mo>]</mo></mrow></mrow><annotation encoding="application/x-tex">\displaystyle\min_{\pi}\mathbb{E}_{x\sim\mathcal{D}}\left[\mathbb{D}_{\text{KL}}(\pi(y|x)\mid\mid\pi^{*}(y|x))-\log Z(x)\right]</annotation></semantics></math></td>
+<td class="ltx_eqn_cell ltx_eqn_center_padright"></td>
+<td class="ltx_eqn_cell ltx_eqn_eqno ltx_align_middle ltx_align_right" rowspan="1"><span class="ltx_tag ltx_tag_equation ltx_align_right">(14)</span></td></tr></tbody>
+</table>
+<p class="ltx_p" id="A1.SS1.p4.2">Now, since <math alttext="Z(x)" class="ltx_Math" display="inline" id="A1.SS1.p4.m6" intent=":literal"><semantics><mrow><mi>Z</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow><annotation encoding="application/x-tex">Z(x)</annotation></semantics></math> does not depend on <math alttext="\pi" class="ltx_Math" display="inline" id="A1.SS1.p4.m7" intent=":literal"><semantics><mi>π</mi><annotation encoding="application/x-tex">\pi</annotation></semantics></math>, the minimum is achieved by the policy that minimizes the first KL term. Gibbs’ inequality tells us that the KL-divergence is minimized at 0 if and only if the two distributions are identical. Hence we have the optimal solution:</p>
+<table class="ltx_equation ltx_eqn_table" id="A1.E15">
+<tbody><tr class="ltx_equation ltx_eqn_row ltx_align_baseline">
+<td class="ltx_eqn_cell ltx_eqn_center_padleft"></td>
+<td class="ltx_eqn_cell ltx_align_center"><math alttext="\pi(y|x)=\pi^{*}(y|x)=\frac{1}{Z(x)}\pi_{\text{ref}}(y|x)\exp\left(\frac{1}{\beta}r(x,y)\right)" class="ltx_Math" display="block" id="A1.E15.m1" intent=":literal"><semantics><mrow><mrow><mi>π</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mi>y</mi><mo lspace="0em" rspace="0em">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow><mo>=</mo><mrow><msup><mi>π</mi><mo>∗</mo></msup><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><mi>y</mi><mo lspace="0em" rspace="0em">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow><mo>=</mo><mrow><mfrac><mn>1</mn><mrow><mi>Z</mi><mo>⁡</mo><mrow><mo stretchy="false">(</mo><mi>x</mi><mo stretchy="false">)</mo></mrow></mrow></mfrac><mo lspace="0em" rspace="0em">​</mo><msub><mi>π</mi><mtext>ref</mtext></msub><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><mi>y</mi><mo lspace="0em" rspace="0em">|</mo><mi>x</mi><mo stretchy="false">)</mo></mrow><mo lspace="0.167em" rspace="0em">​</mo><mrow><mi>exp</mi><mo>⁡</mo><mrow><mo>(</mo><mrow><mfrac><mn>1</mn><mi>β</mi></mfrac><mo lspace="0em" rspace="0em">​</mo><mi>r</mi><mo lspace="0em" rspace="0em">​</mo><mrow><mo stretchy="false">(</mo><mi>x</mi><mo>,</mo><mi>y</mi><mo stretchy="false">)</mo></mrow></mrow><mo>)</mo></mrow></mrow></mrow></mrow><annotation encoding="application/x-tex">\pi(y|x)=\pi^{*}(y|x)=\frac{1}{Z(x)}\pi_{\text{ref}}(y|x)\exp\left(\frac{1}{\beta}r(x,y)\right)</annotation></semantics></math></td>
+<td class="ltx_eqn_cell ltx_eqn_center_padright"></td>
+<td class="ltx_eqn_cell ltx_eqn_eqno ltx_align_middle ltx_align_right" rowspan="1"><span class="ltx_tag ltx_tag_equation ltx_align_right">(15)</span></td></tr></tbody>
+</table>
+<p class="ltx_p" id="A1.SS1.p4.3">for all <math alttext="x\in\mathcal{D}" class="ltx_Math" display="inline" id="A1.SS1.p4.m8" intent=":literal"><semantics><mrow><mi>x</mi><mo>∈</mo><mi class="ltx_font_mathcaligraphic">𝒟</mi></mrow><annotation encoding="application/x-tex">x\in\mathcal{D}</annotation></semantics></math>. This completes the derivation.</p>
+</div>
+</section>
+
+
+
+
+
+</section>
+<section class="ltx_appendix" id="A2">
+<h2 class="ltx_title ltx_title_appendix"><span class="ltx_tag ltx_tag_appendix">Appendix B </span>DPO Implementation Details and Hyperparameters</h2>
+<div class="ltx_para" id="A2.p1">
+<p class="ltx_p" id="A2.p1.1">DPO is relatively straightforward to implement; PyTorch code for the DPO loss is provided below:</p>
+<div class="ltx_pagination ltx_role_newpage"></div><pre class="ltx_verbatim ltx_font_typewriter" id="A2.p1.2">
+import torch.nn.functional as F
+
+def dpo_loss(pi_logps, ref_logps, yw_idxs, yl_idxs, beta):
+    """
+    pi_logps: policy logprobs, shape (B,)
+    ref_logps: reference model logprobs, shape (B,)
+    yw_idxs: preferred completion indices in [0, B-1], shape (T,)
+    yl_idxs: dispreferred completion indices in [0, B-1], shape (T,)
+    beta: temperature controlling strength of KL penalty
+
+    Each pair of (yw_idxs[i], yl_idxs[i]) represents the
+      indices of a single preference pair.
+    """
+
+    pi_yw_logps,  pi_yl_logps =  pi_logps[yw_idxs],  pi_logps[yl_idxs]
+    ref_yw_logps, ref_yl_logps = ref_logps[yw_idxs], ref_logps[yl_idxs]
+
+    pi_logratios  = pi_yw_logps - pi_yl_logps
+    ref_logratios = ref_yw_logps - ref_yl_logps
+
+    losses = -F.logsigmoid(beta * (pi_logratios - ref_logratios))
+    rewards = beta * (pi_logps - ref_logps).detach()
+
+    return losses, rewards
+</pre>
+</div>
+
+</section>
+
+
+</article>
+</div>
+</div>
+<footer class="arxiv-html-footer">
+<div class="ltx_page_logo">
+    Experimental support, please
+    <a class="ltx_ref" href="./2305.18290v3/__stdout.txt" rel="nofollow" target="_blank">view the build logs</a>
+    for errors. Generated by
+    <a class="ltx_ref ltx_LaTeXML_logo" href="https://math.nist.gov/~BMiller/LaTeXML/" target="_blank">
+<span style="letter-spacing: -0.2em; margin-right: 0.1em;">
+        L
+        <span style="font-size: 70%; position: relative; bottom: 2.2pt;">A</span>
+        T
+        <span style="position: relative; bottom: -0.4ex;">E</span>
+</span>
+<span class="ltx_font_smallcaps">xml</span>
+<img alt="[LOGO]" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAsAAAAOCAYAAAD5YeaVAAAAAXNSR0IArs4c6QAAAAZiS0dEAP8A/wD/oL2nkwAAAAlwSFlzAAALEwAACxMBAJqcGAAAAAd0SU1FB9wKExQZLWTEaOUAAAAddEVYdENvbW1lbnQAQ3JlYXRlZCB3aXRoIFRoZSBHSU1Q72QlbgAAAdpJREFUKM9tkL+L2nAARz9fPZNCKFapUn8kyI0e4iRHSR1Kb8ng0lJw6FYHFwv2LwhOpcWxTjeUunYqOmqd6hEoRDhtDWdA8ApRYsSUCDHNt5ul13vz4w0vWCgUnnEc975arX6ORqN3VqtVZbfbTQC4uEHANM3jSqXymFI6yWazP2KxWAXAL9zCUa1Wy2tXVxheKA9YNoR8Pt+aTqe4FVVVvz05O6MBhqUIBGk8Hn8HAOVy+T+XLJfLS4ZhTiRJgqIoVBRFIoric47jPnmeB1mW/9rr9ZpSSn3Lsmir1fJZlqWlUonKsvwWwD8ymc/nXwVBeLjf7xEKhdBut9Hr9WgmkyGEkJwsy5eHG5vN5g0AKIoCAEgkEkin0wQAfN9/cXPdheu6P33fBwB4ngcAcByHJpPJl+fn54mD3Gg0NrquXxeLRQAAwzAYj8cwTZPwPH9/sVg8PXweDAauqqr2cDjEer1GJBLBZDJBs9mE4zjwfZ85lAGg2+06hmGgXq+j3+/DsixYlgVN03a9Xu8jgCNCyIegIAgx13Vfd7vdu+FweG8YRkjXdWy329+dTgeSJD3ieZ7RNO0VAXAPwDEAO5VKndi2fWrb9jWl9Esul6PZbDY9Go1OZ7PZ9z/lyuD3OozU2wAAAABJRU5ErkJggg=="/>
+</a>.
+  </div>
+<div class="keyboard-glossary">
+<h2>Instructions for reporting errors</h2>
+<p>We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+      support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+      methods listed below:</p>
+<ul>
+<li>Click the "Report Issue" <span class="mobile-only">(<svg aria-hidden="true" height="1em" role="presentation" style="display: inline-block; vertical-align: middle; fill: var(--text-color);" viewbox="0 0 640 640">
+<path d="M224 160C224 107 267 64 320 64C373 64 416 107 416 160L416 163.6C416 179.3 403.3 192 387.6 192L252.5 192C236.8 192 224.1 179.3 224.1 163.6L224.1 160zM569.6 172.8C580.2 186.9 577.3 207 563.2 217.6L465.4 290.9C470.7 299.8 474.7 309.6 477.2 320L576 320C593.7 320 608 334.3 608 352C608 369.7 593.7 384 576 384L480 384L480 416C480 418.6 479.9 421.3 479.8 423.9L563.2 486.4C577.3 497 580.2 517.1 569.6 531.2C559 545.3 538.9 548.2 524.8 537.6L461.7 490.3C438.5 534.5 395.2 566.5 344 574.2L344 344C344 330.7 333.3 320 320 320C306.7 320 296 330.7 296 344L296 574.2C244.8 566.5 201.5 534.5 178.3 490.3L115.2 537.6C101.1 548.2 81 545.3 70.4 531.2C59.8 517.1 62.7 497 76.8 486.4L160.2 423.9C160.1 421.3 160 418.7 160 416L160 384L64 384C46.3 384 32 369.7 32 352C32 334.3 46.3 320 64 320L162.8 320C165.3 309.6 169.3 299.8 174.6 290.9L76.8 217.6C62.7 207 59.8 186.9 70.4 172.8C81 158.7 101.1 155.8 115.2 166.4L224 248C236.3 242.9 249.8 240 264 240L376 240C390.2 240 403.7 242.8 416 248L524.8 166.4C538.9 155.8 559 158.7 569.6 172.8z"></path>
+</svg>)</span> button, located in the page header.</li>
+</ul>
+<p><strong>Tip:</strong> You can select the relevant text first, to include it in your report.</p>
+<p>Our team has already identified <a class="ltx_ref" href="https://github.com/arXiv/html_feedback/issues" target="_blank">the following issues</a>. We appreciate your time reviewing and reporting rendering errors we
+      may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+      should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+      all.</p>
+<p>Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a <a class="ltx_ref" href="https://github.com/brucemiller/LaTeXML/wiki/Porting-LaTeX-packages-for-LaTeXML" target="_blank">list of packages that need conversion</a>, and welcome <a class="ltx_ref" href="https://github.com/brucemiller/LaTeXML/issues" target="_blank">developer contributions</a>.</p>
+</div>
+</footer><div id="fixed-buttons-container">
+<a class="header-button" href="javascript:toggleReadingMode();" id="disable-reading-mode-btn" title="Disable reading mode, show header and footer">
+<svg height="1.25rem" role="presentation" viewbox="0 0 448 512">
+<path d="M0 96C0 78.3 14.3 64 32 64l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 128C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32l384 0c17.7 0 32 14.3 32 32s-14.3 32-32 32L32 288c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32L32 448c-17.7 0-32-14.3-32-32s14.3-32 32-32l384 0c17.7 0 32 14.3 32 32z"></path>
+</svg>
+</a>
+</div></body>
+</html>
