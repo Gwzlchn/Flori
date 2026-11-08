@@ -67,7 +67,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | 资源 | 输出 | 超时 | 尝试 |
 |---|---|---|---|---|
-| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt;meta: title, uploader, duration_ms, published | 30m | 3 |
+| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt;meta: title, uploader, duration_ms, published,有字幕时另有 subtitle_language | 30m | 3 |
 | video-transcribe | whisper | transcript.json;字幕优先;meta: origin, language, language_probability | 2h | 2 |
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节)、由它渲染的 transcript.md | 1h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv);官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |

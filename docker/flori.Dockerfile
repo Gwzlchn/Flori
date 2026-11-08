@@ -7,7 +7,6 @@
 # a host-built binary into this stage, so real tools behave the same in development.
 FROM debian:bookworm-slim AS tools
 ARG YT_DLP_VERSION=2026.10.21
-ARG YUTTO_VERSION=2.3.0
 ARG FASTER_WHISPER_VERSION=1.2.1
 ARG DENO_VERSION=2.9.8
 ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
@@ -28,8 +27,7 @@ RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check \
       -r /tmp/requirements.txt \
       "faster-whisper==${FASTER_WHISPER_VERSION}" \
-      "yt-dlp[default]==${YT_DLP_VERSION}" \
-      "yutto==${YUTTO_VERSION}" && \
+      "yt-dlp[default]==${YT_DLP_VERSION}" && \
     rm /tmp/requirements.txt
 
 RUN curl -fsSL -o /usr/local/bin/claude \
@@ -58,7 +56,6 @@ ENV PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/
 
 RUN ffmpeg -version | head -1 | grep -F 'ffmpeg version 5.1' && \
     test "$(yt-dlp --version)" = "${YT_DLP_VERSION}" && \
-    yutto --version | grep -F "${YUTTO_VERSION}" && \
     deno --version | head -1 | grep -F "deno ${DENO_VERSION}" && \
     claude --version | grep -F "${CLAUDE_VERSION}" && \
     test "$(codex --version)" = "codex-cli ${CODEX_VERSION}" && \
