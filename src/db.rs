@@ -1,10 +1,28 @@
 //! SQLite with runtime queries (no query macros). Migrations are embedded and only move forward.
+//! Functions that can fail for a caller-visible reason return `sqlx::Result<Result<T, ApiError>>`.
+//! Executor writes are conditional on the current state, so a cancel or retry committed by the
+//! HTTP layer is never overwritten.
 
-use std::{path::Path, time::Duration};
+use std::{fs, io, path::Path, time::Duration};
 
 use sqlx::{
-    SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
+    Row, SqlitePool,
+    sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
+    },
+};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339, macros::offset};
+
+use crate::{
+    Config,
+    api::{
+        ApiError, Collection, Domain, ErrorCode, Feed, JobRef, JobStatus, JobSummary, StepInfo,
+        StepStatus,
+    },
+    pipeline::{
+        AiSpec, JOB_FILE, JobSpec, Pipeline, Platform, Source, StepName, TranslateMode, parse_feed,
+        plan,
+    },
 };
 
 pub async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
@@ -23,31 +41,546 @@ pub async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::pipeline::StepName;
+/// RFC 3339 in +08:00, whole seconds.
+pub fn now() -> String {
+    let now = OffsetDateTime::now_utc().to_offset(offset!(+8));
+    let now = now.replace_nanosecond(0).unwrap_or(now);
+    now.format(&Rfc3339).unwrap_or_default()
+}
 
-    #[tokio::test]
-    async fn migrations_apply_and_step_names_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let pool = super::open(&dir.path().join("t.sqlite")).await.unwrap();
-        let tables: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_%' ESCAPE '\\' AND name != 'sqlite_sequence' ORDER BY name")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        let tables: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
-        assert_eq!(tables, ["collections", "domains", "jobs", "steps"]);
+fn not_found(what: &str) -> ApiError {
+    ApiError::new(ErrorCode::NotFound, format!("{what} not found"))
+}
 
-        let ddl: (String,) = sqlx::query_as("SELECT sql FROM sqlite_master WHERE name = 'steps'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        for name in StepName::ALL {
-            assert!(
-                ddl.0.contains(&format!("'{name}'")),
-                "steps.name CHECK misses {name}"
-            );
-        }
+fn conflict(message: &str) -> ApiError {
+    ApiError::new(ErrorCode::Conflict, message)
+}
+
+async fn exists(db: &SqlitePool, table: &str, id: i64) -> sqlx::Result<bool> {
+    let sql = format!("SELECT EXISTS (SELECT 1 FROM {table} WHERE id = ?)");
+    sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_one(db)
+        .await
+}
+
+/// Deletes one row whose `guard` (SQL that is true while dependents exist) is false.
+async fn delete_unused(
+    db: &SqlitePool,
+    table: &str,
+    guard: &str,
+    id: i64,
+) -> sqlx::Result<Result<(), ApiError>> {
+    let sql = format!("DELETE FROM {table} WHERE id = ?1 AND NOT ({guard})");
+    let done = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .execute(db)
+        .await?
+        .rows_affected();
+    Ok(match (done, exists(db, table, id).await?) {
+        (1.., _) => Ok(()),
+        (0, true) => Err(conflict("still in use")),
+        (0, false) => Err(not_found(table.trim_end_matches('s'))),
+    })
+}
+
+pub async fn list_domains(db: &SqlitePool) -> sqlx::Result<Vec<Domain>> {
+    let rows: Vec<(i64, String, String)> =
+        sqlx::query_as("SELECT id, name, created FROM domains ORDER BY name")
+            .fetch_all(db)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, created)| Domain { id, name, created })
+        .collect())
+}
+
+pub async fn create_domain(db: &SqlitePool, name: &str) -> sqlx::Result<Result<Domain, ApiError>> {
+    let created = now();
+    let id: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO domains (name, created) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING id",
+    )
+    .bind(name)
+    .bind(&created)
+    .fetch_optional(db)
+    .await?;
+    Ok(id
+        .map(|id| Domain {
+            id,
+            name: name.to_owned(),
+            created,
+        })
+        .ok_or_else(|| conflict("domain name already exists")))
+}
+
+pub async fn delete_domain(db: &SqlitePool, id: i64) -> sqlx::Result<Result<(), ApiError>> {
+    let guard = "EXISTS (SELECT 1 FROM collections WHERE domain_id = ?1) \
+                 OR EXISTS (SELECT 1 FROM jobs WHERE domain_id = ?1)";
+    delete_unused(db, "domains", guard, id).await
+}
+
+const COLLECTION: &str = "SELECT id, domain_id, name, feed_url, created FROM collections";
+
+type CollectionRow = (i64, i64, String, Option<String>, String);
+
+/// `feed_url` is stored in normal form, so parsing it again recovers the kind.
+fn collection((id, domain_id, name, feed_url, created): CollectionRow) -> Collection {
+    let feed = feed_url
+        .as_deref()
+        .and_then(parse_feed)
+        .map(|(kind, url)| Feed { kind, url });
+    Collection {
+        id,
+        domain_id,
+        name,
+        feed,
+        created,
     }
 }
+
+pub async fn list_collections(db: &SqlitePool) -> sqlx::Result<Vec<Collection>> {
+    let sql = format!("{COLLECTION} ORDER BY domain_id, name");
+    let rows: Vec<CollectionRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .fetch_all(db)
+        .await?;
+    Ok(rows.into_iter().map(collection).collect())
+}
+
+pub async fn get_collection(db: &SqlitePool, id: i64) -> sqlx::Result<Option<Collection>> {
+    let sql = format!("{COLLECTION} WHERE id = ?");
+    let row: Option<CollectionRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.map(collection))
+}
+
+pub async fn create_collection(
+    db: &SqlitePool,
+    domain_id: i64,
+    name: &str,
+) -> sqlx::Result<Result<Collection, ApiError>> {
+    let id: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO collections (domain_id, name, created) \
+         SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM domains WHERE id = ?1) \
+         ON CONFLICT DO NOTHING RETURNING id",
+    )
+    .bind(domain_id)
+    .bind(name)
+    .bind(now())
+    .fetch_optional(db)
+    .await?;
+    match id {
+        Some(id) => Ok(get_collection(db, id)
+            .await?
+            .ok_or_else(|| not_found("collection"))),
+        None if exists(db, "domains", domain_id).await? => Ok(Err(conflict(
+            "collection name already exists in this domain",
+        ))),
+        None => Ok(Err(not_found("domain"))),
+    }
+}
+
+pub async fn delete_collection(db: &SqlitePool, id: i64) -> sqlx::Result<Result<(), ApiError>> {
+    let guard = "EXISTS (SELECT 1 FROM jobs WHERE collection_id = ?1)";
+    delete_unused(db, "collections", guard, id).await
+}
+
+pub async fn set_feed(
+    db: &SqlitePool,
+    id: i64,
+    feed_url: Option<&str>,
+) -> sqlx::Result<Result<Collection, ApiError>> {
+    sqlx::query("UPDATE collections SET feed_url = ? WHERE id = ?")
+        .bind(feed_url)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(get_collection(db, id)
+        .await?
+        .ok_or_else(|| not_found("collection")))
+}
+
+/// The current step is the first one running, failed or canceled; `current_exit_code` is its
+/// exit code (30 = credentials expired).
+const JOB: &str = "SELECT jobs.id, pipeline, platform, source_id, url, domain_id, collection_id, \
+    translate, jobs.status, title, created, updated, vault_path, \
+    cur.name AS current_step, cur.exit_code AS current_exit_code FROM jobs \
+    LEFT JOIN steps cur ON cur.job_id = jobs.id AND cur.seq = (SELECT min(seq) FROM steps \
+    WHERE job_id = jobs.id AND status IN ('running', 'failed', 'canceled'))";
+
+fn job(row: SqliteRow) -> sqlx::Result<(JobSummary, Option<String>)> {
+    let summary = JobSummary {
+        id: row.try_get("id")?,
+        pipeline: row.try_get("pipeline")?,
+        platform: row.try_get("platform")?,
+        source_id: row.try_get("source_id")?,
+        url: row.try_get("url")?,
+        domain_id: row.try_get("domain_id")?,
+        collection_id: row.try_get("collection_id")?,
+        translate: row.try_get("translate")?,
+        status: row.try_get("status")?,
+        title: row.try_get("title")?,
+        current_step: row.try_get("current_step")?,
+        created: row.try_get("created")?,
+        updated: row.try_get("updated")?,
+    };
+    Ok((summary, row.try_get("vault_path")?))
+}
+
+pub async fn list_jobs(db: &SqlitePool, limit: u32) -> sqlx::Result<Vec<JobSummary>> {
+    let sql = format!("{JOB} ORDER BY jobs.id DESC LIMIT ?");
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(limit)
+        .fetch_all(db)
+        .await?;
+    rows.into_iter().map(|r| job(r).map(|j| j.0)).collect()
+}
+
+/// The job and its `vault_path`.
+pub async fn get_job(
+    db: &SqlitePool,
+    id: i64,
+) -> sqlx::Result<Option<(JobSummary, Option<String>)>> {
+    let sql = format!("{JOB} WHERE jobs.id = ?");
+    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
+    row.map(job).transpose()
+}
+
+async fn job_summary(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSummary, ApiError>> {
+    Ok(get_job(db, id)
+        .await?
+        .map(|j| j.0)
+        .ok_or_else(|| not_found("job")))
+}
+
+pub async fn steps(db: &SqlitePool, job_id: i64) -> sqlx::Result<Vec<StepInfo>> {
+    let rows = sqlx::query(
+        "SELECT seq, name, status, attempts, exit_code, error, started, finished \
+         FROM steps WHERE job_id = ? ORDER BY seq",
+    )
+    .bind(job_id)
+    .fetch_all(db)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(StepInfo {
+                seq: row.try_get("seq")?,
+                name: row.try_get("name")?,
+                status: row.try_get("status")?,
+                attempts: row.try_get("attempts")?,
+                exit_code: row.try_get("exit_code")?,
+                error: row.try_get("error")?,
+                skipped_reason: None,
+                started: row.try_get("started")?,
+                finished: row.try_get("finished")?,
+            })
+        })
+        .collect()
+}
+
+/// Inserts one job per source with its steps and `job.json`, in one transaction. Each result is
+/// `Ok(new job)` or `Err(existing job)` for a duplicate. A failed `job.json` write rolls back.
+pub async fn create_jobs(
+    db: &SqlitePool,
+    config: &Config,
+    cli_version: &str,
+    domain_id: i64,
+    collection_id: Option<i64>,
+    translate: TranslateMode,
+    sources: &[Source],
+) -> sqlx::Result<Result<Vec<Result<JobRef, JobRef>>, ApiError>> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let names: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT d.name, c.name FROM domains d \
+         LEFT JOIN collections c ON c.id = ?2 AND c.domain_id = d.id WHERE d.id = ?1",
+    )
+    .bind(domain_id)
+    .bind(collection_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (domain, collection) = match names {
+        None => return Ok(Err(not_found("domain"))),
+        Some((_, None)) if collection_id.is_some() => return Ok(Err(not_found("collection"))),
+        Some(names) => names,
+    };
+    let created = now();
+    let mut results = Vec::new();
+    let mut dirs = Vec::new();
+    for source in sources {
+        let pipeline = match source.platform {
+            Platform::Arxiv => Pipeline::Arxiv,
+            Platform::Bilibili | Platform::Youtube => Pipeline::Video,
+        };
+        let id: Option<i64> = sqlx::query_scalar(
+            "INSERT INTO jobs (domain_id, collection_id, pipeline, platform, source_id, url, \
+             translate, status, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?) \
+             ON CONFLICT DO NOTHING RETURNING id",
+        )
+        .bind(domain_id)
+        .bind(collection_id)
+        .bind(pipeline)
+        .bind(source.platform)
+        .bind(&source.id)
+        .bind(&source.url)
+        .bind(translate)
+        .bind(&created)
+        .bind(&created)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(id) = id else {
+            let (id, status): (i64, JobStatus) = sqlx::query_as(
+                "SELECT id, status FROM jobs WHERE domain_id = ? AND collection_id IS ? \
+                 AND platform = ? AND source_id = ?",
+            )
+            .bind(domain_id)
+            .bind(collection_id)
+            .bind(source.platform)
+            .bind(&source.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            results.push(Err(JobRef { id, status }));
+            continue;
+        };
+        for (seq, step) in (1..).zip(plan(pipeline, translate)) {
+            sqlx::query(
+                "INSERT INTO steps (job_id, seq, name, status) VALUES (?, ?, ?, 'pending')",
+            )
+            .bind(id)
+            .bind(seq)
+            .bind(step.name)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let spec = JobSpec {
+            job_id: id,
+            pipeline,
+            source: source.clone(),
+            domain: domain.clone(),
+            collection: collection.clone(),
+            translate,
+            ai: AiSpec {
+                tool: config.ai_tool,
+                model_note: config.ai_model_note.clone(),
+                model_translate: config.ai_model_translate.clone(),
+                cli_version: cli_version.to_owned(),
+            },
+            created: created.clone(),
+            public_url: config.public_url.clone(),
+            vault_name: config.vault_name.clone(),
+        };
+        let dir = config.data_dir.join("jobs").join(id.to_string());
+        dirs.push(dir.clone());
+        if let Err(err) = write_job(&dir, &spec) {
+            remove_dirs(&dirs);
+            return Err(sqlx::Error::Io(err));
+        }
+        results.push(Ok(JobRef {
+            id,
+            status: JobStatus::Queued,
+        }));
+    }
+    if let Err(err) = tx.commit().await {
+        remove_dirs(&dirs);
+        return Err(err);
+    }
+    Ok(Ok(results))
+}
+
+/// The directory may already exist: a crash between this write and the commit can leave one
+/// behind for an id that SQLite hands out again.
+fn write_job(dir: &Path, spec: &JobSpec) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let mut text = serde_json::to_string_pretty(spec).map_err(io::Error::other)?;
+    text.push('\n');
+    fs::write(dir.join(JOB_FILE), text)
+}
+
+fn remove_dirs(dirs: &[std::path::PathBuf]) {
+    for dir in dirs {
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+/// failed or canceled -> queued; failed or canceled steps -> pending, keeping their attempts.
+pub async fn retry_job(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSummary, ApiError>> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let moved = sqlx::query(
+        "UPDATE jobs SET status = 'queued', updated = ? WHERE id = ? AND status IN ('failed', 'canceled')",
+    )
+    .bind(now())
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    if moved.rows_affected() == 0 {
+        return Ok(Err(refused(db, id).await?));
+    }
+    sqlx::query(
+        "UPDATE steps SET status = 'pending', exit_code = NULL, error = NULL, started = NULL, \
+         finished = NULL WHERE job_id = ? AND status IN ('failed', 'canceled')",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    job_summary(db, id).await
+}
+
+/// queued or running -> canceled, together with the running step.
+pub async fn cancel_job(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSummary, ApiError>> {
+    let now = now();
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let moved = sqlx::query(
+        "UPDATE jobs SET status = 'canceled', updated = ? WHERE id = ? AND status IN ('queued', 'running')",
+    )
+    .bind(&now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    if moved.rows_affected() == 0 {
+        return Ok(Err(refused(db, id).await?));
+    }
+    sqlx::query("UPDATE steps SET status = 'canceled', finished = ? WHERE job_id = ? AND status = 'running'")
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    job_summary(db, id).await
+}
+
+async fn refused(db: &SqlitePool, id: i64) -> sqlx::Result<ApiError> {
+    Ok(if exists(db, "jobs", id).await? {
+        conflict("job is not in a state that allows this")
+    } else {
+        not_found("job")
+    })
+}
+
+pub async fn queued_jobs(db: &SqlitePool) -> sqlx::Result<Vec<i64>> {
+    sqlx::query_scalar("SELECT id FROM jobs WHERE status = 'queued' ORDER BY id")
+        .fetch_all(db)
+        .await
+}
+
+/// queued -> running. False when the job was canceled before it started.
+pub async fn claim_job(db: &SqlitePool, id: i64) -> sqlx::Result<bool> {
+    let done = sqlx::query(
+        "UPDATE jobs SET status = 'running', updated = ? WHERE id = ? AND status = 'queued'",
+    )
+    .bind(now())
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
+pub async fn job_steps(db: &SqlitePool, id: i64) -> sqlx::Result<Vec<(u32, StepName, StepStatus)>> {
+    sqlx::query_as("SELECT seq, name, status FROM steps WHERE job_id = ? ORDER BY seq")
+        .bind(id)
+        .fetch_all(db)
+        .await
+}
+
+/// Starts one attempt and returns the step's attempt count, or None when the job is no longer
+/// running or the step was canceled.
+pub async fn start_attempt(db: &SqlitePool, job_id: i64, seq: u32) -> sqlx::Result<Option<u32>> {
+    sqlx::query_scalar(
+        "UPDATE steps SET status = 'running', attempts = attempts + 1, started = ?3, finished = NULL \
+         WHERE job_id = ?1 AND seq = ?2 AND status IN ('pending', 'running') \
+         AND (SELECT status FROM jobs WHERE id = ?1) = 'running' RETURNING attempts",
+    )
+    .bind(job_id)
+    .bind(seq)
+    .bind(now())
+    .fetch_optional(db)
+    .await
+}
+
+/// Records the end of an attempt on a running step. `Running` keeps the step running between
+/// automatic retries. False when the HTTP layer already moved the step.
+pub async fn end_attempt(
+    db: &SqlitePool,
+    job_id: i64,
+    seq: u32,
+    status: StepStatus,
+    exit_code: Option<i32>,
+    error: Option<&str>,
+) -> sqlx::Result<bool> {
+    let finished = (status != StepStatus::Running).then(now);
+    let done = sqlx::query(
+        "UPDATE steps SET status = ?, exit_code = ?, error = ?, finished = ? \
+         WHERE job_id = ? AND seq = ? AND status = 'running'",
+    )
+    .bind(status)
+    .bind(exit_code)
+    .bind(error)
+    .bind(finished)
+    .bind(job_id)
+    .bind(seq)
+    .execute(db)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// running -> succeeded or failed; a canceled job stays canceled.
+pub async fn end_job(db: &SqlitePool, id: i64, status: JobStatus) -> sqlx::Result<()> {
+    sqlx::query("UPDATE jobs SET status = ?, updated = ? WHERE id = ? AND status = 'running'")
+        .bind(status)
+        .bind(now())
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Fails the job and its running step after an executor error outside any step.
+pub async fn fail_job(db: &SqlitePool, id: i64, error: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE steps SET status = 'failed', error = ?, finished = ? WHERE job_id = ? AND status = 'running'",
+    )
+    .bind(error)
+    .bind(now())
+    .bind(id)
+    .execute(db)
+    .await?;
+    end_job(db, id, JobStatus::Failed).await
+}
+
+/// Keeps the first title and sets `vault_path` once publish has one.
+pub async fn set_job_output(
+    db: &SqlitePool,
+    id: i64,
+    title: Option<&str>,
+    vault_path: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE jobs SET title = ifnull(title, ?), vault_path = ifnull(?, vault_path), updated = ? WHERE id = ?",
+    )
+    .bind(title)
+    .bind(vault_path)
+    .bind(now())
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// After a crash nothing is running: running jobs go back to the queue and running steps to
+/// pending.
+pub async fn recover(db: &SqlitePool) -> sqlx::Result<()> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    sqlx::query("UPDATE jobs SET status = 'queued' WHERE status = 'running'")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE steps SET status = 'pending' WHERE status = 'running'")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
+#[cfg(test)]
+mod tests;

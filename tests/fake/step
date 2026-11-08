@@ -1,32 +1,43 @@
 #!/usr/bin/env bash
 # Fake for `<self_exe> step <name> <job_dir> <out_dir>` in executor tests.
-# <job_dir>/fake/<name> holds one token per attempt: an exit code, or "hang" to block with a
-# child process until the group is killed. The last token repeats. No file means success.
+# <job_dir>/fake/<name> holds one token per attempt: an exit code, "hang" to block with a child
+# process until the group is killed, or "nomanifest" to exit 0 without manifest.json. The last
+# token repeats. No file means success. When <job_dir>/fake exists the step also writes its
+# environment to fake/<name>.env and the hanging child's pid to fake/<name>.pid, and on success
+# copies fake/<name>.json, when present, as its manifest.
 set -u
 if [ $# -ne 4 ] || [ "$1" != step ]; then
   echo "usage: step <name> <job_dir> <out_dir>" >&2
   exit 2
 fi
 name=$2 job_dir=$3 out_dir=$4
+fake=$job_dir/fake
 attempt=${FLORI_ATTEMPT:-1}
 token=0
-if [ -f "$job_dir/fake/$name" ]; then
-  read -ra tokens <"$job_dir/fake/$name"
+if [ -f "$fake/$name" ]; then
+  read -ra tokens <"$fake/$name"
   if [ "${#tokens[@]}" -ge "$attempt" ]; then
     token=${tokens[attempt - 1]}
   else
     token=${tokens[-1]}
   fi
 fi
+[ -d "$fake" ] && env >"$fake/$name.env"
 echo "fake $name attempt $attempt token $token"
 echo "fake $name stderr" >&2
 case $token in
   hang)
     sleep 300 &
+    [ -d "$fake" ] && echo $! >"$fake/$name.pid"
     wait
     ;;
+  nomanifest) ;;
   0)
-    printf '{"title":null,"files":{},"assets":[],"meta":{}}\n' >"$out_dir/manifest.json"
+    if [ -f "$fake/$name.json" ]; then
+      cp "$fake/$name.json" "$out_dir/manifest.json"
+    else
+      printf '{"title":null,"files":{},"assets":[],"meta":{}}\n' >"$out_dir/manifest.json"
+    fi
     ;;
   *)
     exit "$token"
