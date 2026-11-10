@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, time::Instant as StdInstant};
 
 use super::*;
+use crate::db::job_dir;
 use crate::{
     api::JobSummary,
     pipeline::{TranslateMode, parse_source},
@@ -30,13 +31,9 @@ pub(crate) fn config(root: &Path) -> Config {
     }
 }
 
-pub(crate) fn job_dir(config: &Config, id: i64) -> PathBuf {
-    config.data_dir.join("jobs").join(id.to_string())
-}
-
 /// Writes `<job_dir>/fake/<step>`; see tests/fake/step.
 pub(crate) fn fake(config: &Config, id: i64, file: &str, content: &str) {
-    let dir = job_dir(config, id).join("fake");
+    let dir = job_dir(&config.data_dir, id).join("fake");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(file), content).unwrap();
 }
@@ -124,7 +121,7 @@ impl World {
     }
 
     fn log(&self, id: i64) -> String {
-        fs::read_to_string(job_dir(&self.config, id).join("job.log")).unwrap_or_default()
+        fs::read_to_string(job_dir(&self.config.data_dir, id).join("job.log")).unwrap_or_default()
     }
 
     async fn step(&self, id: i64, seq: usize) -> crate::api::StepInfo {
@@ -157,7 +154,7 @@ async fn exit_10_is_retried_and_the_log_only_grows() {
         "{log}"
     );
     assert!(log.contains("== 05-publish attempt 1 =="), "{log}");
-    let steps = job_dir(&w.config, id).join("steps");
+    let steps = job_dir(&w.config.data_dir, id).join("steps");
     let mut dirs: Vec<String> = fs::read_dir(&steps)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -201,7 +198,7 @@ async fn permanent_exits_are_not_retried_and_retryable_ones_run_out() {
     assert_eq!(step.error.as_deref(), Some("fake video-transcribe stderr"));
     assert_eq!(w.step(permanent, 3).await.status, StepStatus::Pending);
     assert!(
-        !job_dir(&w.config, permanent)
+        !job_dir(&w.config.data_dir, permanent)
             .join("steps/02-video-transcribe.tmp")
             .exists()
     );
@@ -280,7 +277,7 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
     assert_eq!(job.title.as_deref(), Some("First"));
     assert_eq!(vault_path.as_deref(), Some("flori/ml/unsorted/x/"));
 
-    let dir = job_dir(&w.config, id);
+    let dir = job_dir(&w.config.data_dir, id);
     let env = |step: &str| -> BTreeSet<String> {
         let text = fs::read_to_string(dir.join(format!("fake/{step}.env"))).unwrap();
         text.lines()
@@ -347,7 +344,8 @@ async fn bilibili_fetch_gets_sessdata_and_no_proxy() {
     fake(&w.config, id, "video-transcribe", "20");
     let _exec = w.start().await;
     wait_status(&w.db, id, JobStatus::Failed).await;
-    let env = fs::read_to_string(job_dir(&w.config, id).join("fake/video-fetch.env")).unwrap();
+    let env =
+        fs::read_to_string(job_dir(&w.config.data_dir, id).join("fake/video-fetch.env")).unwrap();
     assert!(env.contains("FLORI_BILI_SESSDATA=fake-sessdata"));
     assert!(!env.contains("PROXY"));
 }
@@ -359,7 +357,7 @@ async fn restart_after_a_crash_requeues_and_cleans_tmp() {
     // State a kill -9 leaves behind mid-step.
     db::claim_job(&w.db, id).await.unwrap();
     assert_eq!(db::start_attempt(&w.db, id, 1).await.unwrap(), Some(1));
-    let dir = job_dir(&w.config, id);
+    let dir = job_dir(&w.config.data_dir, id);
     fs::create_dir_all(dir.join("steps/01-video-fetch.tmp")).unwrap();
     fs::write(dir.join("steps/01-video-fetch.tmp/video.mp4.part"), "junk").unwrap();
     fs::write(
@@ -368,11 +366,12 @@ async fn restart_after_a_crash_requeues_and_cleans_tmp() {
     )
     .unwrap();
     let other = w.job("2401.12345", TranslateMode::Off).await;
-    fs::create_dir_all(job_dir(&w.config, other).join("steps/01-arxiv-fetch.tmp")).unwrap();
+    fs::create_dir_all(job_dir(&w.config.data_dir, other).join("steps/01-arxiv-fetch.tmp"))
+        .unwrap();
 
     let _exec = w.start().await;
     assert!(
-        !job_dir(&w.config, other)
+        !job_dir(&w.config.data_dir, other)
             .join("steps/01-arxiv-fetch.tmp")
             .exists()
     );
@@ -479,7 +478,7 @@ async fn ai_credentials_reach_only_ai_steps() {
         .unwrap()
         .unwrap();
         let id = created[0].clone().unwrap().id;
-        fs::create_dir_all(job_dir(config, id).join("fake")).unwrap();
+        fs::create_dir_all(job_dir(&config.data_dir, id).join("fake")).unwrap();
         ids.push(id);
     }
     let _exec = launch(db.clone(), Arc::new(codex.clone()), "1.0".into())
@@ -488,7 +487,9 @@ async fn ai_credentials_reach_only_ai_steps() {
     for id in &ids {
         wait_status(&db, *id, JobStatus::Succeeded).await;
     }
-    let env = |id: i64, step: &str| env_names(job_dir(&codex, id).join(format!("fake/{step}.env")));
+    let env = |id: i64, step: &str| {
+        env_names(job_dir(&codex.data_dir, id).join(format!("fake/{step}.env")))
+    };
     let (video, paper) = (ids[0], ids[1]);
     for step in ["note", "translate"] {
         let names = env(video, step);
@@ -524,7 +525,7 @@ async fn ai_credentials_reach_only_ai_steps() {
 fn live(config: &Config, jobs: &[i64]) -> Vec<(i64, String)> {
     let mut steps = Vec::new();
     for &id in jobs {
-        let Ok(entries) = fs::read_dir(job_dir(config, id).join("fake")) else {
+        let Ok(entries) = fs::read_dir(job_dir(&config.data_dir, id).join("fake")) else {
             continue;
         };
         for entry in entries {

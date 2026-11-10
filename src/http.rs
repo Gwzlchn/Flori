@@ -1,6 +1,6 @@
 //! Routes, Basic Auth, static files with SPA fallback, job file preview with Range, feed listing.
 
-use std::{collections::BTreeMap, io, io::SeekFrom, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, io, io::SeekFrom, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
@@ -37,7 +37,7 @@ use crate::{
         FeedSubmitResult, Health, JobDetail, JobFile, JobRef, JobSummary, JobsQuery, LogChunk,
         LogQuery, NewCollection, NewDomain, SetFeed, StepStatus, SubmitJob,
     },
-    db,
+    db::{self, conflict, job_dir, not_found},
     exec::{self, ExecHandle, Stop},
     pipeline::{
         FeedKind, MetaValue, StepName, TranslateMode, feed_kind_arg, parse_feed, parse_source,
@@ -177,10 +177,6 @@ fn invalid(message: impl Into<String>) -> ApiError {
     ApiError::new(ErrorCode::InvalidRequest, message)
 }
 
-fn not_found(what: &str) -> ApiError {
-    ApiError::new(ErrorCode::NotFound, format!("{what} not found"))
-}
-
 /// JSON body whose rejections use the contract error body.
 pub struct Body<T>(T);
 
@@ -241,10 +237,6 @@ fn check_name(name: &str) -> Result<(), ApiError> {
             "name must match ^[a-z0-9][a-z0-9-]{0,47}$",
         ))
     }
-}
-
-fn job_dir(config: &Config, id: i64) -> PathBuf {
-    config.data_dir.join("jobs").join(id.to_string())
 }
 
 #[utoipa::path(get, path = "/api/domains", responses((status = 200, body = [Domain])))]
@@ -352,7 +344,7 @@ pub async fn list_feed(
         .feed
         .ok_or_else(|| invalid("collection has no feed"))?;
     let Ok(_running) = refresh.0.try_lock() else {
-        return Err(ApiError::new(ErrorCode::Conflict, "a feed refresh is already running").into());
+        return Err(conflict("a feed refresh is already running").into());
     };
     let mut list = run_feed(&s.config, feed.kind, &feed.url, limit).await?;
     // Every job is read; a personal library is small enough for that.
@@ -529,7 +521,7 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
         .await?
         .ok_or_else(|| not_found("job"))?;
     let mut steps = db::steps(&s.db, id).await?;
-    let dir = job_dir(&s.config, id);
+    let dir = job_dir(&s.config.data_dir, id);
     let (mut files, mut assets, mut note_file) = (BTreeMap::new(), BTreeMap::new(), None);
     // Same merge as publish: in step order, later steps win.
     for step in &mut steps {
@@ -608,7 +600,7 @@ pub async fn get_logs(
         .await?
         .ok_or_else(|| not_found("job"))?;
     let offset = query.offset.unwrap_or(0);
-    let file = match tokio::fs::File::open(job_dir(&s.config, id).join("job.log")).await {
+    let file = match tokio::fs::File::open(job_dir(&s.config.data_dir, id).join("job.log")).await {
         Ok(file) => Some(file),
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.into()),
@@ -692,7 +684,7 @@ pub async fn get_file(
         return Err(missing().into());
     };
     // Symlinks and `..` resolve first, so the prefix check sees the real location.
-    let root = tokio::fs::canonicalize(job_dir(&s.config, id))
+    let root = tokio::fs::canonicalize(job_dir(&s.config.data_dir, id))
         .await
         .map_err(|_| missing())?;
     let file = tokio::fs::canonicalize(root.join(&path))

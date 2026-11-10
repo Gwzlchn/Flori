@@ -75,8 +75,7 @@ async fn jobs_are_created_once_per_source_with_steps_and_job_json() {
             StepName::Publish
         ]
     );
-    let spec =
-        crate::pipeline::read_job(&config.data_dir.join("jobs").join(new.id.to_string())).unwrap();
+    let spec = crate::pipeline::read_job(&job_dir(&config.data_dir, new.id)).unwrap();
     assert_eq!(
         (spec.job_id, spec.domain.as_str(), spec.collection),
         (new.id, "ml", None)
@@ -151,52 +150,36 @@ async fn failed_job_json_write_rolls_back() {
 async fn executor_writes_never_override_cancel() {
     let dir = tempfile::tempdir().unwrap();
     let db = pool(dir.path()).await;
-    let config = config(dir.path());
-    let domain = create_domain(&db, "ml").await.unwrap().unwrap();
-    let source = parse_source("2401.12345").unwrap();
-    let job = create_jobs(
-        &db,
-        &config,
-        "x",
-        domain.id,
-        None,
-        TranslateMode::Off,
-        &[source],
-    )
-    .await
-    .unwrap()
-    .unwrap()[0]
-        .clone()
-        .unwrap();
-    assert!(claim_job(&db, job.id).await.unwrap());
-    assert_eq!(start_attempt(&db, job.id, 1).await.unwrap(), Some(1));
-    cancel_job(&db, job.id).await.unwrap().unwrap();
+    let id = queued_job(&db, dir.path()).await;
+    assert!(claim_job(&db, id).await.unwrap());
+    assert_eq!(start_attempt(&db, id, 1).await.unwrap(), Some(1));
+    cancel_job(&db, id).await.unwrap().unwrap();
 
     assert!(
-        !end_attempt(&db, job.id, 1, StepStatus::Failed, Some(20), Some("late"))
+        !end_attempt(&db, id, 1, StepStatus::Failed, Some(20), Some("late"))
             .await
             .unwrap()
     );
-    end_job(&db, job.id, JobStatus::Failed).await.unwrap();
-    assert_eq!(start_attempt(&db, job.id, 2).await.unwrap(), None);
-    let (summary, _) = get_job(&db, job.id).await.unwrap().unwrap();
+    end_job(&db, id, JobStatus::Failed).await.unwrap();
+    assert_eq!(start_attempt(&db, id, 2).await.unwrap(), None);
+    let (summary, _) = get_job(&db, id).await.unwrap().unwrap();
     assert_eq!(summary.status, JobStatus::Canceled);
     assert_eq!(summary.current_step, Some(StepName::ArxivFetch));
     assert_eq!(
-        steps(&db, job.id).await.unwrap()[0].status,
+        steps(&db, id).await.unwrap()[0].status,
         StepStatus::Canceled
     );
 
     // retry resumes the canceled step and keeps its attempt count.
-    let retried = retry_job(&db, job.id).await.unwrap().unwrap();
+    let retried = retry_job(&db, id).await.unwrap().unwrap();
     assert_eq!(
         (retried.status, retried.current_step),
         (JobStatus::Queued, None)
     );
-    assert!(claim_job(&db, job.id).await.unwrap());
-    assert_eq!(start_attempt(&db, job.id, 1).await.unwrap(), Some(2));
+    assert!(claim_job(&db, id).await.unwrap());
+    assert_eq!(start_attempt(&db, id, 1).await.unwrap(), Some(2));
     assert_eq!(
-        retry_job(&db, job.id).await.unwrap().unwrap_err().code,
+        retry_job(&db, id).await.unwrap().unwrap_err().code,
         ErrorCode::Conflict
     );
     assert_eq!(
@@ -209,24 +192,7 @@ async fn executor_writes_never_override_cancel() {
 async fn job_rows_carry_the_current_step_exit_code() {
     let dir = tempfile::tempdir().unwrap();
     let db = pool(dir.path()).await;
-    let config = config(dir.path());
-    let domain = create_domain(&db, "ml").await.unwrap().unwrap();
-    let source = parse_source("2401.12345").unwrap();
-    let id = create_jobs(
-        &db,
-        &config,
-        "x",
-        domain.id,
-        None,
-        TranslateMode::Off,
-        &[source],
-    )
-    .await
-    .unwrap()
-    .unwrap()[0]
-        .clone()
-        .unwrap()
-        .id;
+    let id = queued_job(&db, dir.path()).await;
     let exit_code = || async {
         let sql = format!("{JOB} WHERE jobs.id = ?");
         let row = sqlx::query(sqlx::AssertSqlSafe(sql))

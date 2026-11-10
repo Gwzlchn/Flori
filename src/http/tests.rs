@@ -1,4 +1,4 @@
-use std::{fs, time::Duration};
+use std::{fs, path::PathBuf, time::Duration};
 
 use axum::{body::Body as AxumBody, http::Request as HttpRequest, http::header};
 use http_body_util::BodyExt;
@@ -91,7 +91,7 @@ impl App {
     }
 
     fn job_dir(&self, id: i64) -> PathBuf {
-        job_dir(&self.state.config, id)
+        job_dir(&self.state.config.data_dir, id)
     }
 }
 

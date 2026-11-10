@@ -67,7 +67,7 @@ struct Inner {
     db: SqlitePool,
     config: Arc<Config>,
     /// Absolute paths: children run with their output directory as cwd.
-    jobs_dir: PathBuf,
+    data_dir: PathBuf,
     self_exe: PathBuf,
     steps_dir: PathBuf,
     cli_version: String,
@@ -174,10 +174,7 @@ impl Inner {
                 ),
                 ("FLORI_STEPS_DIR", self.steps_dir.clone().into()),
             ]),
-            StepName::Publish => {
-                let vault = std::path::absolute(c.data_dir.join("vault"))?;
-                env.push(("FLORI_VAULT_DIR", vault.into()));
-            }
+            StepName::Publish => env.push(("FLORI_VAULT_DIR", self.data_dir.join("vault").into())),
             StepName::Note | StepName::Translate => {
                 env.extend(proxy);
                 for flag in [
@@ -239,7 +236,8 @@ pub(crate) async fn launch(
     cli_version: String,
 ) -> Result<ExecHandle, String> {
     let abs = |p: &Path| std::path::absolute(p).map_err(|e| format!("{}: {e}", p.display()));
-    let jobs_dir = abs(&config.data_dir.join("jobs"))?;
+    let data_dir = abs(&config.data_dir)?;
+    let jobs_dir = db::jobs_root(&data_dir);
     fs::create_dir_all(&jobs_dir).map_err(|e| format!("{}: {e}", jobs_dir.display()))?;
     db::recover(&db)
         .await
@@ -247,7 +245,7 @@ pub(crate) async fn launch(
     remove_tmp_dirs(&jobs_dir).map_err(|e| format!("remove .tmp directories: {e}"))?;
     let inner = Arc::new(Inner {
         db,
-        jobs_dir,
+        data_dir,
         self_exe: abs(&config.self_exe)?,
         steps_dir: abs(&config.steps_dir)?,
         config,
@@ -321,7 +319,7 @@ async fn drive(inner: &Inner, id: i64, cancel: &mut watch::Receiver<bool>) -> Fa
     if !db::claim_job(&inner.db, id).await? {
         return Ok(());
     }
-    let job_dir = inner.jobs_dir.join(id.to_string());
+    let job_dir = db::job_dir(&inner.data_dir, id);
     let job = read_job(&job_dir)?;
     for (seq, name, status) in db::job_steps(&inner.db, id).await? {
         match status {

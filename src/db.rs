@@ -3,7 +3,11 @@
 //! Executor writes are conditional on the current state, so a cancel or retry committed by the
 //! HTTP layer is never overwritten.
 
-use std::{fs, io, path::Path, time::Duration};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use sqlx::{
     Row, SqliteExecutor, SqlitePool,
@@ -48,11 +52,21 @@ pub fn now() -> String {
     now.format(&Rfc3339).unwrap_or_default()
 }
 
-fn not_found(what: &str) -> ApiError {
+/// `$DATA/jobs`, holding one directory per job.
+pub fn jobs_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("jobs")
+}
+
+/// `$DATA/jobs/<id>`: job.json, job.log, steps/ and cache/.
+pub fn job_dir(data_dir: &Path, id: i64) -> PathBuf {
+    jobs_root(data_dir).join(id.to_string())
+}
+
+pub(crate) fn not_found(what: &str) -> ApiError {
     ApiError::new(ErrorCode::NotFound, format!("{what} not found"))
 }
 
-fn conflict(message: &str) -> ApiError {
+pub(crate) fn conflict(message: &str) -> ApiError {
     ApiError::new(ErrorCode::Conflict, message)
 }
 
@@ -372,7 +386,7 @@ pub async fn create_jobs(
             public_url: config.public_url.clone(),
             vault_name: config.vault_name.clone(),
         };
-        let dir = config.data_dir.join("jobs").join(id.to_string());
+        let dir = job_dir(&config.data_dir, id);
         dirs.push(dir.clone());
         if let Err(err) = write_job(&dir, &spec) {
             remove_dirs(&dirs);
@@ -399,7 +413,7 @@ fn write_job(dir: &Path, spec: &JobSpec) -> io::Result<()> {
     fs::write(dir.join(JOB_FILE), text)
 }
 
-fn remove_dirs(dirs: &[std::path::PathBuf]) {
+fn remove_dirs(dirs: &[PathBuf]) {
     for dir in dirs {
         let _ = fs::remove_dir_all(dir);
     }
