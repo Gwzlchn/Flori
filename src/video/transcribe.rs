@@ -92,7 +92,7 @@ async fn run_whisper(video: &Path, out_dir: &Path) -> Result<WhisperOutput, Step
 
 /// Lenient SRT reader: index lines and unparseable blocks are skipped, markup is stripped and
 /// cues without text are dropped.
-pub(super) fn parse_srt(text: &str) -> Vec<Segment> {
+pub(crate) fn parse_srt(text: &str) -> Vec<Segment> {
     let mut segments = Vec::new();
     let mut current: Option<Segment> = None;
     for line in text.trim_start_matches('\u{feff}').lines() {

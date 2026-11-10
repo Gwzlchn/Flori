@@ -6,11 +6,10 @@ use tokio::process::Command;
 
 use super::{Segment, Transcript, exit_failure, push_text, run_checked};
 use crate::pipeline::{
-    Manifest, Section, StepFailure, StepName, StepResult, clock, escape_markdown, read_json,
-    step_file, write_json, write_manifest,
+    Manifest, SECTION_MS, Section, StepFailure, StepName, StepResult, clock, escape_markdown,
+    read_json, step_file, write_json, write_manifest,
 };
 
-const SECTION_MS: u64 = 30_000;
 pub(super) const THUMB_SIDE: usize = 32;
 /// Decode once at low resolution. select keeps the first frame, scene cuts and one frame per
 /// 15s without a cut; each selected frame leaves a showinfo line and a 32x32 gray thumbnail.

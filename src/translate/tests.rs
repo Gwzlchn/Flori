@@ -386,7 +386,21 @@ fn arxiv(original: &str) -> Fixture {
 
 /// A video job whose video-transcribe recorded `language` and whose sections are given.
 fn video(sections: &serde_json::Value, language: &str) -> Fixture {
+    video_with_subtitle(sections, language, None)
+}
+
+/// The same, with video-fetch's Chinese manual subtitle when `subtitle_zh` is given.
+fn video_with_subtitle(
+    sections: &serde_json::Value,
+    language: &str,
+    subtitle_zh: Option<&str>,
+) -> Fixture {
     let fx = Fixture::new(Pipeline::Video, AiTool::Claude);
+    let fetched: Vec<_> = subtitle_zh
+        .map(|srt| ("subtitle_zh", "subtitle_zh.srt", srt))
+        .into_iter()
+        .collect();
+    fx.step(1, StepName::VideoFetch, Some("Talk"), &fetched, &[], &[]);
     let meta = [("language", MetaValue::Text(language.into()))];
     fx.step(2, StepName::VideoTranscribe, None, &[], &[], &meta);
     let sections = sections.to_string();
@@ -444,6 +458,7 @@ async fn arxiv_translation_keeps_protected_blocks_byte_for_byte() {
     assert_eq!(manifest.files["translation"], "translation.md");
     assert_eq!(manifest.meta["language"], text("en"));
     assert_eq!(manifest.meta["translated"], MetaValue::Bool(true));
+    assert_eq!(manifest.meta["translation_source"], text("ai"));
     assert!(!manifest.meta.contains_key("skipped_reason"));
     let calls = fx.calls();
     assert_eq!(calls.len(), 1);
@@ -629,7 +644,157 @@ async fn video_transcript_is_bilingual_per_section() {
     assert!(manifest.assets.is_empty());
     // The video path keeps video-transcribe's language code instead of guessing one.
     assert_eq!(manifest.meta["language"], text("fr"));
+    // Without a Chinese subtitle the AI translates.
+    assert_eq!(manifest.meta["translation_source"], text("ai"));
     assert_eq!(fx.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn a_chinese_manual_subtitle_is_the_translation_without_any_ai_call() {
+    // Short on purpose: too few letters for detection, which a subtitle translation ignores.
+    let sections = serde_json::json!([
+        {"start_ms": 0, "frames": ["frame-0.jpg"], "text": "Imagine a *tiny* robot."},
+        {"start_ms": 30000, "frames": [], "text": "It reads #include <vector>."},
+        {"start_ms": 60000, "frames": [], "text": "Nobody *translated* #this <part>."},
+        {"start_ms": 90000, "frames": [], "text": " "},
+    ]);
+    // Cues go to the 30s window of their start: 00:01 and 00:12 to the first section, 00:30 to
+    // the second, none to the third.
+    let srt = "1\n00:00:01,000 --> 00:00:05,000\n想象一个\n\n\
+               2\n00:00:12,000 --> 00:00:16,000\n*很小*的机器人。\n\n\
+               3\n00:00:30,000 --> 00:00:34,000\n它读到 #include <vector>。\n";
+    let fx = video_with_subtitle(&sections, "en", Some(srt));
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    // A section without a cue keeps only its original, escaped like everything else.
+    let want = "## 00:00\n\n![](assets/frame-0.jpg)\n\n想象一个\\*很小\\*的机器人。\n\n\
+                > [!quote]- 原文\n> Imagine a \\*tiny\\* robot.\n\n\
+                ## 00:30\n\n它读到 \\#include \\<vector\\>。\n\n\
+                > [!quote]- 原文\n> It reads \\#include \\<vector\\>.\n\n\
+                ## 01:00\n\nNobody \\*translated\\* \\#this \\<part\\>.\n\n\
+                ## 01:30\n";
+    assert_eq!(fs::read_to_string(out.join("transcript.md")).unwrap(), want);
+    let manifest = pipeline::read_manifest(&out).unwrap();
+    assert_eq!(manifest.files["transcript"], "transcript.md");
+    assert_eq!(manifest.meta["translated"], MetaValue::Bool(true));
+    assert_eq!(manifest.meta["translation_source"], text("subtitle"));
+    assert_eq!(manifest.meta["language"], text("en"));
+    assert!(!manifest.meta.contains_key("skipped_reason"));
+    assert!(fx.calls().is_empty());
+}
+
+/// Time and Chinese of each section in transcript.md, in order; None for an original-only one.
+fn chinese_by_section(out: &Path) -> Vec<(String, Option<String>)> {
+    let transcript = fs::read_to_string(out.join("transcript.md")).unwrap();
+    transcript
+        .split("## ")
+        .skip(1)
+        .map(|part| {
+            let (time, body) = part.split_once("\n\n").unwrap_or((part.trim(), ""));
+            let paragraphs: Vec<&str> = body
+                .split("\n\n")
+                .filter(|p| !p.trim().is_empty() && !p.starts_with("![]"))
+                .collect();
+            let bilingual = paragraphs.iter().any(|p| p.starts_with("> [!quote]"));
+            let chinese = bilingual.then(|| paragraphs[0].to_owned());
+            (time.trim().to_owned(), chinese)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cues_outside_a_section_with_text_are_dropped() {
+    // 00:05 is before the first section, 01:05 lands on a keyframe-only section, 03:05 is after
+    // the last one: none has an original to pair with, and none may shift into a neighbour.
+    let sections = serde_json::json!([
+        {"start_ms": 30000, "frames": [], "text": "Welcome back."},
+        {"start_ms": 60000, "frames": ["frame-60000.jpg"], "text": ""},
+        {"start_ms": 120000, "frames": [], "text": "The demo is over."},
+        {"start_ms": 150000, "frames": [], "text": "Thanks for watching."},
+    ]);
+    let srt = "1\n00:00:05,000 --> 00:00:08,000\n片头\n\n\
+               2\n00:00:35,000 --> 00:00:38,000\n欢迎回来。\n\n\
+               3\n00:01:05,000 --> 00:01:08,000\n画面说明\n\n\
+               4\n00:01:35,000 --> 00:01:38,000\n演示进行中\n\n\
+               5\n00:02:05,000 --> 00:02:08,000\n演示结束了。\n\n\
+               6\n00:03:05,000 --> 00:03:08,000\n片尾\n";
+    let fx = video_with_subtitle(&sections, "en", Some(srt));
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let section = |time: &str, chinese: Option<&str>| (time.to_owned(), chinese.map(str::to_owned));
+    assert_eq!(
+        chinese_by_section(&out),
+        [
+            section("00:30", Some("欢迎回来。")),
+            section("01:00", None),
+            section("02:00", Some("演示结束了。")),
+            section("02:30", None),
+        ]
+    );
+    assert!(fx.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_chinese_subtitle_does_not_override_the_chinese_skip() {
+    // A Chinese transcript next to a Chinese subtitle (a misreported language) stays skipped.
+    let lines: Vec<serde_json::Value> = fixture_text("lang-spoken-mixed.md")
+        .lines()
+        .enumerate()
+        .map(|(i, line)| serde_json::json!({"start_ms": i * 30_000, "frames": [], "text": line}))
+        .collect();
+    let srt = "1\n00:00:01,000 --> 00:00:05,000\n好的\n";
+    let fx = video_with_subtitle(&serde_json::Value::Array(lines), "zh", Some(srt));
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let manifest = pipeline::read_manifest(&out).unwrap();
+    assert_eq!(manifest.meta["skipped_reason"], text("chinese"));
+    assert_eq!(manifest.meta["translated"], MetaValue::Bool(false));
+    assert!(!manifest.meta.contains_key("translation_source"));
+    assert!(manifest.files.is_empty());
+    assert!(!out.join("transcript.md").exists());
+}
+
+#[tokio::test]
+async fn a_chinese_subtitle_translates_even_past_the_chunk_limit() {
+    // Each section is about 12k characters, one chunk each: the AI path would skip as too_long.
+    let long = "The router assigns each token to two experts and adds their outputs. ".repeat(175);
+    let sections: Vec<serde_json::Value> = (0..MAX_CHUNKS as u64 + 1)
+        .map(|i| serde_json::json!({"start_ms": i * 30_000, "frames": [], "text": long}))
+        .collect();
+    let srt: String = (0..MAX_CHUNKS as u64 + 1)
+        .map(|i| {
+            format!(
+                "{}\n{} --> {}\n第 {i} 节\n\n",
+                i + 1,
+                srt_time(i * 30_000),
+                srt_time(i * 30_000 + 1000)
+            )
+        })
+        .collect();
+    let fx = video_with_subtitle(&serde_json::Value::Array(sections), "en", Some(&srt));
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let manifest = pipeline::read_manifest(&out).unwrap();
+    assert_eq!(manifest.meta["translation_source"], text("subtitle"));
+    assert_eq!(manifest.meta["translated"], MetaValue::Bool(true));
+    assert!(!manifest.meta.contains_key("chunks"));
+    assert!(!manifest.meta.contains_key("skipped_reason"));
+    assert!(fx.calls().is_empty());
+    let segments: Vec<Segment> = (0..=MAX_CHUNKS)
+        .map(|_| protect(&long, Pipeline::Video))
+        .collect();
+    assert_eq!(chunk(&segments, CHUNK_CHARS).len(), MAX_CHUNKS + 1);
+}
+
+fn srt_time(ms: u64) -> String {
+    let s = ms / 1000;
+    format!(
+        "{:02}:{:02}:{:02},{:03}",
+        s / 3600,
+        s / 60 % 60,
+        s % 60,
+        ms % 1000
+    )
 }
 
 #[tokio::test]

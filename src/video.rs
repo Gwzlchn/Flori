@@ -17,6 +17,7 @@ use tokio::process::Command;
 
 pub use fetch::fetch;
 pub use frames::frames;
+pub(crate) use transcribe::parse_srt;
 pub use transcribe::transcribe;
 
 use crate::pipeline::{StepFailure, StepResult};
@@ -31,15 +32,15 @@ struct Transcript {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Segment {
-    start_ms: u64,
+pub(crate) struct Segment {
+    pub(crate) start_ms: u64,
     end_ms: u64,
-    text: String,
+    pub(crate) text: String,
 }
 
 /// Appends with a space only between two non-CJK characters, so Chinese text is not split by
 /// spaces and English words are not glued together.
-fn push_text(out: &mut String, piece: &str) {
+pub(crate) fn push_text(out: &mut String, piece: &str) {
     let piece = piece.split_whitespace().collect::<Vec<_>>().join(" ");
     if let (Some(prev), Some(next)) = (out.chars().last(), piece.chars().next())
         && !is_wide(prev)

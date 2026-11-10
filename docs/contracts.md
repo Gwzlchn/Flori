@@ -21,7 +21,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - FLORI_ATTEMPT 与日志头里的 attempt 是该步骤的累计尝试次数,手动 retry 后继续累加。超时按可重试处理,steps.exit_code 记 null。
 - 取消时执行器给步骤进程组发 SIGTERM。AI 步骤收到 SIGTERM 后立即 SIGKILL 自己的 CLI 进程组并退出 10;job 与步骤状态以 HTTP 层写入的 canceled 为准。
 - 按步骤名找前序产物:`steps/*-<name>/manifest.json`(`pipeline::find_step`)。
-- translate=off 时不排入 translate。auto 时总是排入;判为中文或 unknown 时照常建目录,manifest 只带 `meta.skipped_reason`。
+- translate=off 时不排入 translate。auto 时总是排入;跳过时(见下文 translate 规则)照常建目录,manifest 不带 files,只在 meta 里写 skipped_reason。
 - 正文图片一律放 `assets/<basename>`,Markdown 里写 `![](assets/<basename>)`。publish 按步骤顺序合并 manifest.files,同名时后面的步骤覆盖前面的,只允许 translate 覆盖 transcript;assets 重名按 20 处理;translate 不输出 assets,只引用 video-frames 的 assets。
 - B站多 P 只取 P1。
 
@@ -67,7 +67,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | 资源 | 输出 | 超时 | 尝试 |
 |---|---|---|---|---|
-| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt;meta: title, uploader, duration_ms, published,有字幕时另有 subtitle_language | 30m | 3 |
+| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(原声人工字幕)与 subtitle_zh.srt(中文人工字幕,作译文);meta: title, uploader, duration_ms, published,有 subtitle.srt 时另有 subtitle_language | 30m | 3 |
 | video-transcribe | whisper | transcript.json;字幕优先;meta: origin, language, language_probability | 2h | 2 |
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节)、由它渲染的 transcript.md | 1h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv);官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
@@ -84,7 +84,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | files | assets |
 |---|---|---|
-| video-fetch | video、subtitle(有字幕时) | 无 |
+| video-fetch | video、subtitle(有原声人工字幕时)、subtitle_zh(原声确定不是中文且有中文人工字幕时) | 无 |
 | video-transcribe | transcript_json | 无 |
 | video-frames | transcript、sections | frame-<ms>.jpg |
 | arxiv-fetch | page | 无;资源原件只作为普通文件留在步骤目录 |
@@ -97,15 +97,23 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 标题取步骤顺序中第一个非 null 的 manifest.title。
 - transcript.json:`{"language": str|null, "segments": [{"start_ms": int, "end_ms": int, "text": str}]}`。
 - sections.json 的 text 是未转义的原文;写进 Markdown 的一方(video-frames 的 transcript.md、translate 的双语版)统一用 `pipeline::escape_markdown` 转义。Section 类型、取前序文件(`pipeline::step_file`)与节时间格式(`pipeline::clock`)只在 src/pipeline.rs 定义一次。
-- translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。是否跳过只看判定值。跳过时另有 skipped_reason(chinese、unknown、too_long),too_long 时另有 chunks(int)。
+- translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long),too_long 时另有 chunks(int)。译出时另有 translation_source:ai(调用 AI)或 subtitle(视频用 video-fetch 的 subtitle_zh)。
 
+- video-fetch 的字幕:只取人工字幕,尽力而为,失败只记日志,由 whisper 转写。
+  - 原声语言取 yt-dlp 的 language 的主子标签(`en-US` 记 en);不是纯小写字母标签时按未知处理。yt-dlp 的 B站提取器不给 language,B站总按未知处理,即中文优先。
+  - subtitle.srt:原声已知时只取原声语言的轨,原声为中文时没有中文轨再用英文;原声未知时中文优先,其次英文。同一语言内简体先于繁体,不带地区的标签先于带地区的。
+  - subtitle_zh.srt:只在原声确定不是中文时写,取最好的中文轨。原声未知时中文轨可能就是原话,不当译文。
+  - `--sub-langs`:原声是 zh、en 以外的已知语言时为 `<原声>.*,zh.*`(英文轨用不上,而任一语言下载失败会中止整次字幕下载);其余情况为 `zh.*,en.*`。
 - arxiv-fetch:官方 HTML 偶尔返回 200 但内容被截断,必须检查完整闭合;ar5iv 对没有 HTML 的论文返回 200 落地页,必须识别;两者都不可用时退出 20,不回退 PDF。
 - translate:
   - 判定:去掉公式、代码、URL、时间戳后,汉字/(汉字+字母) ≥ 0.3 且几乎没有假名和谚文 → 中文,跳过;可比较的字母不足 200 个 → unknown,跳过。判定函数只在 Rust 里实现一次。
+  - 跳过:判为中文时总是跳过;判为 unknown 或超过 25 块时跳过,但视频有 video-fetch 的 subtitle_zh 时不跳过,因为不调用 AI。
   - arXiv:按空行切块,每块约 12k 字符;`$$…$$`、代码、表格、图片行、References 原样保留(文末的脚注定义 `[^n]:` 不算 References,照常翻译);行内公式、代码、URL、引用号与脚注标记 `[^n]` 换成占位符,译完还原;原文里字面的 `⟦` 也作为占位符保护;脚注定义行首的 `[^label]: ` 不送翻译,原样保留;代码围栏按 CommonMark 识别(开围栏的缩进从列表项内容列算起,不设绝对上限;关闭行最多比开围栏深 3 格,同字符、长度不短于开围栏、只含围栏字符);不校验数字。
-  - 视频:按 sections.json 的节翻译,转写不做占位符(只保护字面 `⟦`),每节写成"关键帧 + 中文 + 折叠的原文"(`> [!quote]- 原文`),译文与原文每行用 `pipeline::escape_markdown` 转义。
+  - 视频:按 sections.json 的节翻译,每节写成"关键帧 + 中文 + 折叠的原文"(`> [!quote]- 原文`);没有中文的节只写原文,不折叠。译文与原文每行用 `pipeline::escape_markdown` 转义。
+    - 有 subtitle_zh 时不调用 AI:每条中文 cue 按起点归入 `start_ms / SECTION_MS * SECTION_MS` 那个 30s 窗口的节(`pipeline::SECTION_MS`,与 video-frames 分节相同)。窗口没有节、或该节没有原文时丢弃这条 cue,第一节之前的 cue 同样丢弃;没有 cue 的节只写原文。
+    - 没有 subtitle_zh 时由 AI 逐块翻译,转写不做占位符(只保护字面 `⟦`)。
   - 串行;每块结果按 sha256(prompt‖model‖payload) 缓存,手动重试只补未缓存的块;校验失败时带反馈再问 1 次,仍失败退出 10。
-  - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。
+  - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。有 subtitle_zh 的视频不受此限。
 - note 与 translate 失败时 publish 不执行,可手动 retry。
 
 ### AI CLI 固定调用

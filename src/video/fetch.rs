@@ -25,6 +25,7 @@ use crate::pipeline::{
 
 pub(super) const VIDEO_FILE: &str = "video.mp4";
 pub(super) const SUBTITLE_FILE: &str = "subtitle.srt";
+pub(super) const SUBTITLE_ZH_FILE: &str = "subtitle_zh.srt";
 
 /// Fields printed by `--print-to-file`. We never write `--write-info-json`: its format entries
 /// carry the request cookies, which would put SESSDATA into the job directory.
@@ -36,6 +37,8 @@ struct FetchedMeta {
     uploader: Option<String>,
     duration: Option<f64>,
     upload_date: Option<String>,
+    /// The spoken language, e.g. `en` or `en-US`. yt-dlp's Bilibili extractor never sets it.
+    language: Option<String>,
 }
 
 /// Throttling that yt-dlp words like a permanent error, e.g. YouTube's "Video unavailable. This
@@ -159,7 +162,7 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
         .args(["-f", "bv*+ba/b", "-S", "vcodec:h264,res:720,acodec:m4a"])
         .args(["--merge-output-format", "mp4", "--remux-video", "mp4"])
         .arg("--print-to-file")
-        .arg("after_move:%(.{title,playlist_title,uploader,duration,upload_date})j")
+        .arg("after_move:%(.{title,playlist_title,uploader,duration,upload_date,language})j")
         .arg(&meta_file)
         .arg("--")
         .arg(&url);
@@ -174,6 +177,16 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     }
     let fetched: FetchedMeta = read_json(&meta_file)?;
     fs::remove_file(&meta_file)?;
+    // The language becomes a --sub-langs regex, so anything but a plain tag counts as unknown.
+    // yt-dlp's Bilibili extractor never sets it; the unknown order takes Chinese first.
+    let plain_tag = |o: &String| o.len() >= 2 && o.bytes().all(|b| b.is_ascii_lowercase());
+    let original = fetched.language.as_deref().map(primary).filter(plain_tag);
+    // Only tracks keep_subtitles can use: a third original language never needs English, and
+    // one failed language request aborts the whole subtitle run.
+    let langs = match original.as_deref() {
+        Some(o) if o != "zh" && o != "en" => format!("{o}.*,zh.*"),
+        _ => "zh.*,en.*".to_owned(),
+    };
 
     // Subtitles are best effort in a second run: a failed subtitle request (429 from YouTube's
     // timedtext, Bilibili's subtitle JSON) must not cost the video; whisper covers it.
@@ -181,7 +194,7 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     let mut subtitles = ytdlp();
     subtitles
         .args(["--skip-download", "--write-subs"])
-        .args(["--sub-langs", "zh.*,en.*", "--convert-subs", "srt", "-o"])
+        .args(["--sub-langs", &langs, "--convert-subs", "srt", "-o"])
         .arg(format!("subtitle:{}/subtitle.%(ext)s", out_dir.display()))
         .arg("--")
         .arg(&url);
@@ -191,10 +204,13 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     }
     drop(cookies);
 
-    let subtitle_language = keep_best_subtitle(out_dir)?;
+    let (subtitle_language, chinese) = keep_subtitles(out_dir, original.as_deref())?;
     let mut files = BTreeMap::from([("video".into(), VIDEO_FILE.into())]);
     if subtitle_language.is_some() {
         files.insert("subtitle".into(), SUBTITLE_FILE.into());
+    }
+    if chinese {
+        files.insert("subtitle_zh".into(), SUBTITLE_ZH_FILE.into());
     }
     let title = fetched.playlist_title.or(fetched.title);
     let text = |key: &str, value: Option<String>| Some((key.to_owned(), MetaValue::Text(value?)));
@@ -361,47 +377,82 @@ pub(super) fn published_date(value: &str) -> Option<String> {
         .then(|| format!("{}-{}-{}", &value[..4], &value[4..6], &value[6..]))
 }
 
-/// Keeps the best usable `subtitle.<lang>.srt` as `subtitle.srt` and returns its primary
-/// language subtag. Everything else except video.mp4, such as the other languages or an
-/// unconverted `.vtt` left by a failed subtitle run, is deleted.
-pub(super) fn keep_best_subtitle(out_dir: &Path) -> io::Result<Option<String>> {
-    let mut found = Vec::new();
+/// A usable downloaded `subtitle.<lang>.srt`.
+struct Track {
+    rank: (u8, u8),
+    /// Lowercased primary subtag, e.g. `zh` for `zh-Hans`.
+    primary: String,
+    path: PathBuf,
+}
+
+/// Keeps the best usable track as `subtitle.srt` (see [`subtitle_rank`]) and, when the original
+/// is known and not Chinese, the best Chinese track as `subtitle_zh.srt`: a human translation
+/// translate uses instead of the AI. With the original unknown a Chinese track may be the
+/// original itself, so it is never taken for a translation. Everything else except video.mp4,
+/// such as other languages or an unconverted `.vtt` left by a failed subtitle run, is deleted.
+/// Returns the primary subtag of `subtitle.srt` and whether `subtitle_zh.srt` was written.
+pub(super) fn keep_subtitles(
+    out_dir: &Path,
+    original: Option<&str>,
+) -> io::Result<(Option<String>, bool)> {
+    let mut tracks = Vec::new();
     for entry in fs::read_dir(out_dir)? {
         let path = entry?.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if name == VIDEO_FILE {
-            continue;
-        }
-        match name
+        let lang = name
             .strip_prefix("subtitle.")
-            .and_then(|rest| rest.strip_suffix(".srt"))
-        {
-            Some(lang) => found.push((subtitle_rank(lang), lang.to_owned(), path.clone())),
-            None => fs::remove_file(&path)?,
+            .and_then(|l| l.strip_suffix(".srt"));
+        match lang {
+            Some(lang) if !parse_srt(&fs::read_to_string(&path)?).is_empty() => {
+                tracks.push(Track {
+                    rank: subtitle_rank(lang, original),
+                    primary: primary(lang),
+                    path: path.clone(),
+                });
+            }
+            _ if name == VIDEO_FILE => {}
+            _ => fs::remove_file(&path)?,
         }
     }
-    found.sort();
-    let mut chosen = None;
-    for (rank, lang, path) in found {
-        if chosen.is_none() && rank.is_some() && !parse_srt(&fs::read_to_string(&path)?).is_empty()
-        {
-            fs::rename(&path, out_dir.join(SUBTITLE_FILE))?;
-            let primary = lang.split('-').next().unwrap_or(&lang);
-            chosen = Some(primary.to_ascii_lowercase());
-        } else {
-            fs::remove_file(&path)?;
+    tracks.sort_by(|a, b| (a.rank, &a.path).cmp(&(b.rank, &b.path)));
+    let main = tracks.first().filter(|t| t.rank.0 < u8::MAX);
+    let translated = original.is_some_and(|o| o != "zh");
+    let chinese = tracks
+        .iter()
+        .find(|t| t.primary == "zh")
+        .filter(|_| translated);
+    for (file, track) in [(SUBTITLE_FILE, main), (SUBTITLE_ZH_FILE, chinese)] {
+        if let Some(track) = track {
+            fs::rename(&track.path, out_dir.join(file))?;
         }
     }
-    Ok(chosen)
+    for track in tracks.iter().filter(|t| t.path.exists()) {
+        fs::remove_file(&track.path)?;
+    }
+    Ok((main.map(|t| t.primary.clone()), chinese.is_some()))
 }
 
-/// Chinese first, simplified before traditional, then English.
-pub(super) fn subtitle_rank(lang: &str) -> Option<u8> {
+/// Lowercased primary subtag: `en-US` is `en`, `zh-Hans` is `zh`.
+fn primary(lang: &str) -> String {
+    lang.split('-').next().unwrap_or(lang).to_ascii_lowercase()
+}
+
+/// Sort key of a track for `subtitle.srt`; `u8::MAX` is never chosen. A known original takes
+/// only its own language, except that a Chinese original falls back to English. An unknown
+/// original takes Chinese, then English: YouTube leaves the language unset mostly on videos
+/// without speech recognition, which are often Chinese. Within a language, simplified Chinese
+/// before traditional, a bare tag before regional ones.
+pub(super) fn subtitle_rank(lang: &str, original: Option<&str>) -> (u8, u8) {
     let lang = lang.to_ascii_lowercase();
-    match lang.as_str() {
-        "zh" | "zh-hans" | "zh-cn" | "zh-sg" => Some(0),
-        l if l.starts_with("zh-") => Some(1),
-        l if l == "en" || l.starts_with("en-") => Some(2),
-        _ => None,
-    }
+    let main = match (original, primary(&lang).as_str()) {
+        (Some(o), p) if p == o => 0,
+        (None, "zh") => 1,
+        (Some("zh") | None, "en") => 2,
+        _ => u8::MAX,
+    };
+    let variant = match lang.as_str() {
+        "zh-hans" | "zh-cn" | "zh-sg" => 0,
+        l => u8::from(l.contains('-')),
+    };
+    (main, variant)
 }

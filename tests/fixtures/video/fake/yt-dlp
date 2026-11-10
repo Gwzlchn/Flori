@@ -4,11 +4,11 @@
 args="$*"
 # ignore-term: SIGTERM is ignored from before the log line on, so only the step can stop it.
 case $args in *ignore-term*) trap '' TERM ;; esac
-out= subs= meta= skip= url=
+out= subs= template= meta= skip= url=
 while [ $# -gt 0 ]; do
     case $1 in
         -o) case $2 in subtitle:*) subs=${2#subtitle:} ;; *) out=$2 ;; esac; shift ;;
-        --print-to-file) meta=$3; shift 2 ;;
+        --print-to-file) template=$2 meta=$3; shift 2 ;;
         --skip-download) skip=1 ;;
         --) url=$2; shift ;;
     esac
@@ -18,9 +18,14 @@ done
 dir=$(dirname "$out")
 printf '%s\n' "$args" >> "$dir/../fake-yt-dlp.log"
 
+cue() { printf '1\n00:00:00,000 --> 00:00:01,000\n%s\n' "$2" > "$dir/subtitle.$1.srt"; }
 if [ -n "$skip" ]; then
     case $url in
-        *subs-ok*) printf '1\n00:00:00,000 --> 00:00:01,000\nhello\n' > "$dir/subtitle.en.srt" ;;
+        *subs-ok*) cue en hello ;;
+        # Manual tracks in several languages; lang-xx in the id sets the reported original.
+        *subs-both*) cue en hello; cue zh-Hant 哈囉; cue zh-Hans 你好 ;;
+        *subs-zh*) cue zh-Hans 你好 ;;
+        *subs-fr*) cue fr bonjour; cue en hello; cue zh-Hans 你好 ;;
         *subs-stall*) exec sleep 30 ;;
         *subs-killed*) kill -TERM $$ ;;
         *subs-404*)
@@ -44,5 +49,11 @@ esac
 printf 'fake video' > "$dir/video.mp4"
 case $url in
     *multi*) printf '{"title": "Course p01 lec01.mp4", "playlist_title": "Course", "uploader": "U", "duration": 12.5, "upload_date": "20240102"}' > "$meta" ;;
-    *) printf '{"title": "Title", "uploader": "U", "duration": 12.5, "upload_date": "20240102"}' > "$meta" ;;
+    *)
+        # lang-xx in the id is the reported original language, printed only when asked for.
+        language=
+        case $url in *lang-en*) language=en ;; *lang-fr*) language=fr-FR ;; esac
+        case $template in *language*) ;; *) language= ;; esac
+        printf '{"title": "Title", "uploader": "U", "duration": 12.5, "upload_date": "20240102"%s}' \
+            "${language:+, \"language\": \"$language\"}" > "$meta" ;;
 esac

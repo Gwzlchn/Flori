@@ -79,7 +79,7 @@ pub async fn run(job_dir: &Path, out_dir: &Path) -> StepResult {
 
 pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepResult {
     let job = pipeline::read_job(job_dir)?;
-    let (mut blocks, mut sections) = (Vec::new(), Vec::new());
+    let (mut blocks, mut sections, mut subtitle_zh) = (Vec::new(), Vec::new(), None);
     let segments: Vec<Segment> = match job.pipeline {
         Pipeline::Arxiv => {
             let original = pipeline::step_file(job_dir, StepName::ArxivConvert, "original")?;
@@ -89,6 +89,7 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
         }
         Pipeline::Video => {
             sections = pipeline::read_sections(job_dir)?;
+            subtitle_zh = chinese_subtitle(job_dir, &sections)?;
             let texts = sections.iter().filter(|s| s.has_text()).map(|s| &s.text);
             texts.map(|t| protect(t, Pipeline::Video)).collect()
         }
@@ -106,6 +107,8 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
     let chunks = chunk(&segments, CHUNK_CHARS);
     let skipped = match detected {
         "zh" => Some("chinese"),
+        // A subtitle translation costs no AI call, so neither length nor letter count matters.
+        _ if subtitle_zh.is_some() => None,
         "unknown" => Some("unknown"),
         _ if chunks.len() > MAX_CHUNKS => {
             meta.insert("chunks".into(), MetaValue::Int(chunks.len() as i64));
@@ -117,7 +120,10 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
     if let Some(reason) = skipped {
         meta.insert("skipped_reason".into(), MetaValue::Text(reason.into()));
     } else {
-        let translated = translate_all(env, &job, &segments, &chunks).await?;
+        let (translated, source) = match subtitle_zh {
+            Some(texts) => (texts, "subtitle"),
+            None => (translate_all(env, &job, &segments, &chunks).await?, "ai"),
+        };
         let (name, body) = match job.pipeline {
             Pipeline::Arxiv => ("translation", render_arxiv(&blocks, translated)),
             Pipeline::Video => ("transcript", render_video(&sections, translated)),
@@ -126,6 +132,7 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
         fs::write(out_dir.join(&file), body)?;
         manifest.files.insert(name.into(), file);
         meta.insert("translated".into(), MetaValue::Bool(true));
+        meta.insert("translation_source".into(), MetaValue::Text(source.into()));
     }
     manifest.meta = meta;
     pipeline::write_manifest(out_dir, &manifest)?;
@@ -139,6 +146,29 @@ fn transcribed_language(job_dir: &Path) -> Result<Option<String>, StepFailure> {
         Some(MetaValue::Text(code)) if !code.is_empty() && code != "unknown" => Some(code.clone()),
         _ => None,
     })
+}
+
+/// video-fetch's Chinese manual subtitle as the translation of each section with text, empty
+/// where no cue falls. A cue belongs to the 30s window of its start, as transcript text does in
+/// video-frames. A cue whose window has no section, or whose section has no text, is dropped:
+/// there is no original to pair it with, also before the first section.
+fn chinese_subtitle(
+    job_dir: &Path,
+    sections: &[Section],
+) -> Result<Option<Vec<String>>, StepFailure> {
+    let (dir, fetched) = pipeline::prior_step(job_dir, StepName::VideoFetch)?;
+    let Some(file) = fetched.files.get("subtitle_zh") else {
+        return Ok(None);
+    };
+    let mut texts = vec![String::new(); sections.len()];
+    for cue in crate::video::parse_srt(&fs::read_to_string(dir.join(file))?) {
+        let window = cue.start_ms / pipeline::SECTION_MS * pipeline::SECTION_MS;
+        if let Ok(i) = sections.binary_search_by_key(&window, |s| s.start_ms) {
+            crate::video::push_text(&mut texts[i], &cue.text);
+        }
+    }
+    let with_text = sections.iter().zip(texts).filter(|(s, _)| s.has_text());
+    Ok(Some(with_text.map(|(_, text)| text).collect()))
 }
 
 /// Restored translations of every segment, chunk by chunk.
@@ -565,9 +595,15 @@ fn render_video(sections: &[Section], translated: Vec<String>) -> String {
         }
         if section.has_text() {
             let chinese = translated.next().unwrap_or_default();
+            let original = pipeline::escape_markdown(section.text.trim());
+            if chinese.trim().is_empty() {
+                // A section the Chinese subtitle leaves out keeps only its original.
+                out.push_str(&format!("{original}\n\n"));
+                continue;
+            }
             out.push_str(&pipeline::escape_markdown(chinese.trim()));
             out.push_str("\n\n> [!quote]- 原文\n");
-            for line in pipeline::escape_markdown(section.text.trim()).lines() {
+            for line in original.lines() {
                 out.push_str(&format!("> {line}\n"));
             }
             out.push('\n');

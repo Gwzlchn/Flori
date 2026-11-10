@@ -385,6 +385,10 @@ pub fn step_file(job_dir: &Path, step: StepName, name: &str) -> Result<PathBuf, 
     Ok(dir.join(rel))
 }
 
+/// Width of a section: video-frames groups text and keyframes into these windows, and translate
+/// places Chinese subtitle cues by the same windows.
+pub const SECTION_MS: u64 = 30_000;
+
 /// One entry of video-frames' sections.json. `text` is the raw transcript; whoever writes it
 /// into Markdown escapes it with [`escape_markdown`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

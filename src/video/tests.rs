@@ -105,38 +105,112 @@ fn text_join_spaces_only_between_latin_words() {
 }
 
 #[test]
-fn subtitle_rank_prefers_simplified_chinese_then_english() {
-    let mut langs = ["en", "zh-Hant", "de", "zh-Hans", "en-US", "ai-zh", "zh-TW"];
-    langs.sort_by_key(|lang| (subtitle_rank(lang).unwrap_or(u8::MAX), *lang));
-    assert_eq!(
-        langs,
-        ["zh-Hans", "zh-Hant", "zh-TW", "en", "en-US", "ai-zh", "de"]
-    );
-    assert_eq!(subtitle_rank("ai-zh"), None);
+fn subtitle_rank_puts_the_original_first() {
+    let sorted = |original: Option<&str>| {
+        let mut langs = [
+            "en", "zh-Hant", "de", "zh-Hans", "en-US", "ai-zh", "zh-TW", "zh",
+        ];
+        langs.sort_by_key(|lang| (subtitle_rank(lang, original), *lang));
+        langs
+    };
+    // An unknown or a Chinese original: Chinese, then English.
+    let chinese_first = [
+        "zh", "zh-Hans", "zh-Hant", "zh-TW", "en", "en-US", "de", "ai-zh",
+    ];
+    assert_eq!(sorted(None), chinese_first);
+    assert_eq!(sorted(Some("zh")), chinese_first);
+    assert_eq!(subtitle_rank("de", Some("de")).0, 0);
+    // Any other known original takes only its own language: neither Chinese nor English.
+    assert_eq!(subtitle_rank("zh-Hans", Some("en")).0, u8::MAX);
+    assert_eq!(subtitle_rank("en", Some("de")).0, u8::MAX);
+    assert_eq!(subtitle_rank("ai-zh", None).0, u8::MAX);
 }
 
-#[test]
-fn best_usable_subtitle_is_kept_and_the_rest_deleted() {
+/// Writes one-cue `subtitle.<lang>.srt` files (an empty text makes an unusable track) and runs
+/// keep_subtitles; returns what it reported and the files left behind.
+fn keep(original: Option<&str>, tracks: &[(&str, &str)]) -> ((Option<String>, bool), Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
-    let cue = "1\n00:00:00,000 --> 00:00:01,000\nhello\n";
-    fs::write(dir.path().join("subtitle.zh-Hans.srt"), "1\n\n").unwrap();
-    fs::write(dir.path().join("subtitle.en.srt"), cue).unwrap();
-    fs::write(dir.path().join("subtitle.de.srt"), cue).unwrap();
+    for (lang, text) in tracks {
+        let srt = format!("1\n00:00:00,000 --> 00:00:01,000\n{text}\n");
+        fs::write(dir.path().join(format!("subtitle.{lang}.srt")), srt).unwrap();
+    }
     fs::write(dir.path().join("video.mp4"), "x").unwrap();
     // Left by a subtitle run that failed before converting.
     fs::write(dir.path().join("video.en.vtt"), "partial").unwrap();
-    assert_eq!(
-        keep_best_subtitle(dir.path()).unwrap().as_deref(),
-        Some("en")
-    );
-    assert_eq!(names(dir.path()), ["subtitle.srt", "video.mp4"]);
-    assert_eq!(
-        fs::read_to_string(dir.path().join("subtitle.srt")).unwrap(),
-        cue
-    );
+    let kept = keep_subtitles(dir.path(), original).unwrap();
+    let mut left = names(dir.path());
+    for file in ["subtitle.srt", "subtitle_zh.srt"] {
+        if let Ok(text) = fs::read_to_string(dir.path().join(file)) {
+            let cue = text.lines().nth(2).unwrap().to_owned();
+            left.iter_mut()
+                .filter(|n| *n == file)
+                .for_each(|n| *n = format!("{file}={cue}"));
+        }
+    }
+    (kept, left)
+}
 
-    let empty = tempfile::tempdir().unwrap();
-    assert_eq!(keep_best_subtitle(empty.path()).unwrap(), None);
+#[test]
+fn subtitles_follow_the_original_language() {
+    let both = [
+        ("zh-Hans", "你好"),
+        ("zh-Hant", "哈囉"),
+        ("en", "hello"),
+        ("de", "hallo"),
+    ];
+    let en_and_zh = (
+        (Some("en".to_owned()), true),
+        vec![
+            "subtitle.srt=hello".to_owned(),
+            "subtitle_zh.srt=你好".to_owned(),
+            "video.mp4".to_owned(),
+        ],
+    );
+    // An English original: Chinese is the translation, not the transcript.
+    assert_eq!(keep(Some("en"), &both), en_and_zh);
+    // A Chinese or an unknown original takes the Chinese track and has no translation.
+    let zh_only = (
+        (Some("zh".to_owned()), false),
+        vec!["subtitle.srt=你好".to_owned(), "video.mp4".to_owned()],
+    );
+    assert_eq!(keep(Some("zh"), &both), zh_only);
+    assert_eq!(keep(None, &both), zh_only);
+    // An unknown original with only English takes it.
+    let en_only = (
+        (Some("en".to_owned()), false),
+        vec!["subtitle.srt=hello".to_owned(), "video.mp4".to_owned()],
+    );
+    assert_eq!(keep(None, &[("en", "hello")]), en_only);
+    // Only a Chinese track of an English video: whisper transcribes, the track translates.
+    let translation_only = (
+        (None, true),
+        vec!["subtitle_zh.srt=你好".to_owned(), "video.mp4".to_owned()],
+    );
+    assert_eq!(keep(Some("en"), &[("zh-Hans", "你好")]), translation_only);
+    // Unknown original with only Chinese: it is the transcript.
+    assert_eq!(keep(None, &[("zh-Hans", "你好")]), zh_only);
+    // A German original without a German track: English is not a fallback, whisper transcribes.
+    let de = [("en", "hello"), ("zh-Hans", "你好")];
+    assert_eq!(keep(Some("de"), &de), translation_only);
+    // A German original takes its own track; an unusable track never wins.
+    let german = (
+        (Some("de".to_owned()), true),
+        vec![
+            "subtitle.srt=hallo".to_owned(),
+            "subtitle_zh.srt=你好".to_owned(),
+            "video.mp4".to_owned(),
+        ],
+    );
+    assert_eq!(keep(Some("de"), &both), german);
+    assert_eq!(
+        keep(None, &[("en", ""), ("zh-Hans", "你好")]),
+        zh_only,
+        "an empty English track is skipped"
+    );
+    assert_eq!(
+        keep(None, &[]),
+        ((None, false), vec!["video.mp4".to_owned()])
+    );
 }
 
 #[test]
@@ -542,6 +616,111 @@ async fn subtitle_is_kept_and_both_runs_skip_live_streams() {
             line.ends_with("-- https://www.youtube.com/watch?v=video-subs-ok"),
             "{line}"
         );
+    }
+}
+
+#[tokio::test]
+async fn original_language_picks_the_transcript_and_chinese_becomes_the_translation() {
+    struct Case {
+        platform: &'static str,
+        id: &'static str,
+        /// The cue in subtitle.srt and its meta.subtitle_language.
+        subtitle: Option<(&'static str, &'static str)>,
+        /// The cue in subtitle_zh.srt.
+        chinese: Option<&'static str>,
+        sub_langs: &'static str,
+    }
+    let case = |platform, id, subtitle, chinese, sub_langs| Case {
+        platform,
+        id,
+        subtitle,
+        chinese,
+        sub_langs,
+    };
+    let cases = [
+        case(
+            "youtube",
+            "video-lang-en-subs-both",
+            Some(("hello", "en")),
+            Some("你好"),
+            "zh.*,en.*",
+        ),
+        // Unknown original: the Chinese track may be the original, so it is the transcript.
+        case(
+            "youtube",
+            "video-subs-both",
+            Some(("你好", "zh")),
+            None,
+            "zh.*,en.*",
+        ),
+        // No English track: whisper transcribes, the Chinese track is still the translation.
+        case(
+            "youtube",
+            "video-lang-en-subs-zh",
+            None,
+            Some("你好"),
+            "zh.*,en.*",
+        ),
+        case(
+            "youtube",
+            "video-lang-fr-subs-fr",
+            Some(("bonjour", "fr")),
+            Some("你好"),
+            "fr.*,zh.*",
+        ),
+        // A French original with only English and Chinese tracks: English is never the
+        // transcript, so it is not even requested.
+        case(
+            "youtube",
+            "video-lang-fr-subs-both",
+            None,
+            Some("你好"),
+            "fr.*,zh.*",
+        ),
+        // yt-dlp's Bilibili extractor sets no language; the unknown order takes Chinese.
+        case(
+            "bilibili",
+            "BV-subs-both",
+            Some(("你好", "zh")),
+            None,
+            "zh.*,en.*",
+        ),
+    ];
+    for case in cases {
+        let id = case.id;
+        let run = FetchRun::new(case.platform, id, None);
+        run.run().await.unwrap();
+        let cue = |file: &str| {
+            let text = fs::read_to_string(run.out().join(file)).ok()?;
+            Some(text.lines().nth(2)?.to_owned())
+        };
+        assert_eq!(
+            cue("subtitle.srt").as_deref(),
+            case.subtitle.map(|s| s.0),
+            "{id}"
+        );
+        assert_eq!(cue("subtitle_zh.srt").as_deref(), case.chinese, "{id}");
+        let manifest = run.manifest();
+        let file = |name: &str| manifest.files.get(name).map(String::as_str);
+        assert_eq!(
+            file("subtitle"),
+            case.subtitle.map(|_| "subtitle.srt"),
+            "{id}"
+        );
+        assert_eq!(
+            file("subtitle_zh"),
+            case.chinese.map(|_| "subtitle_zh.srt"),
+            "{id}"
+        );
+        let language = case.subtitle.map(|s| MetaValue::Text(s.1.into()));
+        assert_eq!(
+            manifest.meta.get("subtitle_language"),
+            language.as_ref(),
+            "{id}"
+        );
+        let subtitle_run = run.log().lines().nth(1).unwrap().to_owned();
+        let sub_langs = format!("--sub-langs {} ", case.sub_langs);
+        assert!(subtitle_run.contains(&sub_langs), "{id}: {subtitle_run}");
     }
 }
 
