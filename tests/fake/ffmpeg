@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Fake `ffmpeg ... -i SRC ... OUT` for the note tests: writes a small image of OUT's type with a
-400x300 header instead of scaling, and logs its arguments to $HOME/fake-ffmpeg.log. UNDECODABLE
-in the source name makes it exit 1."""
+"""Fake `ffmpeg ... -f DEMUXER -i SRC ... OUT` for the note tests. It "scales" like the real
+filter: the output header keeps the source size within 1568px, and the output bytes shrink with
+the area, so an image that is already small enough in pixels comes out just as heavy. Unknown
+sizes stay as they are. Each call appends its arguments and environment names to
+$TMPDIR/fake-ffmpeg.log. UNDECODABLE in the source name makes it exit 1."""
 
 import os
 import struct
@@ -9,14 +11,31 @@ import sys
 
 args = sys.argv[1:]
 source, target = args[args.index("-i") + 1], args[-1]
-with open(os.path.join(os.environ.get("HOME", "/tmp"), "fake-ffmpeg.log"), "a") as log:
-    log.write(" ".join(args) + "\n")
+with open(os.path.join(os.environ.get("TMPDIR", "/tmp"), "fake-ffmpeg.log"), "a") as log:
+    log.write(" ".join(args) + " | env " + ",".join(sorted(os.environ)) + "\n")
 if "UNDECODABLE" in source:
     print("fake ffmpeg: cannot decode", file=sys.stderr)
     sys.exit(1)
+data = open(source, "rb").read()
+size = None
+if data.startswith(b"\x89PNG\r\n\x1a\n"):
+    size = struct.unpack(">II", data[16:24])
+elif data.startswith(b"\xff\xd8"):
+    i = 2
+    while i + 9 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            height, width = struct.unpack(">HH", data[i + 5:i + 9])
+            size = (width, height)
+            break
+        i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+width, height = size or (400, 300)
+scale = min(1.0, 1568 / max(width, height))
+width, height = round(width * scale), round(height * scale)
 if target.endswith(".png"):
-    data = b"\x89PNG\r\n\x1a\n" + struct.pack(">I4sII", 13, b"IHDR", 400, 300) + b"\x08\x06\x00\x00\x00"
+    out = b"\x89PNG\r\n\x1a\n" + struct.pack(">I4sII", 13, b"IHDR", width, height) + b"\x08\x06\x00\x00\x00"
 else:
-    data = b"\xff\xd8\xff\xc0\x00\x11\x08" + struct.pack(">HH", 300, 400) + b"\x03" + b"\x00" * 9
-with open(target, "wb") as out:
-    out.write(data)
+    out = b"\xff\xd8\xff\xc0\x00\x11\x08" + struct.pack(">HH", height, width) + b"\x03" + b"\x00" * 9
+out += b"\x00" * max(0, int(len(data) * scale * scale) - len(out))
+with open(target, "wb") as file:
+    file.write(out)

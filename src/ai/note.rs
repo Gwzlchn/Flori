@@ -4,7 +4,9 @@
 
 use std::{
     fmt::Write as _,
-    fs, io,
+    fs,
+    io::{self, Read},
+    ops::Range,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -78,7 +80,7 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
     let mut list = String::new();
     if !pictures.is_empty() {
         prompt.push_str(NOTE_IMAGES);
-        list.push_str("图片(序号与消息末尾附图前的 [N] 一一对应):\n");
+        list.push_str("图片(序号即消息末尾附图的顺序):\n");
         for (i, picture) in pictures.iter().enumerate() {
             let _ = writeln!(list, "[{}] {}", i + 1, picture.label);
         }
@@ -134,22 +136,52 @@ fn video_frames(sections: &[Section], dir: &Path) -> Vec<Picture> {
     spread(frames, MAX_IMAGES)
 }
 
-/// Images of original.md that have a caption: a paragraph of `![](assets/<name>)` images
-/// followed by a paragraph that starts like "Figure 2", "Table 1" or "图 3". Each image of a
-/// subfigure group gets the group's caption. Spread evenly over the paper.
+/// What a paragraph of original.md is when matching captions to images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// Has `![](assets/…)` images, alone or in a table of subfigures.
+    Image,
+    /// A subfigure label such as "(a) Loss" between the images of one figure.
+    Subcaption,
+    /// A Markdown table: an object that can own a caption but sends no image.
+    Table,
+    Caption,
+    Text,
+}
+
+/// Images of original.md that have a caption, spread evenly over the paper. An object is a run
+/// of image paragraphs with subfigure labels between them, or a Markdown table; arxiv-convert
+/// gives every panel of a multi-panel figure its own paragraph. A caption owns the object right
+/// before it, as figures put it below; when that object is missing or already owned, the object
+/// right after it, as tables often put it above. Every image of an object gets its caption.
 fn paper_figures(original: &str, dir: &Path) -> Vec<Picture> {
     let paragraphs: Vec<&str> = original
         .split("\n\n")
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .collect();
+    let parts: Vec<Part> = paragraphs.iter().map(|p| part(p)).collect();
+    let mut owned: Vec<Range<usize>> = Vec::new();
     let mut figures: Vec<(u64, Picture)> = Vec::new();
-    for pair in paragraphs.windows(2) {
-        if !is_caption(pair[1]) {
+    for (i, _) in parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| **p == Part::Caption)
+    {
+        let free = |object: &Range<usize>| {
+            !owned
+                .iter()
+                .any(|o| o.start < object.end && object.start < o.end)
+        };
+        let before = object_ending_at(&parts, i).filter(free);
+        let Some(object) = before.or_else(|| object_starting_at(&parts, i + 1).filter(free)) else {
             continue;
-        }
-        let caption: String = pair[1].chars().take(CAPTION_CHARS).collect();
-        for name in asset_links(pair[0]) {
+        };
+        let caption: String = paragraphs[i].chars().take(CAPTION_CHARS).collect();
+        for name in paragraphs[object.clone()]
+            .iter()
+            .flat_map(|p| asset_links(p))
+        {
             let seen = figures.iter().any(|(_, f)| f.basename == name);
             if let Some(path) = usable(dir, name).filter(|_| !seen) {
                 let position = figures.len() as u64;
@@ -164,8 +196,59 @@ fn paper_figures(original: &str, dir: &Path) -> Vec<Picture> {
                 ));
             }
         }
+        owned.push(object);
     }
     spread(figures, MAX_IMAGES)
+}
+
+fn part(paragraph: &str) -> Part {
+    if !asset_links(paragraph).is_empty() {
+        Part::Image
+    } else if is_caption(paragraph) {
+        Part::Caption
+    } else if is_subcaption(paragraph) {
+        Part::Subcaption
+    } else if paragraph.lines().all(|l| l.trim_start().starts_with('|')) {
+        Part::Table
+    } else {
+        Part::Text
+    }
+}
+
+/// The object whose last paragraph is `end - 1`.
+fn object_ending_at(parts: &[Part], end: usize) -> Option<Range<usize>> {
+    let mut start = end;
+    while start > 0 && matches!(parts[start - 1], Part::Image | Part::Subcaption) {
+        start -= 1;
+    }
+    if parts[start..end].contains(&Part::Image) {
+        Some(start..end)
+    } else {
+        (end > 0 && parts[end - 1] == Part::Table).then(|| end - 1..end)
+    }
+}
+
+/// The object whose first paragraph is `start`.
+fn object_starting_at(parts: &[Part], start: usize) -> Option<Range<usize>> {
+    let mut end = start;
+    while end < parts.len() && matches!(parts[end], Part::Image | Part::Subcaption) {
+        end += 1;
+    }
+    if parts[start..end].contains(&Part::Image) {
+        Some(start..end)
+    } else {
+        (parts.get(start) == Some(&Part::Table)).then(|| start..start + 1)
+    }
+}
+
+/// A subfigure label paragraph: "(a) …" or "a) …", short.
+fn is_subcaption(paragraph: &str) -> bool {
+    let text = paragraph.trim_start_matches(['*', '_', '\\', ' ']);
+    let text = text.strip_prefix('(').unwrap_or(text);
+    let mut chars = text.chars();
+    let label =
+        matches!((chars.next(), chars.next()), (Some(c), Some(')')) if c.is_ascii_lowercase());
+    label && paragraph.chars().count() <= CAPTION_CHARS
 }
 
 /// Basenames of the `![…](assets/<name>)` links in a paragraph.
@@ -187,10 +270,18 @@ fn is_caption(paragraph: &str) -> bool {
         .any(|word| text.starts_with(word))
 }
 
-/// The asset's path when it exists and its format can be sent; SVG and the like cannot.
+/// The asset's path when it is a file whose bytes are an image the CLIs take; SVG, or an HTML
+/// page saved under an image name, is not.
 fn usable(dir: &Path, name: &str) -> Option<PathBuf> {
     let path = dir.join(name);
-    (media_type(&path).is_some() && path.is_file()).then_some(path)
+    head(&path).ok().and_then(|h| media_type(&h)).map(|_| path)
+}
+
+/// The first bytes of a file, enough for [`media_type`].
+fn head(path: &Path) -> io::Result<Vec<u8>> {
+    let mut head = Vec::with_capacity(16);
+    fs::File::open(path)?.take(16).read_to_end(&mut head)?;
+    Ok(head)
 }
 
 /// At most `k` items spread evenly over their keys (time or position), first and last included.
@@ -216,13 +307,19 @@ fn spread(mut items: Vec<(u64, Picture)>, k: usize) -> Vec<Picture> {
 }
 
 /// Pictures ready to send. One that is too large is shrunk by ffmpeg into `scratch`; one that
-/// cannot be read or shrunk is left out, since a note without it is still a note.
+/// cannot be read or shrunk, or is still too large afterwards, is left out, since a note without
+/// it is still a note and a rejected image would fail the whole call.
 async fn sendable(env: &Env, pictures: Vec<Picture>, scratch: &Path) -> Vec<Picture> {
     let mut out = Vec::with_capacity(pictures.len());
     for (i, mut picture) in pictures.into_iter().enumerate() {
         let shrunk = match too_large(&picture.path) {
             Ok(false) => Ok(None),
-            Ok(true) => shrink(env, &picture.path, scratch, i).await.map(Some),
+            Ok(true) => match shrink(env, &picture.path, scratch, i).await {
+                Ok(copy) if too_large(&copy).unwrap_or(true) => {
+                    Err(io::Error::other("still too large after shrinking"))
+                }
+                result => result.map(Some),
+            },
             Err(e) => Err(e),
         };
         match shrunk {
@@ -237,7 +334,7 @@ async fn sendable(env: &Env, pictures: Vec<Picture>, scratch: &Path) -> Vec<Pict
     out
 }
 
-/// Over 1 MiB, or a long side over 1568px when the header tells.
+/// Over 1 MiB, or a long side over 1568px when the header tells: WebP is judged by bytes only.
 fn too_large(path: &Path) -> io::Result<bool> {
     if fs::metadata(path)?.len() > MAX_IMAGE_BYTES {
         return Ok(true);
@@ -287,22 +384,42 @@ fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// A copy within 1568x1568 for the model only. PNG stays PNG so transparency stays readable;
-/// everything else becomes JPEG.
+/// everything else becomes JPEG. The image bytes come from the paper, so ffmpeg reads them with
+/// a demuxer fixed by their real type, may only open local files, and gets no credentials: of
+/// the step's environment only PATH, LANG and TMPDIR.
 async fn shrink(env: &Env, source: &Path, scratch: &Path, n: usize) -> io::Result<PathBuf> {
-    let png = media_type(source) == Some("image/png");
-    let target = scratch.join(format!("image-{n}.{}", if png { "png" } else { "jpg" }));
+    let demuxer = match media_type(&head(source)?) {
+        Some("image/png") => "png_pipe",
+        Some("image/jpeg") => "jpeg_pipe",
+        Some("image/gif") => "gif",
+        Some("image/webp") => "webp_pipe",
+        _ => return Err(io::Error::other("not an image ffmpeg should read")),
+    };
+    let extension = if demuxer == "png_pipe" { "png" } else { "jpg" };
+    let target = scratch.join(format!("image-{n}.{extension}"));
     let scale = format!(
         "scale='min({MAX_IMAGE_SIDE},iw)':'min({MAX_IMAGE_SIDE},ih)':force_original_aspect_ratio=decrease"
     );
+    let allowed = env
+        .iter()
+        .filter(|(k, _)| ["PATH", "LANG", "TMPDIR"].iter().any(|name| k == name));
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-nostdin", "-loglevel", "error", "-y", "-i"])
-        .arg(source)
-        .args(["-vf", &scale, "-frames:v", "1"])
-        .arg(&target)
-        .env_clear()
-        .envs(env.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
+    cmd.args([
+        "-nostdin",
+        "-loglevel",
+        "error",
+        "-y",
+        "-protocol_whitelist",
+        "file",
+    ])
+    .args(["-f", demuxer, "-i"])
+    .arg(source)
+    .args(["-vf", &scale, "-frames:v", "1"])
+    .arg(&target)
+    .env_clear()
+    .envs(allowed.map(|(k, v)| (k, v)))
+    .stdin(Stdio::null())
+    .kill_on_drop(true);
     let status = tokio::time::timeout(SHRINK_TIMEOUT, cmd.status())
         .await
         .map_err(|_| io::Error::other("ffmpeg timed out"))??;
@@ -313,20 +430,28 @@ async fn shrink(env: &Env, source: &Path, scratch: &Path, n: usize) -> io::Resul
 }
 
 /// Replaces each `![描述](img:N)` with `![描述](assets/<basename>)` when N names a sent image and
-/// drops the whole reference otherwise. Other images and links stay as they are.
+/// drops the whole reference otherwise. Images already under `assets/` stay; any other image,
+/// such as an `http`, `data:` or local path the model was talked into writing, is dropped: the
+/// vault is append-only and every client would load it.
 fn link_images(note: &str, pictures: &[Picture]) -> String {
     let mut out = String::with_capacity(note.len());
     let mut rest = note;
     while let Some(start) = rest.find("![") {
         out.push_str(&rest[..start]);
         rest = &rest[start..];
-        let Some((alt, n, len)) = image_reference(rest) else {
+        let Some((alt, target, len)) = image_link(rest) else {
             out.push_str("![");
             rest = &rest[2..];
             continue;
         };
-        if let Some(picture) = n.checked_sub(1).and_then(|i| pictures.get(i)) {
-            let _ = write!(out, "![{}](assets/{})", clean_alt(alt), picture.basename);
+        if let Some(n) = target.strip_prefix("img:") {
+            let digits: String = n.chars().take_while(char::is_ascii_digit).collect();
+            let index = digits.parse::<usize>().ok().and_then(|n| n.checked_sub(1));
+            if let Some(picture) = index.and_then(|i| pictures.get(i)) {
+                let _ = write!(out, "![{}](assets/{})", clean_alt(alt), picture.basename);
+            }
+        } else if target.starts_with("assets/") && !target.contains("..") {
+            out.push_str(&rest[..len]);
         }
         rest = &rest[len..];
     }
@@ -334,19 +459,14 @@ fn link_images(note: &str, pictures: &[Picture]) -> String {
     out
 }
 
-/// `![alt](img:N …)` at the start of `s`, on one line: the alt text, N (0 when missing) and the
-/// byte length. Anything after N up to `)`, such as a title, is ignored.
-fn image_reference(s: &str) -> Option<(&str, usize, usize)> {
+/// `![alt](target)` at the start of `s`, on one line: the alt text, the target up to the first
+/// `)` and the byte length.
+fn image_link(s: &str) -> Option<(&str, &str, usize)> {
     let line = s.split('\n').next()?;
     let close = line.find("](")?;
-    let target = line[close..].strip_prefix("](img:")?;
-    let end = target.find(')')?;
-    let digits: String = target[..end]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    let n = digits.parse().unwrap_or(0);
-    Some((&line[2..close], n, close + "](img:".len() + end + 1))
+    let target_start = close + "](".len();
+    let end = target_start + line[target_start..].find(')')?;
+    Some((&line[2..close], &line[target_start..end], end + 1))
 }
 
 /// Alt text that cannot end the link early or turn into Obsidian syntax: no brackets, no

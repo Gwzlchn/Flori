@@ -105,6 +105,7 @@ impl Fixture {
         vec![
             ("PATH".into(), path),
             ("HOME".into(), self.home.path().into()),
+            ("TMPDIR".into(), self.home.path().into()),
         ]
     }
 
@@ -318,10 +319,47 @@ fn claude_envelope_is_read_even_when_exit_is_nonzero() {
 
 #[tokio::test]
 async fn a_stream_without_a_result_event_is_classified_from_stderr() {
-    let (fx, result) = ask(AiTool::Claude, "FAKE_NO_RESULT").await;
-    // The fake prints "API Error: 429 rate limit exceeded" on stderr.
-    assert_eq!(exit(result), StepExit::Retry);
+    // A long init event, then "API Error: 429 rate limit exceeded" on stderr: the message keeps
+    // the stderr text instead of 500 characters of init event.
+    let (fx, result) = ask(AiTool::Claude, "FAKE_NO_RESULT_429").await;
+    let failure = result.unwrap_err();
+    assert_eq!(failure.exit, StepExit::Retry);
+    assert!(
+        failure.message.contains("API Error: 429"),
+        "{}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains("slash_commands"),
+        "{}",
+        failure.message
+    );
     assert_eq!(fx.calls().len(), 1);
+
+    // Assistant text that mentions a rate limit is not a rate limit.
+    let (_, result) = ask(AiTool::Claude, "FAKE_NO_RESULT_CHATTY").await;
+    let failure = result.unwrap_err();
+    assert_eq!(failure.exit, StepExit::Permanent, "{}", failure.message);
+    assert!(
+        failure.message.contains("connection reset"),
+        "{}",
+        failure.message
+    );
+}
+
+#[test]
+fn error_fields_of_stream_events_are_classified() {
+    use std::os::unix::process::ExitStatusExt;
+    let failed = ExitStatus::from_raw(1 << 8);
+    let stdout =
+        "{\"type\":\"assistant\",\"message\":{},\"error\":\"rate_limit\"}\nnot json at all\n";
+    let failure = claude_result(failed, stdout, "").unwrap_err();
+    assert_eq!(failure.exit, StepExit::Retry);
+    assert!(
+        failure.message.contains("not json at all"),
+        "{}",
+        failure.message
+    );
 }
 
 /// A minimal PNG or JPEG header with the given size; enough for the adapters and the fakes.
@@ -371,6 +409,11 @@ async fn images_go_with_the_prompt_to_both_tools() {
     );
     assert_eq!(sent[1]["media_type"], "image/jpeg");
     assert_eq!(sent[1]["bytes"], image_bytes("jpg", 1280, 720).len());
+    // One user message: the prompt, then each image right behind its [N].
+    assert_eq!(
+        fx.calls()[0]["blocks"],
+        serde_json::json!(["text", "[1]", "image", "[2]", "image"])
+    );
 
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Codex);
     let env = fx.env();
@@ -516,4 +559,70 @@ async fn sigterm_to_the_step_kills_the_cli() {
     assert_eq!(result.unwrap_err().exit, StepExit::Retry);
     let pid = fs::read_to_string(&pid_file).unwrap();
     assert!(wait_dead(pid.trim()).await, "CLI child {pid} survived");
+}
+
+#[tokio::test]
+async fn the_media_type_follows_the_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mislabeled = dir.path().join("photo.png");
+    fs::write(&mislabeled, image_bytes("jpg", 64, 64)).unwrap();
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let env = fx.env();
+    let images = [mislabeled];
+    complete(&env, AiTool::Claude, "m", "hi", &images, 20 * SECOND)
+        .await
+        .unwrap();
+    assert_eq!(fx.calls()[0]["images"][0]["media_type"], "image/jpeg");
+}
+
+/// Runs tests/fake/claude on raw stdin and returns its exit code.
+fn fake_claude_exit(fx: &Fixture, stdin: &str) -> Option<i32> {
+    use std::{io::Write, process::Stdio};
+    let mut child =
+        std::process::Command::new(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fake/claude"))
+            .args(["-p", "--model", "m", "--input-format", "stream-json"])
+            .args(["--output-format", "stream-json", "--verbose"])
+            .env_clear()
+            .envs(fx.env())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    child.wait().unwrap().code()
+}
+
+/// The fake guards the message shape, so a change to claude_message that breaks it fails here.
+#[test]
+fn the_fake_claude_rejects_malformed_messages() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let text = |t: &str| serde_json::json!({"type": "text", "text": t});
+    let image = serde_json::json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}});
+    let message = |kind: &str, content: Vec<serde_json::Value>| {
+        serde_json::json!({"type": kind, "message": {"role": "user", "content": content}})
+            .to_string()
+    };
+    let good = message("user", vec![text("hi"), text("[1]"), image.clone()]);
+    assert_eq!(fake_claude_exit(&fx, &format!("{good}\n")), Some(0));
+    let bad = [
+        // Two events instead of one message.
+        format!("{good}\n{good}\n"),
+        // The label after its image.
+        message("user", vec![text("hi"), image.clone(), text("[1]")]),
+        // Labels that do not count from 1.
+        message("user", vec![text("hi"), text("[2]"), image.clone()]),
+        // No label at all, or no prompt first.
+        message("user", vec![text("hi"), image.clone()]),
+        message("user", vec![image.clone()]),
+        message("assistant", vec![text("hi")]),
+    ];
+    for stdin in bad {
+        assert_eq!(fake_claude_exit(&fx, &stdin), Some(2), "{stdin}");
+    }
 }

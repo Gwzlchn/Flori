@@ -23,6 +23,35 @@ async fn run_note(fx: &Fixture, seq: &str) -> (std::path::PathBuf, StepResult) {
     (out, result)
 }
 
+/// Overwrites assets the fixture wrote as text with real image headers.
+fn real_images(step_dir: &Path, names: &[&str], kind: &str) {
+    for name in names {
+        fs::write(
+            step_dir.join("assets").join(name),
+            image_bytes(kind, 800, 600),
+        )
+        .unwrap();
+    }
+}
+
+/// The image list lines of a note the fake echoed: `[N] label` with N a number.
+fn listed(note: &str) -> Vec<String> {
+    note.lines()
+        .filter_map(|l| l.strip_prefix('[')?.split_once("] "))
+        .filter(|(n, _)| n.bytes().all(|b| b.is_ascii_digit()))
+        .map(|(_, label)| label.to_owned())
+        .collect()
+}
+
+/// A paper with the given original.md and these image assets, all real PNG headers.
+fn paper(fx: &Fixture, original: &str, images: &[&str]) -> std::path::PathBuf {
+    fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
+    let files = [("original", "original.md", original)];
+    let dir = fx.step(2, StepName::ArxivConvert, None, &files, images, &[]);
+    real_images(&dir, images, "png");
+    dir
+}
+
 fn read_note(out: &Path) -> String {
     fs::read_to_string(out.join("note.md")).unwrap()
 }
@@ -89,13 +118,8 @@ fn figure_paper(fx: &Fixture, extra: &str) {
         &assets,
         &[],
     );
-    for (name, kind) in [
-        ("fig1.png", "png"),
-        ("fig3a.png", "png"),
-        ("fig3b.jpg", "jpg"),
-    ] {
-        fs::write(dir.join("assets").join(name), image_bytes(kind, 800, 600)).unwrap();
-    }
+    real_images(&dir, &["fig1.png", "fig3a.png", "logo.png"], "png");
+    real_images(&dir, &["fig3b.jpg"], "jpg");
     fs::write(dir.join("assets/big.png"), image_bytes("png", 3000, 2000)).unwrap();
 }
 
@@ -108,8 +132,12 @@ async fn a_paper_sends_its_captioned_figures_and_links_them() {
         "See ![总览 | 箭头指向 [路由器] \\ 输出](img:1) and ![](img:4 \"title\") \
          and ![bad](img:99) and ![none](img:) and ![kept](assets/fig1.png).",
     );
-    let (out, result) = run_note(&fx, "03-note").await;
-    result.unwrap();
+    // ffmpeg must not see credentials, only PATH, LANG and TMPDIR.
+    let mut env = fx.env();
+    env.push(("CLAUDE_CODE_OAUTH_TOKEN".into(), "test-token".into()));
+    env.push(("LANG".into(), "C.UTF-8".into()));
+    let out = fx.out_dir("03-note");
+    note_with(fx.job_dir(), &out, &env).await.unwrap();
     let images = sent_images(&fx);
     assert!(
         fx.calls()[0]["prompt"]
@@ -123,22 +151,33 @@ async fn a_paper_sends_its_captioned_figures_and_links_them() {
         .collect();
     // fig2.svg cannot be sent and logo.png has no caption.
     assert_eq!(types, ["image/png", "image/png", "image/jpeg", "image/png"]);
-    // big.png went through ffmpeg; the model got the fake's small PNG.
+    // big.png went through ffmpeg, which may only read a local PNG.
     let calls = ffmpeg_calls(&fx);
     assert_eq!(calls.len(), 1);
-    assert!(calls[0].contains("/assets/big.png "), "{}", calls[0]);
+    let (call, env_names) = calls[0].split_once(" | env ").unwrap();
     assert!(
-        calls[0].contains("scale='min(1568,iw)':'min(1568,ih)'"),
-        "{}",
-        calls[0]
+        call.contains("-protocol_whitelist file -f png_pipe -i "),
+        "{call}"
     );
-    // The fake's PNG header says 400x300.
+    assert!(call.contains("/assets/big.png "), "{call}");
+    assert!(
+        call.contains("scale='min(1568,iw)':'min(1568,ih)'"),
+        "{call}"
+    );
+    let env_names: Vec<&str> = env_names.split(',').collect();
+    for name in ["PATH", "LANG", "TMPDIR"] {
+        assert!(env_names.contains(&name), "{env_names:?}");
+    }
+    for name in ["HOME", "CLAUDE_CODE_OAUTH_TOKEN"] {
+        assert!(!env_names.contains(&name), "{env_names:?}");
+    }
+    // The model got the 1568x1045 copy.
     let head = images[3]["head"].as_str().unwrap();
-    assert!(head.ends_with("49484452000001900000012c"), "{head}");
+    assert!(head.ends_with("494844520000062000000415"), "{head}");
     let note = read_note(&out);
     assert!(
         note.contains(
-            "图片(序号与消息末尾附图前的 [N] 一一对应):\n\
+            "图片(序号即消息末尾附图的顺序):\n\
              [1] Figure 1: Overview of the model.\n[2] **Figure 3**: Ablations.\n\
              [3] **Figure 3**: Ablations.\n[4] Table 1: Results.\n"
         ),
@@ -195,7 +234,6 @@ async fn a_figure_ffmpeg_cannot_shrink_is_left_out() {
 #[tokio::test]
 async fn at_most_ten_figures_spread_over_the_paper() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
     let names: Vec<String> = (1..=12).map(|n| format!("f{n}.png")).collect();
     let original: String = names
         .iter()
@@ -203,8 +241,7 @@ async fn at_most_ten_figures_spread_over_the_paper() {
         .map(|(i, name)| format!("![](assets/{name})\n\nFigure {}: Plot.\n\n", i + 1))
         .collect();
     let assets: Vec<&str> = names.iter().map(String::as_str).collect();
-    let files = [("original", "original.md", original.as_str())];
-    fx.step(2, StepName::ArxivConvert, None, &files, &assets, &[]);
+    paper(&fx, &original, &assets);
     let (out, result) = run_note(&fx, "03-note").await;
     result.unwrap();
     assert_eq!(sent_images(&fx).len(), MAX_IMAGES);
@@ -243,7 +280,8 @@ fn video_job(fx: &Fixture, frames_per_section: u64, sections: u64) {
         ("transcript", "transcript.md", "x"),
     ];
     let assets: Vec<&str> = names.iter().map(String::as_str).collect();
-    fx.step(3, StepName::VideoFrames, None, &files, &assets, &[]);
+    let dir = fx.step(3, StepName::VideoFrames, None, &files, &assets, &[]);
+    real_images(&dir, &assets, "jpg");
 }
 
 #[tokio::test]
@@ -284,7 +322,7 @@ async fn a_frame_label_keeps_150_characters_of_its_section() {
     let sections = serde_json::json!([{"start_ms": 0, "frames": ["frame-5000.jpg"], "text": long}]);
     let sections = sections.to_string();
     let files = [("sections", "sections.json", sections.as_str())];
-    fx.step(
+    let dir = fx.step(
         3,
         StepName::VideoFrames,
         None,
@@ -292,6 +330,7 @@ async fn a_frame_label_keeps_150_characters_of_its_section() {
         &["frame-5000.jpg"],
         &[],
     );
+    real_images(&dir, &["frame-5000.jpg"], "jpg");
     let (out, result) = run_note(&fx, "04-note").await;
     result.unwrap();
     let label = format!("[1] 00:05 {}\n", "长".repeat(FRAME_TEXT_CHARS));
@@ -348,11 +387,17 @@ fn image_references_are_linked_or_dropped() {
         ("![](img:2)![](img:1)", "![](assets/b.jpg)![](assets/a.png)"),
         ("drop ![no](img:3) and ![zero](img:0).", "drop  and ."),
         ("![a [b] c\\d|e](img:2)", "![a b cd/e](assets/b.jpg)"),
-        // Not image placeholders: left as they are.
+        // Images under assets/ and plain links stay; any other image is dropped.
         (
             "![x](assets/a.png) ![y](https://e.org/i.png) [l](img:1)",
-            "![x](assets/a.png) ![y](https://e.org/i.png) [l](img:1)",
+            "![x](assets/a.png)  [l](img:1)",
         ),
+        (
+            "![a](data:image/png;base64,AAAA)![b](<http://e.org/x.png>)![c](../x.png)",
+            "",
+        ),
+        ("![up](assets/../../etc/passwd)![d](/etc/x.png)", ""),
+        ("[link](https://e.org) stays", "[link](https://e.org) stays"),
         ("![open](img:1\nnext", "![open](img:1\nnext"),
         ("![t](img:2 \"title\")", "![t](assets/b.jpg)"),
     ];
@@ -397,4 +442,111 @@ fn large_images_are_shrunk_by_size_or_pixels() {
     heavy.resize(MAX_IMAGE_BYTES as usize + 1, 0);
     assert!(too_large(&write("heavy.jpg", heavy)).unwrap());
     assert!(!too_large(&write("unknown.webp", vec![0; 100])).unwrap());
+}
+
+#[tokio::test]
+async fn every_panel_of_a_real_multi_panel_figure_is_sent() {
+    // arxiv.py's conversion of the GAN paper (tests/fixtures/arxiv/1406.2661.ar5iv.html): Figure 2
+    // is a table of four panels, Figure 3 two image paragraphs in a row.
+    let original = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/note/1406.2661.original.md"),
+    )
+    .unwrap();
+    let images = [
+        "mnist_samples.png",
+        "tfd_samples.png",
+        "cifar_full_samples.png",
+        "cifar_conv_samples.png",
+        "1dsubspace.png",
+        "1dsubspace2.png",
+    ];
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    paper(&fx, &original, &images);
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    assert_eq!(sent_images(&fx).len(), 6);
+    let labels = listed(&read_note(&out));
+    assert_eq!(labels.len(), 6);
+    for label in &labels[..4] {
+        assert!(
+            label.starts_with("Figure 2: Visualization of samples"),
+            "{label}"
+        );
+    }
+    for label in &labels[4..] {
+        assert!(label.starts_with("Figure 3: Digits obtained"), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn subfigure_labels_join_the_panels_and_body_text_stops_them() {
+    let original = "Body text before.\n\n![](assets/x.png)\n\nMore body text.\n\n\
+                    ![](assets/a.png)\n\n(a) Loss\n\n![](assets/b.png)\n\nb) Accuracy\n\n\
+                    Figure 1: Training curves.\n";
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    paper(&fx, original, &["x.png", "a.png", "b.png"]);
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    // x.png sits behind body text, so Figure 1 is not its caption.
+    assert_eq!(
+        listed(&read_note(&out)),
+        ["Figure 1: Training curves.", "Figure 1: Training curves."]
+    );
+    assert_eq!(sent_images(&fx).len(), 2);
+}
+
+#[tokio::test]
+async fn captions_above_and_below_go_to_the_right_object() {
+    // Figures put the caption below; the tables here put theirs above an image or a table.
+    let original = "![](assets/f1.png)\n\nFigure 1: First.\n\n![](assets/f2.png)\n\n\
+                    Figure 2: Second.\n\nTable 1: Above its image.\n\n![](assets/t1.png)\n\n\
+                    Table 2: Above another image.\n\n![](assets/t2.png)\n\n\
+                    Table 3: Above a table.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    paper(&fx, original, &["f1.png", "f2.png", "t1.png", "t2.png"]);
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    assert_eq!(
+        listed(&read_note(&out)),
+        [
+            "Figure 1: First.",
+            "Figure 2: Second.",
+            "Table 1: Above its image.",
+            "Table 2: Above another image."
+        ]
+    );
+}
+
+#[tokio::test]
+async fn image_type_comes_from_the_bytes_not_the_name() {
+    let original = "![](assets/photo.png)\n\nFigure 1: A JPEG named png.\n\n\
+                    ![](assets/page.png)\n\nFigure 2: An HTML page named png.\n";
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let dir = paper(&fx, original, &["photo.png", "page.png"]);
+    real_images(&dir, &["photo.png"], "jpg");
+    fs::write(dir.join("assets/page.png"), "<!DOCTYPE html><html></html>").unwrap();
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    let images = sent_images(&fx);
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0]["media_type"], "image/jpeg");
+    assert_eq!(listed(&read_note(&out)), ["Figure 1: A JPEG named png."]);
+}
+
+#[tokio::test]
+async fn an_image_still_too_large_after_shrinking_is_left_out() {
+    // 1.1 MB at 100x100: ffmpeg keeps the size, so the copy is just as heavy.
+    let original = "![](assets/heavy.jpg)\n\nFigure 1: Heavy.\n\n\
+                    ![](assets/small.png)\n\nFigure 2: Fine.\n";
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let dir = paper(&fx, original, &["heavy.jpg", "small.png"]);
+    let mut heavy = image_bytes("jpg", 100, 100);
+    heavy.resize(1_100_000, 0);
+    fs::write(dir.join("assets/heavy.jpg"), heavy).unwrap();
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    assert_eq!(ffmpeg_calls(&fx).len(), 1);
+    assert!(ffmpeg_calls(&fx)[0].contains("-f jpeg_pipe -i "));
+    assert_eq!(sent_images(&fx).len(), 1);
+    assert_eq!(listed(&read_note(&out)), ["Figure 2: Fine."]);
 }

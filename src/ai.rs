@@ -9,7 +9,7 @@ use std::{
     fs,
     future::Future,
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{ExitStatus, Stdio},
     sync::atomic::{AtomicU32, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -58,6 +58,8 @@ const AUTH_MARKERS: &[&str] = &[
     // (or was already used, or was revoked). Please log out and sign in again."
     "refresh token",
     "sign in again",
+    // Error code on claude's stream-json events.
+    "authentication_failed",
 ];
 const LIMIT_MARKERS: &[&str] = &[
     "you've hit your",
@@ -68,6 +70,7 @@ const LIMIT_MARKERS: &[&str] = &[
     "high load",
     "429 too many requests",
     "rate limit",
+    "rate_limit",
 ];
 
 /// Environment handed to the AI CLI. The executor already whitelisted the step's environment,
@@ -180,15 +183,20 @@ pub async fn complete(
     result
 }
 
-/// Media type of an image the AI CLIs accept, by extension; None for anything else, such as SVG.
-pub(crate) fn media_type(path: &Path) -> Option<&'static str> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    match extension.as_str() {
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "png" => Some("image/png"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        _ => None,
+/// Media type of an image the AI CLIs accept, from its leading bytes; None for anything else,
+/// such as SVG or an HTML page saved under an image name. The extension is not trusted: the API
+/// rejects an image whose bytes do not match the declared type.
+pub(crate) fn media_type(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
     }
 }
 
@@ -197,10 +205,11 @@ pub(crate) fn media_type(path: &Path) -> Option<&'static str> {
 fn claude_message(prompt: &str, images: &[PathBuf]) -> Result<String, StepFailure> {
     let mut content = vec![json!({"type": "text", "text": prompt})];
     for (i, path) in images.iter().enumerate() {
-        let media_type = media_type(path).ok_or_else(|| {
+        let bytes = fs::read(path)?;
+        let media_type = media_type(&bytes).ok_or_else(|| {
             StepFailure::permanent(format!("unsupported image {}", path.display()))
         })?;
-        let data = BASE64.encode(fs::read(path)?);
+        let data = BASE64.encode(bytes);
         content.push(json!({"type": "text", "text": format!("[{}]", i + 1)}));
         content.push(json!({
             "type": "image",
@@ -211,7 +220,8 @@ fn claude_message(prompt: &str, images: &[PathBuf]) -> Result<String, StepFailur
     Ok(format!("{message}\n"))
 }
 
-/// The fields of claude's stream-json events this adapter reads; only `result` events matter.
+/// The fields of claude's stream-json events this adapter reads: the `result` event, and the
+/// error field any event may carry.
 #[derive(Deserialize)]
 struct ClaudeEvent {
     #[serde(rename = "type")]
@@ -219,6 +229,7 @@ struct ClaudeEvent {
     subtype: Option<String>,
     is_error: Option<bool>,
     result: Option<String>,
+    error: Option<serde_json::Value>,
 }
 
 /// Success needs exit 0 and a `result` event with is_error=false, subtype=success and a
@@ -243,9 +254,28 @@ fn claude_result(status: ExitStatus, stdout: &str, stderr: &str) -> Result<Strin
             }
             format!("subtype={subtype} result={result}")
         }
-        None => stdout.to_owned(),
+        None => return Err(classify("claude", status, &claude_errors(stdout, stderr))),
     };
     Err(classify("claude", status, &format!("{detail} {stderr}")))
+}
+
+/// Failure text of a stream that never got to its result event: stderr first, so the 500
+/// characters of the message keep it, then stdout lines that are not JSON and the error fields
+/// of the events. Assistant text is never matched against the markers, and the long init event
+/// is left out.
+fn claude_errors(stdout: &str, stderr: &str) -> String {
+    let mut parts = vec![stderr.trim().to_owned()];
+    for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
+        match serde_json::from_str::<ClaudeEvent>(line) {
+            Ok(event) => parts.extend(event.error.map(|error| match error {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            })),
+            Err(_) => parts.push(line.to_owned()),
+        }
+    }
+    parts.retain(|p| !p.is_empty());
+    parts.join("; ")
 }
 
 #[derive(Deserialize)]

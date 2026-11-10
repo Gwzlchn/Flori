@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Fake `claude -p --input-format stream-json --output-format stream-json` for tests.
-stdin is one JSON user message per line; the prompt is its text blocks joined by newlines, and
-its image blocks are decoded and logged. Markers in the prompt pick the behaviour:
+stdin must be exactly one user message: the prompt as a text block, then for each image a text
+block "[N]" and a base64 image block, N counting from 1. Anything else exits 2. The prompt seen
+below is the text blocks joined by newlines; images are decoded and logged with the block order.
+Markers in the prompt pick the behaviour:
 FAKE_AUTH, FAKE_RATE_LIMIT, FAKE_FAIL, FAKE_EMPTY, FAKE_HANG, FAKE_INVALID (the reply is not JSON),
 FAKE_INVALID_ONCE (not JSON unless the prompt has a `---FLORI-FEEDBACK---` re-ask section),
-FAKE_NO_RESULT (the stream ends without a result event, exit 1).
+FAKE_NO_RESULT_429 (a full init event, no result event, "API Error: 429" on stderr, exit 1),
+FAKE_NO_RESULT_CHATTY (no result event, assistant text that mentions a rate limit, a plain
+stderr, exit 1).
 Otherwise the reply echoes the text after the last line `---FLORI-INPUT---`, or a fixed note when
 there is none. stdout is stream-json: a system event, an assistant event and a result event.
 Every call appends one JSON line to $HOME/fake-ai.log so tests can count calls."""
@@ -23,22 +27,42 @@ def flag(name):
     return args[args.index(name) + 1] if name in args else None
 
 
-texts, images = [], []
-for line in sys.stdin:
-    if not line.strip():
-        continue
-    event = json.loads(line)
-    for block in event["message"]["content"]:
-        if block["type"] == "text":
-            texts.append(block["text"])
-        elif block["type"] == "image":
-            data = base64.b64decode(block["source"]["data"], validate=True)
-            images.append({"media_type": block["source"]["media_type"], "bytes": len(data),
-                           "head": data[:24].hex()})
+def reject(why):
+    print(f"fake claude: {why}", file=sys.stderr)
+    sys.exit(2)
+
+
+lines = [line for line in sys.stdin.read().splitlines() if line.strip()]
+if len(lines) != 1:
+    reject(f"{len(lines)} input events, want one user message")
+event = json.loads(lines[0])
+message = event.get("message") or {}
+if event.get("type") != "user" or message.get("role") != "user":
+    reject("the input event is not a user message")
+content = message.get("content") or []
+if not content or content[0].get("type") != "text":
+    reject("the message must start with the prompt text")
+texts, images, blocks = [content[0]["text"]], [], ["text"]
+rest = content[1:]
+if len(rest) % 2:
+    reject("each image needs its [N] label right before it")
+for i in range(0, len(rest), 2):
+    label, image = rest[i], rest[i + 1]
+    n = i // 2 + 1
+    if label != {"type": "text", "text": f"[{n}]"}:
+        reject(f"block {i + 2} must be the text [{n}]")
+    source = image.get("source") or {}
+    if image.get("type") != "image" or source.get("type") != "base64":
+        reject(f"block {i + 3} must be a base64 image")
+    data = base64.b64decode(source["data"], validate=True)
+    texts.append(label["text"])
+    blocks += [label["text"], "image"]
+    images.append({"media_type": source["media_type"], "bytes": len(data), "head": data[:24].hex()})
 prompt = "\n".join(texts)
 with open(os.path.join(os.environ.get("HOME", "/tmp"), "fake-ai.log"), "a") as log:
     log.write(json.dumps({"tool": "claude", "model": model, "args": args, "bytes": len(prompt),
-                          "prompt": prompt, "images": images, "cwd": os.getcwd(),
+                          "prompt": prompt, "images": images, "blocks": blocks,
+                          "cwd": os.getcwd(),
                           "cwd_entries": sorted(os.listdir("."))}, ensure_ascii=False) + "\n")
 
 
@@ -73,8 +97,17 @@ if "FAKE_FAIL" in prompt:
 if "FAKE_EMPTY" in prompt:
     reply("")
 if "FAKE_NO_RESULT" in prompt:
-    emit({"type": "system", "subtype": "init", "model": model, "tools": []})
-    print("API Error: 429 rate limit exceeded", file=sys.stderr)
+    # A real init event is long: cwd, session, every tool, MCP server and slash command.
+    emit({"type": "system", "subtype": "init", "cwd": os.getcwd(), "session_id": "0" * 36,
+          "model": model, "permissionMode": "default", "apiKeySource": "none",
+          "tools": [f"Tool{n}" for n in range(30)], "mcp_servers": [],
+          "slash_commands": [f"command-{n}" for n in range(30)], "agents": ["general-purpose"]})
+    if "FAKE_NO_RESULT_429" in prompt:
+        print("API Error: 429 rate limit exceeded", file=sys.stderr)
+    else:
+        emit({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Mind the rate limit and the OAuth token in this paper."}]}})
+        print("fake claude: connection reset", file=sys.stderr)
     sys.exit(1)
 if "FAKE_INVALID_ONCE" in prompt:
     if "---FLORI-FEEDBACK---" not in prompt:

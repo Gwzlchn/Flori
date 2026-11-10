@@ -115,9 +115,12 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
   - 串行;每块结果按 sha256(prompt‖model‖payload) 缓存,手动重试只补未缓存的块;校验失败时带反馈再问 1 次,仍失败退出 10。
   - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。有 subtitle_zh 的视频不受此限。
 - note:
-  - 一次调用同时发原文与至多 10 张图,图按序号 [N] 列出。视频取 sections 里的关键帧,按时间均匀取,每张写时间与该节文字前 150 字;论文取 original.md 里 `![](assets/…)` 图片段之后紧跟图注段("Figure"、"Fig."、"Table"、"图"、"表" 开头)的图,同一图注下的子图共用图注,按出现位置均匀取。只发 jpeg、png、gif、webp,SVG 等跳过。
-  - 大于 1 MiB 或长边超过 1568px 的图用 ffmpeg 缩到 1568px 以内只送模型(PNG 仍为 PNG,其余转 JPEG),笔记里仍引用原图;缩不了的图不发。
-  - 模型用 `![描述](img:N)` 插图,落盘时换成 `![描述](assets/<basename>)`;N 不在清单里时整条图片标记删除。描述去掉 `[`、`]`、`\`,`|` 换成 `/`。
+  - 一次调用同时发原文与至多 10 张图,图按序号 [N] 列出,序号即附图顺序。视频取 sections 里的关键帧,按时间均匀取,每张写时间与该节文字前 150 字。论文取 original.md 里有图注的图,按出现位置均匀取:
+    - 对象是一串相邻的图片段(中间可夹 "(a) …"、"b) …" 这类子图注段),或一个 Markdown 表格;arxiv-convert 把多面板图的每个面板写成单独一段。
+    - 图注段以 "Figure"、"Fig."、"Table"、"图"、"表" 开头。图注归紧挨在它前面的对象(图注在下);前面没有对象或已被别的图注占用时,归紧挨在它后面的对象(图注在上,表格常见)。对象里每张图都用这条图注;正文段把对象隔开。
+  - 只发内容确实是 jpeg、png、gif、webp 的图,media_type 按文件头判断,不看扩展名;SVG、扩展名是图片但内容不是的文件跳过。
+  - 大于 1 MiB 或长边超过 1568px 的图用 ffmpeg 缩到 1568px 以内只送模型(PNG 仍为 PNG,其余转 JPEG),笔记里仍引用原图;WebP 读不到尺寸,只按字节判断。缩完仍超限或缩不了的图不发。ffmpeg 按文件头固定 demuxer、只允许 file 协议,环境变量只给 PATH、LANG、TMPDIR。
+  - 模型用 `![描述](img:N)` 插图,落盘时换成 `![描述](assets/<basename>)`;N 不在清单里时整条图片标记删除。`assets/` 下的图片原样保留,其它图片(http、data:、别的路径)整条删除。描述去掉 `[`、`]`、`\`,`|` 换成 `/`。
 - note 与 translate 失败时 publish 不执行,可手动 retry。
 
 ### AI CLI 固定调用
@@ -127,9 +130,9 @@ claude -p --model <必填> --tools "" --input-format stream-json --output-format
        --max-turns 1 --no-session-persistence --strict-mcp-config --setting-sources project
 ```
 
-- stdin 是一行 stream-json 的 user 消息:先是 prompt 文本块,每张图前再加一个 `[N]` 文本块,图为 base64 image 块,media_type 按扩展名取 image/jpeg、image/png、image/gif 或 image/webp。没有图时也走这一条路径。工具全关,不开 Read。不能用 `--bare`,它不读 OAuth。
+- stdin 是一行 stream-json 的 user 消息:先是 prompt 文本块,每张图前再加一个 `[N]` 文本块,图为 base64 image 块,media_type 按文件头取 image/jpeg、image/png、image/gif 或 image/webp。没有图时也走这一条路径。工具全关,不开 Read。不能用 `--bare`,它不读 OAuth。
 - cwd:claude 是每次调用前清空重建的 `$HOME/ai-cwd`(固定目录,宿主 `~/.claude/projects` 下只多一项);codex 是每次新建的空目录。
-- 成功判据:stdout 的 stream-json 事件里 type=result 的那一条 is_error=false、subtype=success、result 非空,且退出码 0。退出码非 0 时也解析这条事件再分类;没有 result 事件时按 stdout 与 stderr 的原文分类。
+- 成功判据:stdout 的 stream-json 事件里 type=result 的那一条 is_error=false、subtype=success、result 非空,且退出码 0。退出码非 0 时也解析这条事件再分类。没有 result 事件时按 stderr、stdout 里不是 JSON 的行与各事件的 error 字段分类,stderr 在前;assistant 正文不参与分类。
 - 失败分类:凭据失效 → 30;限流和超时 → 10;其它 → 20。
 - codex:`--ask-for-approval never exec --strict-config --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox read-only --ephemeral --color never --json [--image <file>]… --model M -c history.persistence="none" -c web_search="disabled" -C <空目录> --output-last-message <file> -`。`--image` 每张图一次,放在 `--model` 之前,因为它会吞掉后面的多个值。
 
