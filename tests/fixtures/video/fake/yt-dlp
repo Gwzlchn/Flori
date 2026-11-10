@@ -21,6 +21,14 @@ printf '%s\n' "$args" >> "$dir/../fake-yt-dlp.log"
 cue() { printf '1\n00:00:00,000 --> 00:00:01,000\n%s\n' "$2" > "$dir/subtitle.$1.srt"; }
 if [ -n "$skip" ]; then
     case $url in
+        # Bilibili AI tracks: ai-zh shaped like the real one, translations in other languages.
+        # yt-dlp writes only requested tracks; this fake writes ai-ja anyway. manual in the id
+        # adds a manual Chinese track.
+        *subs-ai*)
+            cp "$(dirname "$0")/../bili-ai-zh.srt" "$dir/subtitle.ai-zh.srt"
+            cue ai-en "During the 2017 stock market crash recovery"
+            cue ai-ja "2017年の株式市場暴落の回復期に"
+            case $url in *manual*) cue zh-CN 你好 ;; esac ;;
         *subs-ok*) cue en hello ;;
         # Manual tracks in several languages; lang-xx in the id sets the reported original.
         *subs-both*) cue en hello; cue zh-Hant 哈囉; cue zh-Hans 你好 ;;

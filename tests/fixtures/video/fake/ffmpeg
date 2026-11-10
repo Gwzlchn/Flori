@@ -1,0 +1,9 @@
+#!/bin/sh
+# Fake ffmpeg for the video-transcribe tests: copies the input to the last argument, so the
+# fake whisper.py reads the spoken language the test wrote into video.mp4.
+input= prev= out=
+for arg; do
+    [ "$prev" = -i ] && input=$arg
+    prev=$arg out=$arg
+done
+cp "$input" "$out"

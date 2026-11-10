@@ -127,8 +127,19 @@ fn subtitle_rank_puts_the_original_first() {
 }
 
 /// Writes one-cue `subtitle.<lang>.srt` files (an empty text makes an unusable track) and runs
-/// keep_subtitles; returns what it reported and the files left behind.
+/// keep_subtitles without AI tracks; returns what it reported and the files left behind.
 fn keep(original: Option<&str>, tracks: &[(&str, &str)]) -> ((Option<String>, bool), Vec<String>) {
+    let (kept, left) = keep_with(original, &[], tracks);
+    assert!(kept.ai.is_empty());
+    ((kept.language, kept.chinese), left)
+}
+
+/// [`keep`] with Bilibili AI tracks in `ai_langs` allowed. Kept files show as `<file>=<cue>`.
+fn keep_with(
+    original: Option<&str>,
+    ai_langs: &[&str],
+    tracks: &[(&str, &str)],
+) -> (Kept, Vec<String>) {
     let dir = tempfile::tempdir().unwrap();
     for (lang, text) in tracks {
         let srt = format!("1\n00:00:00,000 --> 00:00:01,000\n{text}\n");
@@ -137,15 +148,11 @@ fn keep(original: Option<&str>, tracks: &[(&str, &str)]) -> ((Option<String>, bo
     fs::write(dir.path().join("video.mp4"), "x").unwrap();
     // Left by a subtitle run that failed before converting.
     fs::write(dir.path().join("video.en.vtt"), "partial").unwrap();
-    let kept = keep_subtitles(dir.path(), original).unwrap();
+    let kept = keep_subtitles(dir.path(), original, ai_langs).unwrap();
     let mut left = names(dir.path());
-    for file in ["subtitle.srt", "subtitle_zh.srt"] {
-        if let Ok(text) = fs::read_to_string(dir.path().join(file)) {
-            let cue = text.lines().nth(2).unwrap().to_owned();
-            left.iter_mut()
-                .filter(|n| *n == file)
-                .for_each(|n| *n = format!("{file}={cue}"));
-        }
+    for name in left.iter_mut().filter(|n| n.ends_with(".srt")) {
+        let text = fs::read_to_string(dir.path().join(&*name)).unwrap();
+        *name = format!("{name}={}", text.lines().nth(2).unwrap());
     }
     (kept, left)
 }
@@ -226,6 +233,48 @@ fn subtitles_follow_the_original_language() {
         keep(None, &[]),
         ((None, false), vec!["video.mp4".to_owned()])
     );
+}
+
+#[test]
+fn ai_tracks_wait_for_video_transcribe_only_without_a_manual_track() {
+    let ai = [
+        ("ai-zh", "一度浮盈3个亿"),
+        ("ai-en", "once up 300 million"),
+        ("ai-ja", "一時は3億の含み益"),
+    ];
+    let kept = |language: Option<&str>, ai: &[&str]| Kept {
+        language: language.map(Into::into),
+        chinese: false,
+        ai: ai.iter().map(|l| l.to_string()).collect(),
+    };
+    // Bilibili without a manual track: the AI tracks of the requested languages stay as
+    // candidates; ai-ja was not requested.
+    assert_eq!(
+        keep_with(None, &["zh", "en"], &ai),
+        (
+            kept(None, &["en", "zh"]),
+            vec![
+                "ai_subtitle_en.srt=once up 300 million".to_owned(),
+                "ai_subtitle_zh.srt=一度浮盈3个亿".to_owned(),
+                "video.mp4".to_owned(),
+            ]
+        )
+    );
+    // A manual track wins, even one the AI tracks would outrank by language.
+    let mut with_manual = ai.to_vec();
+    with_manual.push(("en", "hello"));
+    let manual_en = (
+        kept(Some("en"), &[]),
+        vec!["subtitle.srt=hello".to_owned(), "video.mp4".to_owned()],
+    );
+    assert_eq!(keep_with(None, &["zh", "en"], &with_manual), manual_en);
+    // An AI Chinese track is never the translation of a non-Chinese original.
+    let tracks = [("en", "hello"), ("ai-zh", "你好")];
+    assert_eq!(keep_with(Some("en"), &["en", "zh"], &tracks), manual_en);
+    // Without AI languages, as on YouTube, ai- tracks are never kept; nor is an empty one.
+    let none = (kept(None, &[]), vec!["video.mp4".to_owned()]);
+    assert_eq!(keep_with(None, &[], &ai), none);
+    assert_eq!(keep_with(None, &["zh"], &[("ai-zh", "")]), none);
 }
 
 #[test]
@@ -696,13 +745,21 @@ async fn original_language_picks_the_transcript_and_chinese_becomes_the_translat
             Some("你好"),
             "fr.*,zh.*",
         ),
-        // yt-dlp's Bilibili extractor sets no language; the unknown order takes Chinese.
+        // yt-dlp's Bilibili extractor sets no language; the unknown order takes Chinese. A
+        // manual track wins over the AI tracks of the same languages.
         case(
             "bilibili",
             "BV-subs-both",
             Some(("你好", "zh")),
             None,
-            "zh.*,en.*",
+            "zh.*,en.*,ai-zh,ai-en",
+        ),
+        case(
+            "bilibili",
+            "BV-subs-ai-manual",
+            Some(("你好", "zh")),
+            None,
+            "zh.*,en.*,ai-zh,ai-en",
         ),
     ];
     for case in cases {
@@ -737,10 +794,50 @@ async fn original_language_picks_the_transcript_and_chinese_becomes_the_translat
             language.as_ref(),
             "{id}"
         );
+        assert!(
+            !manifest.files.keys().any(|k| k.starts_with(AI_SUBTITLE)),
+            "{id}"
+        );
         let subtitle_run = run.log().lines().nth(1).unwrap().to_owned();
         let sub_langs = format!("--sub-langs {} ", case.sub_langs);
         assert!(subtitle_run.contains(&sub_langs), "{id}: {subtitle_run}");
     }
+}
+
+#[tokio::test]
+async fn bilibili_ai_tracks_are_fetched_for_video_transcribe_to_check() {
+    let run = FetchRun::new("bilibili", "BV-subs-ai", Some("good-cookie"));
+    run.run().await.unwrap();
+    assert_eq!(
+        names(&run.out()),
+        [
+            "ai_subtitle_en.srt",
+            "ai_subtitle_zh.srt",
+            "manifest.json",
+            "video.mp4"
+        ]
+    );
+    let manifest = run.manifest();
+    assert_eq!(manifest.files["ai_subtitle_zh"], "ai_subtitle_zh.srt");
+    assert_eq!(manifest.files["ai_subtitle_en"], "ai_subtitle_en.srt");
+    assert_eq!(manifest.files.len(), 3);
+    assert!(!manifest.meta.contains_key("subtitle_language"));
+    assert_eq!(
+        fs::read_to_string(run.out().join("ai_subtitle_zh.srt")).unwrap(),
+        fs::read_to_string(fixture("bili-ai-zh.srt")).unwrap()
+    );
+    let subtitle_run = run.log().lines().nth(1).unwrap().to_owned();
+    assert!(
+        subtitle_run.contains(" --sub-langs zh.*,en.*,ai-zh,ai-en "),
+        "{subtitle_run}"
+    );
+    assert!(subtitle_run.contains(" --cookies "), "{subtitle_run}");
+
+    // YouTube asks for no ai- track and keeps none.
+    let run = FetchRun::new("youtube", "video-subs-ai", None);
+    run.run().await.unwrap();
+    assert_eq!(names(&run.out()), ["manifest.json", "video.mp4"]);
+    assert!(run.log().contains(" --sub-langs zh.*,en.* "));
 }
 
 #[tokio::test]
@@ -937,4 +1034,123 @@ async fn fixture_runs_whisper_without_subtitle() {
     ));
     let _: Transcript = read_json(&transcribed.join(TRANSCRIPT_JSON)).unwrap();
     assert_eq!(names(&transcribed), ["manifest.json", "transcript.json"]);
+}
+
+/// A finished video-fetch step whose video.mp4 holds the spoken language for the fake ffmpeg
+/// and whisper.py, plus `(logical name, file, content)` files and text meta.
+fn fetched_job(
+    spoken: &str,
+    files: &[(&str, &str, &str)],
+    meta: &[(&str, &str)],
+) -> tempfile::TempDir {
+    let job = tempfile::tempdir().unwrap();
+    fs::write(job.path().join("job.json"), job_json("bilibili", "BVlocal")).unwrap();
+    let fetch = job.path().join("steps/01-video-fetch");
+    fs::create_dir_all(&fetch).unwrap();
+    fs::write(fetch.join(VIDEO_FILE), spoken).unwrap();
+    let mut manifest = Manifest::default();
+    manifest.files.insert("video".into(), VIDEO_FILE.into());
+    for (name, file, text) in files {
+        fs::write(fetch.join(file), text).unwrap();
+        manifest.files.insert(name.to_string(), file.to_string());
+    }
+    for (key, value) in meta {
+        manifest
+            .meta
+            .insert(key.to_string(), MetaValue::Text(value.to_string()));
+    }
+    write_manifest(&fetch, &manifest).unwrap();
+    job
+}
+
+/// video-transcribe against tests/fixtures/video/fake/{ffmpeg,whisper.py}. Returns the
+/// manifest, the transcript and the whisper.py modes that ran, one per line.
+async fn transcribe_fake(job: &Path) -> (Manifest, Transcript, String) {
+    let env = TranscribeEnv {
+        ffmpeg: fixture("fake/ffmpeg").into(),
+        python: "python3".into(),
+        steps_dir: Some(fixture("fake").to_string_lossy().into_owned()),
+    };
+    let out = job.join("steps/02-video-transcribe.tmp");
+    fs::create_dir(&out).unwrap();
+    if let Err(failure) = transcribe_with(job, &out, &env).await {
+        panic!("{:?} {}", failure.exit, failure.message);
+    }
+    assert_eq!(names(&out), ["manifest.json", "transcript.json"]);
+    let log = fs::read_to_string(job.join("steps/fake-whisper.log")).unwrap_or_default();
+    let transcript = read_json(&out.join(TRANSCRIPT_JSON)).unwrap();
+    (pipeline::read_manifest(&out).unwrap(), transcript, log)
+}
+
+fn text(value: &str) -> MetaValue {
+    MetaValue::Text(value.into())
+}
+
+#[tokio::test]
+async fn an_ai_subtitle_is_the_transcript_only_in_the_spoken_language() {
+    let ai_zh = fs::read_to_string(fixture("bili-ai-zh.srt")).unwrap();
+    let ai_en = "1\n00:00:00,280 --> 00:00:02,600\nDuring the 2017 crash recovery\n\n";
+    let tracks = [
+        ("ai_subtitle_zh", "ai_subtitle_zh.srt", ai_zh.as_str()),
+        ("ai_subtitle_en", "ai_subtitle_en.srt", ai_en),
+    ];
+
+    // Mandarin audio: ai-zh is the transcript as it is; whisper only detects the language.
+    let job = fetched_job("zh", &tracks, &[]);
+    let (manifest, transcript, log) = transcribe_fake(job.path()).await;
+    assert_eq!(log, "detect\n");
+    assert_eq!(transcript.language.as_deref(), Some("zh"));
+    assert_eq!(transcript.segments, parse_srt(&ai_zh));
+    assert_eq!(
+        transcript.segments[5],
+        segment(11_520, 13_160, "一度浮盈3个亿")
+    );
+    assert_eq!(manifest.meta["origin"], text("subtitle"));
+    assert_eq!(manifest.meta["subtitle_kind"], text("ai"));
+    assert_eq!(manifest.meta["language"], text("zh"));
+    assert_eq!(
+        manifest.meta["language_probability"],
+        MetaValue::Float(0.75)
+    );
+
+    // English audio takes the English track.
+    let job = fetched_job("en", &tracks, &[]);
+    let (manifest, transcript, log) = transcribe_fake(job.path()).await;
+    assert_eq!(log, "detect\n");
+    assert_eq!(
+        transcript.segments,
+        [segment(280, 2600, "During the 2017 crash recovery")]
+    );
+    assert_eq!(manifest.meta["subtitle_kind"], text("ai"));
+    assert_eq!(manifest.meta["language"], text("en"));
+
+    // Japanese audio: both tracks are machine translations, so whisper transcribes.
+    let job = fetched_job("ja", &tracks, &[]);
+    let (manifest, transcript, log) = transcribe_fake(job.path()).await;
+    assert_eq!(log, "detect\ntranscribe\n");
+    assert_eq!(transcript.segments, [segment(0, 1000, "whisper ja")]);
+    assert_eq!(manifest.meta["origin"], text("whisper"));
+    assert!(!manifest.meta.contains_key("subtitle_kind"));
+    assert_eq!(manifest.meta["language"], text("ja"));
+}
+
+#[tokio::test]
+async fn a_manual_subtitle_needs_no_audio_and_plain_whisper_no_detection() {
+    let srt = fs::read_to_string(fixture("local-video.srt")).unwrap();
+    let files = [("subtitle", "subtitle.srt", srt.as_str())];
+    let job = fetched_job("zh", &files, &[("subtitle_language", "en")]);
+    let (manifest, transcript, log) = transcribe_fake(job.path()).await;
+    assert_eq!(log, "");
+    assert_eq!(transcript.segments.len(), 3);
+    assert_eq!(manifest.meta["origin"], text("subtitle"));
+    assert_eq!(manifest.meta["subtitle_kind"], text("manual"));
+    assert_eq!(manifest.meta["language"], text("en"));
+    assert_eq!(manifest.meta["language_probability"], MetaValue::Float(1.0));
+
+    let job = fetched_job("zh", &[], &[]);
+    let (manifest, transcript, log) = transcribe_fake(job.path()).await;
+    assert_eq!(log, "transcribe\n");
+    assert_eq!(transcript.segments, [segment(0, 1000, "whisper zh")]);
+    assert_eq!(manifest.meta["origin"], text("whisper"));
+    assert!(!manifest.meta.contains_key("subtitle_kind"));
 }

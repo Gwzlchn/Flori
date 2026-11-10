@@ -1,11 +1,11 @@
 //! video-transcribe: a subtitle normalized into transcript.json, or whisper on the audio.
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, ffi::OsString, fs, path::Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use tokio::process::Command;
 
-use super::{Segment, Transcript, env_value, push_text, run_checked};
+use super::{Segment, Transcript, env_value, fetch::AI_SUBTITLE, push_text, run_checked};
 use crate::pipeline::{
     Manifest, MetaValue, StepFailure, StepName, StepResult, prior_step, read_json, step_file,
     write_json, write_manifest,
@@ -13,7 +13,7 @@ use crate::pipeline::{
 
 pub(super) const TRANSCRIPT_JSON: &str = "transcript.json";
 
-/// whisper.py output: transcript.json plus the language detection confidence.
+/// `whisper.py transcribe` output: transcript.json plus the language detection confidence.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct WhisperOutput {
@@ -22,52 +22,114 @@ pub(super) struct WhisperOutput {
     pub(super) segments: Vec<Segment>,
 }
 
+/// `whisper.py detect` output: the spoken language without decoding any text.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Detected {
+    language: String,
+    language_probability: f64,
+}
+
+/// What video-transcribe runs. Tests point the tools at fakes.
+pub(super) struct TranscribeEnv {
+    pub(super) ffmpeg: OsString,
+    pub(super) python: OsString,
+    pub(super) steps_dir: Option<String>,
+}
+
+impl TranscribeEnv {
+    fn inherited() -> TranscribeEnv {
+        TranscribeEnv {
+            ffmpeg: "ffmpeg".into(),
+            python: "python3".into(),
+            steps_dir: env_value("FLORI_STEPS_DIR"),
+        }
+    }
+}
+
+/// The transcript and where it came from, for meta.origin and meta.subtitle_kind.
+struct Chosen {
+    transcript: Transcript,
+    origin: &'static str,
+    subtitle_kind: Option<&'static str>,
+    probability: f64,
+}
+
 pub async fn transcribe(job_dir: &Path, out_dir: &Path) -> StepResult {
+    transcribe_with(job_dir, out_dir, &TranscribeEnv::inherited()).await
+}
+
+pub(super) async fn transcribe_with(
+    job_dir: &Path,
+    out_dir: &Path,
+    env: &TranscribeEnv,
+) -> StepResult {
     let (fetch_dir, fetched) = prior_step(job_dir, StepName::VideoFetch)?;
-    let (transcript, origin, probability) = match fetched.files.get("subtitle") {
+    let chosen = match fetched.files.get("subtitle") {
         Some(subtitle) => {
-            let segments = parse_srt(&fs::read_to_string(fetch_dir.join(subtitle))?);
-            if segments.is_empty() {
-                return Err(StepFailure::permanent("subtitle.srt has no usable cues"));
-            }
             let language = match fetched.meta.get("subtitle_language") {
                 Some(MetaValue::Text(lang)) => Some(lang.clone()),
                 _ => None,
             };
-            (Transcript { language, segments }, "subtitle", 1.0)
+            Chosen {
+                transcript: Transcript {
+                    language,
+                    segments: read_subtitle(&fetch_dir.join(subtitle))?,
+                },
+                origin: "subtitle",
+                subtitle_kind: Some("manual"),
+                probability: 1.0,
+            }
         }
         None => {
+            let ai_tracks: BTreeMap<&str, &String> = fetched
+                .files
+                .iter()
+                .filter_map(|(name, file)| Some((name.strip_prefix(AI_SUBTITLE)?, file)))
+                .collect();
             let video = step_file(job_dir, StepName::VideoFetch, "video")?;
-            let whisper = run_whisper(&video, out_dir).await?;
-            let transcript = Transcript {
-                language: Some(whisper.language),
-                segments: whisper.segments,
-            };
-            (transcript, "whisper", whisper.language_probability)
+            from_audio(&video, &fetch_dir, &ai_tracks, out_dir, env).await?
         }
     };
-    write_json(&out_dir.join(TRANSCRIPT_JSON), &transcript)?;
-    let language = transcript.language.unwrap_or_else(|| "unknown".into());
+    write_json(&out_dir.join(TRANSCRIPT_JSON), &chosen.transcript)?;
+    let language = chosen
+        .transcript
+        .language
+        .unwrap_or_else(|| "unknown".into());
+    let mut meta = BTreeMap::from([
+        ("origin".into(), MetaValue::Text(chosen.origin.into())),
+        ("language".into(), MetaValue::Text(language)),
+        (
+            "language_probability".into(),
+            MetaValue::Float(chosen.probability),
+        ),
+    ]);
+    if let Some(kind) = chosen.subtitle_kind {
+        meta.insert("subtitle_kind".into(), MetaValue::Text(kind.into()));
+    }
     let manifest = Manifest {
         title: None,
         files: BTreeMap::from([("transcript_json".into(), TRANSCRIPT_JSON.into())]),
         assets: Vec::new(),
-        meta: BTreeMap::from([
-            ("origin".into(), MetaValue::Text(origin.into())),
-            ("language".into(), MetaValue::Text(language)),
-            ("language_probability".into(), MetaValue::Float(probability)),
-        ]),
+        meta,
     };
     write_manifest(out_dir, &manifest)?;
     Ok(())
 }
 
-/// 16 kHz mono WAV through ffmpeg, then `python3 -I $FLORI_STEPS_DIR/whisper.py <wav> <json>`.
-/// The scratch files live in out_dir so a failed attempt is cleaned up with it.
-async fn run_whisper(video: &Path, out_dir: &Path) -> Result<WhisperOutput, StepFailure> {
+/// 16 kHz mono WAV through ffmpeg, then the Bilibili AI track in the language whisper detects in
+/// it, or else whisper's own transcription. An AI track in any other language is a machine
+/// translation of the speech. The scratch files live in out_dir so a failed attempt is cleaned
+/// up with it.
+async fn from_audio(
+    video: &Path,
+    fetch_dir: &Path,
+    ai_tracks: &BTreeMap<&str, &String>,
+    out_dir: &Path,
+    env: &TranscribeEnv,
+) -> Result<Chosen, StepFailure> {
     let audio = out_dir.join("audio.wav");
-    let raw = out_dir.join("whisper.json");
-    let mut ffmpeg = Command::new("ffmpeg");
+    let mut ffmpeg = Command::new(&env.ffmpeg);
     ffmpeg
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-i"])
         .arg(video)
@@ -75,19 +137,70 @@ async fn run_whisper(video: &Path, out_dir: &Path) -> Result<WhisperOutput, Step
         .args(["-c:a", "pcm_s16le", "-y"])
         .arg(&audio);
     run_checked(ffmpeg, "ffmpeg").await?;
-    let steps = env_value("FLORI_STEPS_DIR")
+    if !ai_tracks.is_empty() {
+        let detected: Detected = run_whisper(env, "detect", &audio, out_dir).await?;
+        let (language, p) = (detected.language, detected.language_probability);
+        if let Some(file) = ai_tracks.get(language.as_str()) {
+            eprintln!("video-transcribe: audio is {language} p={p:.2}, using the AI subtitle");
+            let segments = read_subtitle(&fetch_dir.join(file))?;
+            fs::remove_file(&audio)?;
+            return Ok(Chosen {
+                transcript: Transcript {
+                    language: Some(language),
+                    segments,
+                },
+                origin: "subtitle",
+                subtitle_kind: Some("ai"),
+                probability: p,
+            });
+        }
+        eprintln!("video-transcribe: audio is {language} p={p:.2}, no AI subtitle in it");
+    }
+    let whisper: WhisperOutput = run_whisper(env, "transcribe", &audio, out_dir).await?;
+    fs::remove_file(&audio)?;
+    Ok(Chosen {
+        transcript: Transcript {
+            language: Some(whisper.language),
+            segments: whisper.segments,
+        },
+        origin: "whisper",
+        subtitle_kind: None,
+        probability: whisper.language_probability,
+    })
+}
+
+/// `python3 -I $FLORI_STEPS_DIR/whisper.py <mode> <wav> <json>` and its parsed output.
+async fn run_whisper<T: DeserializeOwned>(
+    env: &TranscribeEnv,
+    mode: &str,
+    audio: &Path,
+    out_dir: &Path,
+) -> Result<T, StepFailure> {
+    let steps = env
+        .steps_dir
+        .as_deref()
         .ok_or_else(|| StepFailure::permanent("FLORI_STEPS_DIR is not set"))?;
-    let mut python = Command::new("python3");
+    let raw = out_dir.join("whisper.json");
+    let mut python = Command::new(&env.python);
     python
         .arg("-I")
-        .arg(Path::new(&steps).join("whisper.py"))
-        .arg(&audio)
+        .arg(Path::new(steps).join("whisper.py"))
+        .arg(mode)
+        .arg(audio)
         .arg(&raw);
     run_checked(python, "whisper.py").await?;
     let output = read_json(&raw)?;
-    fs::remove_file(&audio)?;
     fs::remove_file(&raw)?;
     Ok(output)
+}
+
+fn read_subtitle(path: &Path) -> Result<Vec<Segment>, StepFailure> {
+    let segments = parse_srt(&fs::read_to_string(path)?);
+    if segments.is_empty() {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        return Err(StepFailure::permanent(format!("{name} has no usable cues")));
+    }
+    Ok(segments)
 }
 
 /// Lenient SRT reader: index lines and unparseable blocks are skipped, markup is stripped and

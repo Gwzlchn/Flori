@@ -26,6 +26,8 @@ use crate::pipeline::{
 pub(super) const VIDEO_FILE: &str = "video.mp4";
 pub(super) const SUBTITLE_FILE: &str = "subtitle.srt";
 pub(super) const SUBTITLE_ZH_FILE: &str = "subtitle_zh.srt";
+/// Logical name prefix of a Bilibili AI track, `ai_subtitle_<lang>`; its file adds `.srt`.
+pub(super) const AI_SUBTITLE: &str = "ai_subtitle_";
 
 /// Fields printed by `--print-to-file`. We never write `--write-info-json`: its format entries
 /// carry the request cookies, which would put SESSDATA into the job directory.
@@ -184,17 +186,31 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     // Only tracks keep_subtitles can use: a third original language never needs English, and
     // one failed language request aborts the whole subtitle run.
     let langs = match original.as_deref() {
-        Some(o) if o != "zh" && o != "en" => format!("{o}.*,zh.*"),
-        _ => "zh.*,en.*".to_owned(),
+        Some(o) if o != "zh" && o != "en" => vec![o, "zh"],
+        _ => vec!["zh", "en"],
     };
+    let mut sub_langs: Vec<String> = langs.iter().map(|l| format!("{l}.*")).collect();
+    // Bilibili's AI tracks `ai-<lang>` come with the subtitle list it already fetches, so asking
+    // for them costs no extra request. Bilibili lists them only to a logged-in SESSDATA.
+    let ai_langs = match job.source.platform {
+        Platform::Bilibili => langs.as_slice(),
+        _ => &[],
+    };
+    sub_langs.extend(ai_langs.iter().map(|l| format!("ai-{l}")));
 
     // Subtitles are best effort in a second run: a failed subtitle request (429 from YouTube's
     // timedtext, Bilibili's subtitle JSON) must not cost the video; whisper covers it.
-    // Manual subtitles only. Auto captions are worse than whisper.
+    // Manual subtitles and Bilibili AI tracks only. YouTube auto captions are worse than whisper.
     let mut subtitles = ytdlp();
     subtitles
         .args(["--skip-download", "--write-subs"])
-        .args(["--sub-langs", &langs, "--convert-subs", "srt", "-o"])
+        .args([
+            "--sub-langs",
+            &sub_langs.join(","),
+            "--convert-subs",
+            "srt",
+            "-o",
+        ])
         .arg(format!("subtitle:{}/subtitle.%(ext)s", out_dir.display()))
         .arg("--")
         .arg(&url);
@@ -204,13 +220,17 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     }
     drop(cookies);
 
-    let (subtitle_language, chinese) = keep_subtitles(out_dir, original.as_deref())?;
+    let kept = keep_subtitles(out_dir, original.as_deref(), ai_langs)?;
     let mut files = BTreeMap::from([("video".into(), VIDEO_FILE.into())]);
-    if subtitle_language.is_some() {
+    if kept.language.is_some() {
         files.insert("subtitle".into(), SUBTITLE_FILE.into());
     }
-    if chinese {
+    if kept.chinese {
         files.insert("subtitle_zh".into(), SUBTITLE_ZH_FILE.into());
+    }
+    for lang in &kept.ai {
+        let name = format!("{AI_SUBTITLE}{lang}");
+        files.insert(name.clone(), format!("{name}.srt"));
     }
     let title = fetched.playlist_title.or(fetched.title);
     let text = |key: &str, value: Option<String>| Some((key.to_owned(), MetaValue::Text(value?)));
@@ -228,7 +248,7 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
             "published",
             fetched.upload_date.as_deref().and_then(published_date),
         ),
-        text("subtitle_language", subtitle_language),
+        text("subtitle_language", kept.language),
     ];
     let manifest = Manifest {
         title,
@@ -385,33 +405,60 @@ struct Track {
     path: PathBuf,
 }
 
-/// Keeps the best usable track as `subtitle.srt` (see [`subtitle_rank`]) and, when the original
-/// is known and not Chinese, the best Chinese track as `subtitle_zh.srt`: a human translation
-/// translate uses instead of the AI. With the original unknown a Chinese track may be the
-/// original itself, so it is never taken for a translation. Everything else except video.mp4,
-/// such as other languages or an unconverted `.vtt` left by a failed subtitle run, is deleted.
-/// Returns the primary subtag of `subtitle.srt` and whether `subtitle_zh.srt` was written.
+/// What [`keep_subtitles`] left in out_dir.
+#[derive(Debug, PartialEq)]
+pub(super) struct Kept {
+    /// Primary subtag of `subtitle.srt`, if written.
+    pub(super) language: Option<String>,
+    /// Whether `subtitle_zh.srt` was written.
+    pub(super) chinese: bool,
+    /// Languages of the `ai_subtitle_<lang>.srt` files written.
+    pub(super) ai: Vec<String>,
+}
+
+/// Keeps the best usable manual track as `subtitle.srt` (see [`subtitle_rank`]) and, when the
+/// original is known and not Chinese, the best Chinese manual track as `subtitle_zh.srt`: a
+/// human translation translate uses instead of the AI. With the original unknown a Chinese track
+/// may be the original itself, so it is never taken for a translation.
+///
+/// Bilibili AI tracks `ai-<lang>` for a language in `ai_langs` are kept as
+/// `ai_subtitle_<lang>.srt` only when no manual track made `subtitle.srt`. Each is speech
+/// recognition when `<lang>` is the spoken language and a machine translation otherwise, and
+/// Bilibili does not say which, so video-transcribe confirms the language from the audio first.
+/// They never become `subtitle.srt` or `subtitle_zh.srt`.
+///
+/// Everything else except video.mp4, such as other languages or an unconverted `.vtt` left by a
+/// failed subtitle run, is deleted.
 pub(super) fn keep_subtitles(
     out_dir: &Path,
     original: Option<&str>,
-) -> io::Result<(Option<String>, bool)> {
+    ai_langs: &[&str],
+) -> io::Result<Kept> {
     let mut tracks = Vec::new();
+    let mut ai = Vec::new();
     for entry in fs::read_dir(out_dir)? {
         let path = entry?.path();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         let lang = name
             .strip_prefix("subtitle.")
             .and_then(|l| l.strip_suffix(".srt"));
-        match lang {
-            Some(lang) if !parse_srt(&fs::read_to_string(&path)?).is_empty() => {
+        let ai_lang = lang
+            .and_then(|l| l.strip_prefix("ai-"))
+            .filter(|l| ai_langs.contains(l));
+        match (lang, ai_lang) {
+            (Some(_), _) if parse_srt(&fs::read_to_string(&path)?).is_empty() => {
+                fs::remove_file(&path)?;
+            }
+            (Some(_), Some(ai_lang)) => ai.push((ai_lang.to_owned(), path.clone())),
+            (Some(lang), None) => {
                 tracks.push(Track {
                     rank: subtitle_rank(lang, original),
                     primary: primary(lang),
                     path: path.clone(),
                 });
             }
-            _ if name == VIDEO_FILE => {}
-            _ => fs::remove_file(&path)?,
+            (None, _) if name == VIDEO_FILE => {}
+            (None, _) => fs::remove_file(&path)?,
         }
     }
     tracks.sort_by(|a, b| (a.rank, &a.path).cmp(&(b.rank, &b.path)));
@@ -429,7 +476,20 @@ pub(super) fn keep_subtitles(
     for track in tracks.iter().filter(|t| t.path.exists()) {
         fs::remove_file(&track.path)?;
     }
-    Ok((main.map(|t| t.primary.clone()), chinese.is_some()))
+    if main.is_some() {
+        for (_, path) in ai.drain(..) {
+            fs::remove_file(path)?;
+        }
+    }
+    ai.sort();
+    for (lang, path) in &ai {
+        fs::rename(path, out_dir.join(format!("{AI_SUBTITLE}{lang}.srt")))?;
+    }
+    Ok(Kept {
+        language: main.map(|t| t.primary.clone()),
+        chinese: chinese.is_some(),
+        ai: ai.into_iter().map(|(lang, _)| lang).collect(),
+    })
 }
 
 /// Lowercased primary subtag: `en-US` is `en`, `zh-Hans` is `zh`.

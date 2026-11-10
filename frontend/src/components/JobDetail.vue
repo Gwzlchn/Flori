@@ -9,7 +9,8 @@ const props = defineProps<{ id: number; domains: Schemas["Domain"][]; collection
 const docOrder = ["note", "translation", "original", "transcript"];
 const fileText: Record<string, string> = {
   note: "AI 笔记", translation: "译文", original: "原文", transcript: "转写", video: "视频",
-  subtitle: "转写字幕", subtitle_zh: "中文字幕", transcript_json: "转写数据", sections: "分节数据", page: "论文网页",
+  subtitle: "转写字幕", subtitle_zh: "中文字幕", ai_subtitle_zh: "B站 AI 字幕(中文)", ai_subtitle_en: "B站 AI 字幕(英文)",
+  transcript_json: "转写数据", sections: "分节数据", page: "论文网页",
 };
 const skipText: Record<string, string> = { chinese: "原文是中文,不需要翻译", unknown: "无法判断语言,未翻译", too_long: "篇幅过长,未翻译" };
 
