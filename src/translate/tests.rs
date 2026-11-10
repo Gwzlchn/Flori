@@ -426,6 +426,31 @@ fn consecutive_marker_lines_all_lead_the_block() {
 }
 
 #[test]
+fn an_image_item_ends_at_its_last_image_line() {
+    // arxiv-convert's output for items holding only a figure: the next item follows directly.
+    // Sent along with it, the image would be a placeholder the AI may move into that item.
+    let md = "1. Step one.\n2.\n   ![](assets/x.png)\n3. Step three.\n\
+              4.\n   ![](assets/x.png) ![](assets/y.png)\n5. \n6. \n\n\
+              -\n  ![](assets/z.png) A photo of the setup.\n- Next.\n";
+    assert_eq!(
+        kinds(&split_blocks(md)),
+        [
+            (false, "", "1. Step one."),
+            (true, "2.\n   ", "![](assets/x.png)"),
+            (false, "", "3. Step three."),
+            (true, "4.\n   ", "![](assets/x.png) ![](assets/y.png)"),
+            (true, "", "5. \n6. "),
+            // Text after an image on its line is a paragraph, sent as before.
+            (
+                false,
+                "-\n  ",
+                "![](assets/z.png) A photo of the setup.\n- Next."
+            ),
+        ]
+    );
+}
+
+#[test]
 fn list_items_starting_with_text_split_as_before() {
     let items: Vec<String> = (1..=11).map(|n| format!("{n}. Item {n} text.")).collect();
     let md = format!(

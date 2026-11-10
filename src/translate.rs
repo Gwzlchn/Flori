@@ -505,9 +505,10 @@ fn split_blocks(md: &str) -> Vec<Block> {
             }
             references.is_some()
         } else {
-            // A table ends at its last row: in a list the next item follows it directly.
-            let table = first.starts_with('|');
-            let joins = |l: &str| !table || l.trim_start().starts_with('|');
+            // A table or a line of images is kept, and in a list the next item follows it
+            // directly: the block ends at its last line of the same kind.
+            let kind = |l: &str| (l.trim_start().starts_with('|'), images_only(l));
+            let joins = |l: &str| kind(first) == (false, false) || kind(l) == kind(first);
             while let Some(l) = lines
                 .get(i)
                 .filter(|l| !l.trim().is_empty() && !starts_block(i) && joins(l))
@@ -582,6 +583,20 @@ fn marker_column(line: &str) -> Option<usize> {
 fn leads(line: &str, next: &str) -> bool {
     let indent = next.len() - next.trim_start_matches(' ').len();
     marker_column(line).is_some_and(|column| !next.trim().is_empty() && indent >= column)
+}
+
+/// A line of nothing but images, such as a figure's panels.
+fn images_only(line: &str) -> bool {
+    let (mut rest, mut images) = (line.trim(), 0);
+    while rest.starts_with("![") {
+        let len = span_len(rest, Pipeline::Arxiv);
+        if len == 0 {
+            return false;
+        }
+        rest = rest[len..].trim_start();
+        images += 1;
+    }
+    images > 0 && rest.is_empty()
 }
 
 /// Byte length of a footnote mark `[^label]` at the start of `s`, or 0.
