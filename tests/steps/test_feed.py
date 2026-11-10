@@ -38,11 +38,31 @@ class FakeBili:
     def __init__(self, *answers) -> None:
         self.answers = list(answers)
         self.urls: list[str] = []
+        self.signed_in: list[bool] = []
 
-    def __call__(self, url: str):
+    def __call__(self, url: str, signed_in: bool = False):
         self.urls.append(url)
+        self.signed_in.append(signed_in)
         status, payload = self.answers.pop(0)
         return status, json.dumps(payload).encode() if isinstance(payload, dict) else payload
+
+
+class Response:
+    """What OPENER.open returns, for tests that go through feed.http_get."""
+
+    status = 200
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self) -> bytes:
+        return self.body
 
 
 class FakeYtdlp:
@@ -184,30 +204,40 @@ class BiliTest(unittest.TestCase):
     def test_sessdata_goes_only_to_api_bilibili(self) -> None:
         sent = []
 
-        class Response:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def read(self):
-                return b"{}"
-
         def fake_open(request, timeout):
             sent.append((request.full_url, request.get_header("Cookie"), request.get_header("Referer")))
-            return Response()
+            return Response(b"{}")
 
         with mock.patch.dict(feed.os.environ, {"FLORI_BILI_SESSDATA": "abc"}), mock.patch.object(feed.OPENER, "open", fake_open):
-            feed.http_get("https://api.bilibili.com/x/v3/fav/resource/list?media_id=1")
-            feed.http_get("https://www.bilibili.com/x")
-            feed.http_get("https://api.bilibili.com.evil.example/x")
-        with mock.patch.dict(feed.os.environ, {"FLORI_BILI_SESSDATA": ""}), mock.patch.object(feed.OPENER, "open", fake_open):
+            feed.http_get("https://api.bilibili.com/x/v3/fav/resource/list?media_id=1", True)
+            feed.http_get("https://www.bilibili.com/x", True)
+            feed.http_get("https://api.bilibili.com.evil.example/x", True)
             feed.http_get("https://api.bilibili.com/x")
-        self.assertEqual([cookie for _, cookie, _ in sent], ["SESSDATA=abc", None, None, None])
+        with mock.patch.dict(feed.os.environ, {"FLORI_BILI_SESSDATA": ""}), mock.patch.object(feed.OPENER, "open", fake_open):
+            feed.http_get("https://api.bilibili.com/x", True)
+        self.assertEqual([cookie for _, cookie, _ in sent], ["SESSDATA=abc", None, None, None, None])
         self.assertTrue(all(referer == "https://space.bilibili.com/" for _, _, referer in sent))
+
+    def test_only_favourites_send_sessdata(self) -> None:
+        cases = [
+            ("bili_up", "https://space.bilibili.com/88461692", "rec.json", None),
+            ("bili_season", "https://space.bilibili.com/1567748478/lists/32744?type=season", "season.json", None),
+            ("bili_series", "https://space.bilibili.com/88461692/lists/1528929?type=series", "series.json", None),
+            ("bili_fav", "https://www.bilibili.com/medialist/detail/ml213003412", "fav.json", "SESSDATA=abc"),
+        ]
+        for kind, url, name, cookie in cases:
+            with self.subTest(kind=kind):
+                sent = []
+
+                def fake_open(request, timeout, name=name):
+                    sent.append((request.host, request.get_header("Cookie")))
+                    return Response((FIXTURES / name).read_bytes())
+
+                with mock.patch.dict(feed.os.environ, {"FLORI_BILI_SESSDATA": "abc"}), mock.patch.object(feed.OPENER, "open", fake_open):
+                    code, listing, _ = run(kind, url, 5, feed.http_get)
+                self.assertEqual(code, 0)
+                self.assertEqual(len(listing["items"]), 5)
+                self.assertEqual(sent, [("api.bilibili.com", cookie)])
 
     def test_sessdata_is_not_carried_across_a_redirect(self) -> None:
         seen = []
@@ -230,7 +260,7 @@ class BiliTest(unittest.TestCase):
 
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), Stub())
         with mock.patch.dict(feed.os.environ, {"FLORI_BILI_SESSDATA": "abc"}), mock.patch.object(feed, "OPENER", opener):
-            self.assertEqual(feed.http_get("https://api.bilibili.com/x/v3/fav/resource/list?media_id=1"), (200, b"{}"))
+            self.assertEqual(feed.http_get("https://api.bilibili.com/x/v3/fav/resource/list?media_id=1", True), (200, b"{}"))
         self.assertEqual([url for url, _ in seen], ["https://api.bilibili.com/x/v3/fav/resource/list?media_id=1", "http://evil.example/collect"])
         self.assertEqual(seen[0][1].get("Cookie"), "SESSDATA=abc")
         self.assertNotIn("Cookie", seen[1][1])

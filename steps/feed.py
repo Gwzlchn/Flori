@@ -51,9 +51,9 @@ class FeedError(Exception):
         self.code = code
 
 
-def http_get(url: str) -> tuple[int, bytes]:
+def http_get(url: str, signed_in: bool = False) -> tuple[int, bytes]:
     request = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://space.bilibili.com/"})
-    sessdata = os.environ.get("FLORI_BILI_SESSDATA", "")
+    sessdata = os.environ.get("FLORI_BILI_SESSDATA", "") if signed_in else ""
     if sessdata and urllib.parse.urlsplit(url).hostname == "api.bilibili.com":
         # Unredirected: urllib copies ordinary headers onto a redirect to any host.
         request.add_unredirected_header("Cookie", f"SESSDATA={sessdata}")
@@ -92,11 +92,14 @@ def day(stamp) -> str | None:
 def bili(kind: str, ids: dict, limit: int, get) -> tuple[str, list[dict]]:
     path, page_size = PAGES[kind]
     ps = min(limit, page_size)
+    # Only a private favourites folder needs the account. Public lists go out anonymously, so
+    # risk control from frequent refreshes lands on the IP and never on the account.
+    signed_in = kind == "bili_fav"
     title, items = "", []
     for pn in range(1, 11):
         if pn > 1:
             time.sleep(1)  # the list endpoints rate-limit by IP
-        data = bili_data(path.format(ps=ps, pn=pn, **ids), get)
+        data = bili_data(path.format(ps=ps, pn=pn, **ids), lambda url: get(url, signed_in))
         raw = data.get("archives") or data.get("medias") or []
         info = data.get("info") or {}
         if kind == "bili_fav" and pn == 1 and not raw and info.get("media_count"):

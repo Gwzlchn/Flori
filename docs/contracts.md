@@ -224,7 +224,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
     | yt_channel | `https://www.youtube.com/@<handle>/videos`,或把 `@<handle>` 换成 `channel/<id>`、`c/<name>`、`user/<name>` |
     | yt_playlist | `https://www.youtube.com/playlist?list=<id>` |
 
-  - B站用 4 个公开 JSON 接口,带 UA 与 Referer,匿名可用;遇到 HTTP 412 或 code -352、-412 时等 5s 重试 1 次。SESSDATA 存在时只发给 api.bilibili.com。
+  - B站用 4 个公开 JSON 接口,带 UA 与 Referer,匿名可用;遇到 HTTP 412 或 code -352、-412 时等 5s 重试 1 次。SESSDATA 只在 bili_fav 的请求里发给 api.bilibili.com,其余三种公开列表匿名请求,频繁刷新触发的风控只落在 IP 上。
   - YouTube 用 `yt-dlp --flat-playlist --playlist-end N --extractor-args youtubetab:approximate_date -J --proxy $FLORI_PROXY`。
   - 除 yt_playlist 按列表顺序、bili_fav 按收藏时间外,其余按发布时间新的在前。
 - 内部接口:`AppState{db, exec, config}`;`ExecHandle::{wake(), cancel(job_id)}`;`pipeline::plan(pipeline, translate) -> Vec<StepSpec>`。
