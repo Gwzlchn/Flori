@@ -201,6 +201,21 @@ BLOCK_TAGS = {
 # A span holding one of these is laid out as a block (LaTeXML wraps tabulars in inline-block spans).
 BLOCK_INSIDE_SPAN = sorted(BLOCK_TAGS - {"li", "dt", "dd"})
 MD_SPECIAL = re.compile(r"([\\`*_$<])")
+# Obsidian reads #word as a tag, [[ as a link, %% as a comment and == as a highlight.
+OBSIDIAN_SPECIAL = re.compile(r"#(?=\S)|\[{2,}|%{2,}|={2,}")
+# List labels LaTeXML writes for plain itemize and enumerate; anything else is the author's \item[...] text.
+PLAIN_LABEL = re.compile(r"[•∙◦▪‣⋅∗–—*-]|\d+\.")
+
+
+def escape(text: str) -> str:
+    text = MD_SPECIAL.sub(r"\\\1", text)
+    return OBSIDIAN_SPECIAL.sub(lambda m: "".join("\\" + c for c in m.group()), text)
+
+
+def fence(code: str) -> str:
+    """A code block whose fence is longer than any backtick run inside it."""
+    mark = "`" * max([3] + [len(run) + 1 for run in re.findall(r"`+", code)])
+    return f"{mark}\n{code}\n{mark}"
 
 
 def tex(math) -> str:
@@ -220,12 +235,23 @@ class Converter:
         self.authors = authors
         self.assets: dict[pathlib.Path, str] = {}
         self.notes: list[str] = []
+        self.notes_written = 0
         self.plain = False
 
     def document(self, article) -> str:
-        parts = self.blocks(article)
-        parts += [f"[^{n}]: {text}" for n, text in enumerate(self.notes, 1)]
-        return "\n\n".join(parts) + "\n"
+        return "\n\n".join(self.blocks(article) + self.note_definitions()) + "\n"
+
+    def note_definitions(self) -> list[str]:
+        """Definitions not written yet. They go before References: translate keeps that section verbatim."""
+        first, self.notes_written = self.notes_written, len(self.notes)
+        return [f"[^{n}]: {text}" for n, text in enumerate(self.notes[first:], first + 1)]
+
+    def plain_text(self, node) -> str:
+        """Inline text without emphasis or links, for headings and list labels."""
+        self.plain = True
+        text = " ".join(self.inline(node).split())
+        self.plain = False
+        return text
 
     def skipped(self, node) -> bool:
         return node.name in SKIP_TAGS or not SKIP_CLASSES.isdisjoint(node.get("class") or ())
@@ -257,16 +283,14 @@ class Converter:
                 else:
                     pending.append(self.inline_tag(child))
             elif isinstance(child, NavigableString) and not isinstance(child, Comment):
-                pending.append(MD_SPECIAL.sub(r"\\\1", str(child)))
+                pending.append(escape(str(child)))
         flush()
         return out
 
     def block(self, node) -> list[str]:
         name, classes = node.name, set(node.get("class") or ())
         if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
-            self.plain = True
-            text = " ".join(self.inline(node).split())
-            self.plain = False
+            text = self.plain_text(node)
             if not text:
                 return []
             if "ltx_title_abstract" in classes:
@@ -275,7 +299,7 @@ class Converter:
                 return [f"**{text}**"]
             out = ["#" * int(name[1]) + " " + text]
             if "ltx_title_document" in classes and self.authors:
-                out.append(", ".join(MD_SPECIAL.sub(r"\\\1", a) for a in self.authors))
+                out.append(", ".join(escape(a) for a in self.authors))
             return out
         if name == "table":
             if classes & {"ltx_equation", "ltx_equationgroup", "ltx_eqn_table"}:
@@ -284,14 +308,15 @@ class Converter:
         if name in {"ul", "ol"}:
             return self.bullet_list(node)
         if name == "pre":
-            return [f"```\n{node.get_text().strip(chr(10))}\n```"]
+            return [fence(node.get_text().strip("\n"))]
         if "ltx_listing" in classes:
             return self.listing(node)
         if name == "blockquote":
             return ["\n".join("> " + line for line in "\n\n".join(self.blocks(node)).split("\n"))]
-        if name == "dt":
-            text = " ".join(self.inline(node).split())
-            return [f"**{text}**"] if text else []
+        if name == "dl":
+            return self.description(node)
+        if "ltx_bibliography" in classes:
+            return self.note_definitions() + self.blocks(node)
         if name == "hr":
             return ["---"]
         return self.blocks(node)
@@ -332,18 +357,37 @@ class Converter:
     def bullet_list(self, node) -> list[str]:
         items = []
         for n, li in enumerate(node.find_all("li", recursive=False), 1):
-            marker = f"{n}. " if node.name == "ol" else "- "
-            body = "\n\n".join(self.blocks(li))
+            tag = li.find(class_="ltx_tag_item", recursive=False)
+            label = self.plain_text(tag) if tag else ""
+            custom = label and not PLAIN_LABEL.fullmatch(label)
+            marker = f"{n}. " if node.name == "ol" and not custom else "- "
+            body = (f"{label} " if custom else "") + "\n\n".join(self.blocks(li))
             items.append(marker + body.replace("\n", "\n" + " " * len(marker)))
         return ["\n".join(items)] if items else []
+
+    def description(self, node) -> list[str]:
+        """dt terms (LaTeXML puts them in an ltx_tag_item span) lead the first paragraph of their dd."""
+        out, term = [], ""
+        for child in node.find_all(["dt", "dd"], recursive=False):
+            if child.name == "dt":
+                if term:
+                    out.append(f"**{term}**")
+                tag = child.find(class_="ltx_tag_item")
+                term = self.plain_text(tag or child)
+                continue
+            parts = self.blocks(child)
+            if term:
+                parts = [f"**{term}** {parts[0]}" if parts else f"**{term}**"] + parts[1:]
+                term = ""
+            out.extend(parts)
+        return out + ([f"**{term}**"] if term else [])
 
     def listing(self, node) -> list[str]:
         for noise in node.select(".ltx_tag_listingline, .ltx_listing_data"):
             noise.decompose()
         lines = node.select(".ltx_listingline") or [node]
         if node.find("math") is None:
-            code = "\n".join(line.get_text().strip("\n") for line in lines)
-            return [f"```\n{code}\n```"]
+            return [fence("\n".join(line.get_text().strip("\n") for line in lines))]
         texts = [" ".join(self.inline(line).split()) for line in lines]
         return ["  \n".join(t for t in texts if t)]
 
@@ -354,7 +398,7 @@ class Converter:
                 if not self.skipped(child):
                     parts.append(self.inline_tag(child))
             elif isinstance(child, NavigableString) and not isinstance(child, Comment):
-                parts.append(MD_SPECIAL.sub(r"\\\1", str(child)))
+                parts.append(escape(str(child)))
         return "".join(parts)
 
     def inline_tag(self, node) -> str:
@@ -376,8 +420,11 @@ class Converter:
             return href if text in ("", href) else f"[{' '.join(self.inline(node).split())}]({href})"
         if name == "code" or ("ltx_font_typewriter" in classes and node.find("math") is None):
             code = " ".join(node.get_text().split())
-            fence = "``" if "`" in code else "`"
-            return f"{fence}{code}{fence}" if code else ""
+            if not code:
+                return ""
+            mark = "`" * max([1] + [len(run) + 1 for run in re.findall(r"`+", code)])
+            pad = " " if code.startswith("`") or code.endswith("`") else ""
+            return f"{mark}{pad}{code}{pad}{mark}"
         inner = self.inline(node)
         if name in {"em", "i"} or "ltx_font_italic" in classes:
             return self.wrap(inner, "*")
@@ -395,7 +442,9 @@ class Converter:
         content = note.select_one(".ltx_note_content")
         if content is None:
             return ""
-        for mark in content.select(".ltx_note_mark, .ltx_tag_note"):
+        # The type prefix ("footnotetext: ", "footnotemark: ") is LaTeXML bookkeeping; a bare
+        # \footnotemark leaves nothing else and is dropped by the empty check below.
+        for mark in content.select(".ltx_note_mark, .ltx_tag_note, .ltx_note_type"):
             mark.decompose()
         text = " ".join(self.inline(content).split())
         if not text:

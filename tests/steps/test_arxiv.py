@@ -156,6 +156,7 @@ class FetchConvertTest(unittest.TestCase):
                 self.assertIn("\n1. A *conditional generative* model $p(\\bm{x}\\mid\\bm{c})$", md)
                 self.assertIn("**for** number of training iterations **do**  \n", md)
                 self.assertIn("| ![](assets/mnist_samples.png) | ![](assets/tfd_samples.png) |", md)
+                self.assertLess(md.index("\n[^1]: All code and hyperparameters"), md.index("\n## References\n"))
 
     def test_no_html_anywhere_is_permanent(self) -> None:
         cases = {
@@ -185,6 +186,38 @@ class FetchConvertTest(unittest.TestCase):
                 with self.assertRaises(arxiv.StepError) as caught:
                     arxiv.fetch(job, job / "steps/01-arxiv-fetch", FakeWeb(pages))
                 self.assertEqual(caught.exception.code, arxiv.RETRY)
+
+    def test_api_answers_and_version_source(self) -> None:
+        page = "https://arxiv.org/html/2305.18290"
+        html = fixture("2305.18290.html").decode()
+        atom = fixture("2305.18290.atom.xml").decode()
+        feed_of = '<feed xmlns="http://www.w3.org/2005/Atom">{}</feed>'.format
+        error_entry = feed_of("<entry><id>http://arxiv.org/api/errors#incorrect_id_format_for_2305.18290</id><title>Error</title></entry>")
+        for name, answer, code in (
+            ("error entry", (200, "", error_entry.encode()), arxiv.PERMANENT),
+            ("http 400", (400, "", b"bad id"), arxiv.PERMANENT),
+            ("empty feed", (200, "", feed_of("").encode()), arxiv.RETRY),
+            ("not xml", (200, "", b"<html>busy"), arxiv.RETRY),
+        ):
+            with self.subTest(name):
+                job = make_job(pathlib.Path(tempfile.mkdtemp(dir=self.root)), "2305.18290")
+                web = FakeWeb({page: ok(page, "2305.18290.html"), API + "2305.18290": answer})
+                with self.assertRaises(arxiv.StepError) as caught:
+                    arxiv.fetch(job, job / "steps/01-arxiv-fetch", web)
+                self.assertEqual(caught.exception.code, code)
+
+        for name, page_version, api_version, expected in (
+            ("page wins", "v2", "v3", "v2"),
+            ("api fills in", "", "v3", "v3"),
+            ("neither", "", "", None),
+        ):
+            with self.subTest(name):
+                body = html.replace("2305.18290v3", "2305.18290" + page_version).encode()
+                api = atom.replace("2305.18290v3</id>", f"2305.18290{api_version}</id>").encode()
+                web = FakeWeb({page: (200, page, body), API + "2305.18290": (200, "", api)})
+                job = make_job(pathlib.Path(tempfile.mkdtemp(dir=self.root)), "2305.18290")
+                self.assertEqual(arxiv.fetch(job, job / "steps/01-arxiv-fetch", web), 0)
+                self.assertEqual(manifest(job / "steps/01-arxiv-fetch")["meta"].get("version"), expected)
 
     def test_http_get_maps_server_errors_to_retry(self) -> None:
         error = urllib.error.HTTPError("https://arxiv.org/html/x", 503, "busy", {}, None)
@@ -226,6 +259,92 @@ class FetchConvertTest(unittest.TestCase):
             "# T\n\nA. Author\n\nCost \\$5 and a\\_b \\*x\\* \\<eos>.\n\n- (1) A. Author. *Venue*, 2023.\n\n- first\n- second\n\n"
             "![](assets/fig.png)![](assets/fig-2.png)![](assets/fig.png)\n",
         )
+
+
+def fenced_lines(md: str) -> list[bool]:
+    """For each line, whether it sits inside a fenced code block (CommonMark backtick fences)."""
+    inside, opener, flags = False, "", []
+    for line in md.split("\n"):
+        run = len(line) - len(line.lstrip("`"))
+        if not inside and run >= 3 and "`" not in line[run:]:
+            inside, opener = True, "`" * run
+            flags.append(True)
+        elif inside and line.strip().startswith(opener) and not line.strip().strip("`"):
+            inside = False
+            flags.append(True)
+        else:
+            flags.append(inside)
+    return flags
+
+
+@unittest.skipIf(arxiv.BeautifulSoup is None, "beautifulsoup4/lxml missing; install steps/requirements.txt")
+class ConvertMarkupTest(unittest.TestCase):
+    def convert(self, body: str) -> str:
+        with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
+            job = make_job(pathlib.Path(tmp), "2401.00001")
+            fetched = job / "steps/01-arxiv-fetch"
+            (fetched / "page.html").write_text(f'<html><body><article class="ltx_document">{body}</article></body></html>')
+            arxiv.write_manifest(fetched, "T", {"page": "page.html"}, [], {})
+            self.assertEqual(arxiv.convert(job, job / "steps/02-arxiv-convert"), 0)
+            return (job / "steps/02-arxiv-convert/original.md").read_text()
+
+    def test_code_with_backticks_keeps_its_fence(self) -> None:
+        lines = ["```python", "print(1)", "```", '&lt;iframe src="https://example.org"&gt;']
+        md = self.convert(
+            '<div class="ltx_listing">'
+            + "".join(f'<div class="ltx_listingline"><span class="ltx_tag ltx_tag_listingline">{n}</span>{text}</div>' for n, text in enumerate(lines, 1))
+            + '</div><pre class="ltx_verbatim ltx_font_typewriter">Reply as ```json\n{"a": 1}\n```\n&lt;img src=x&gt;</pre>'
+            '<div class="ltx_para"><p class="ltx_p">Use <code>a``b</code> and <code>`x</code> here.</p></div>'
+            '<div class="ltx_para"><p class="ltx_p">After the code.</p></div>'
+        )
+        rows = md.split("\n")
+        flags = fenced_lines(md)
+        for marker in ("<iframe", "<img", "print(1)", '{"a": 1}'):
+            hits = [i for i, row in enumerate(rows) if marker in row]
+            self.assertTrue(hits and all(flags[i] for i in hits), (marker, md))
+        self.assertFalse(flags[rows.index("After the code.")], md)
+        self.assertIn("Use ```a``b``` and `` `x `` here.", md)
+        self.assertNotIn("\n1```python", md)
+
+    def test_description_terms_and_custom_item_labels(self) -> None:
+        md = self.convert(
+            '<dl class="ltx_description">'
+            '<dt class="ltx_item"><span class="ltx_tag ltx_tag_item"><span class="ltx_text ltx_font_bold">Offline RL:</span></span></dt>'
+            '<dd class="ltx_item"><div class="ltx_para"><p class="ltx_p">learns from a fixed dataset.</p></div></dd>'
+            '<dt class="ltx_item"><span class="ltx_tag ltx_tag_item"><span class="ltx_text ltx_font_bold">Online RL:</span></span></dt>'
+            '<dd class="ltx_item"><div class="ltx_para"><p class="ltx_p">interacts.</p></div></dd></dl>'
+            '<ul class="ltx_itemize"><li class="ltx_item"><span class="ltx_tag ltx_tag_item">Q1:</span>'
+            '<div class="ltx_para"><p class="ltx_p">Does it work?</p></div></li>'
+            '<li class="ltx_item"><span class="ltx_tag ltx_tag_item">•</span><div class="ltx_para"><p class="ltx_p">plain</p></div></li></ul>'
+            '<ol class="ltx_enumerate"><li class="ltx_item"><span class="ltx_tag ltx_tag_item">1.</span>'
+            '<div class="ltx_para"><p class="ltx_p">numbered</p></div></li></ol>'
+        )
+        self.assertIn("**Offline RL:** learns from a fixed dataset.\n\n**Online RL:** interacts.", md)
+        self.assertIn("- Q1: Does it work?\n- plain\n", md)
+        self.assertIn("\n1. numbered\n", md)
+
+    def test_footnote_type_prefixes_and_bare_marks_are_dropped(self) -> None:
+        md = self.convert(
+            '<div class="ltx_para"><p class="ltx_p">Text'
+            '<span class="ltx_note ltx_role_footnotetext"><sup class="ltx_note_mark">0</sup><span class="ltx_note_outer">'
+            '<span class="ltx_note_content"><sup class="ltx_note_mark">0</sup><span class="ltx_note_type">footnotetext: </span>'
+            'Compared to V1, this draft adds baselines.</span></span></span> and'
+            '<span class="ltx_note ltx_role_footnotemark"><sup class="ltx_note_mark">1</sup><span class="ltx_note_outer">'
+            '<span class="ltx_note_content"><sup class="ltx_note_mark">1</sup><span class="ltx_note_type">footnotemark: </span>'
+            '<span class="ltx_tag ltx_tag_note">1</span></span></span></span> more.</p></div>'
+        )
+        self.assertIn("[^1]: Compared to V1, this draft adds baselines.", md)
+        for noise in ("footnotetext:", "footnotemark:", "[^2]"):
+            self.assertNotIn(noise, md)
+
+    def test_obsidian_syntax_in_text_is_escaped(self) -> None:
+        md = self.convert(
+            '<table class="ltx_tabular"><tr class="ltx_tr"><th class="ltx_td">#Params</th><th class="ltx_td">Acc</th></tr>'
+            '<tr class="ltx_tr"><td class="ltx_td">7B</td><td class="ltx_td">1</td></tr></table>'
+            '<div class="ltx_para"><p class="ltx_p">We count #tokens and 50%% here, see [[x]] ==hl== and C# 1.</p></div>'
+        )
+        self.assertIn("| \\#Params | Acc |", md)
+        self.assertIn("We count \\#tokens and 50\\%\\% here, see \\[\\[x]] \\=\\=hl\\=\\= and C# 1.", md)
 
 
 class CliTest(unittest.TestCase):
