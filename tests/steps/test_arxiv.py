@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -129,7 +130,7 @@ class FetchConvertTest(unittest.TestCase):
             "\n**Lemma 1.**\n",
             "\n![](assets/teaser.png)\n",
             "\n| DPO | 0.36 | 0.31 |\n",
-            "\n## References\n\n- [1] Y. Bai, A. Jones",
+            "\n## References\n\n- \\[1\\] Y. Bai, A. Jones",
             "```\nimport torch.nn.functional as F\n",
             "summaries[^1] with",
             "\n[^1]: https://huggingface.co/CarperAI/openai_summarize_tldr_sft\n",
@@ -259,6 +260,11 @@ class FetchConvertTest(unittest.TestCase):
             "# T\n\nA. Author\n\nCost \\$5 and a\\_b \\*x\\* \\<eos>.\n\n- (1) A. Author. *Venue*, 2023.\n\n- first\n- second\n\n"
             "![](assets/fig.png)![](assets/fig-2.png)![](assets/fig.png)\n",
         )
+
+
+def raw_brackets(md: str) -> list[int]:
+    """Offsets of [ and ] that no backslash escapes (an even run of backslashes before them)."""
+    return [m.start(2) for m in re.finditer(r"(\\*)([\[\]])", md) if len(m.group(1)) % 2 == 0]
 
 
 def fenced_lines(md: str) -> list[bool]:
@@ -447,7 +453,34 @@ class ConvertMarkupTest(unittest.TestCase):
             '<div class="ltx_para"><p class="ltx_p">We count #tokens and 50%% here, see [[x]] ==hl== and C# 1.</p></div>'
         )
         self.assertIn("| \\#Params | Acc |", md)
-        self.assertIn("We count \\#tokens and 50\\%\\% here, see \\[\\[x]] \\=\\=hl\\=\\= and C# 1.", md)
+        self.assertIn("We count \\#tokens and 50\\%\\% here, see \\[\\[x\\]\\] \\=\\=hl\\=\\= and C# 1.", md)
+
+    def test_links_and_images_written_in_text_stay_text(self) -> None:
+        text = 'See ![x](https://a/p.png), [t](obsidian://x) and C:\\[w](https://a/w) now.'
+        md = self.convert(f'<div class="ltx_para"><p class="ltx_p">{text}</p></div>'
+                          f'<table class="ltx_tabular"><tr class="ltx_tr"><td class="ltx_td">{text}</td></tr></table>')
+        self.assertIn("See \\!\\[x\\](https://a/p.png), \\[t\\](obsidian://x) and C:\\\\\\[w\\](https://a/w) now.", md)
+        # CommonMark and Obsidian open a link or an image only at an unescaped "[".
+        self.assertEqual(raw_brackets(md), [], md)
+
+    def test_own_markup_survives_escaping(self) -> None:
+        md = self.convert(
+            '<div class="ltx_para"><p class="ltx_p">Wow!<span class="ltx_note ltx_role_footnote"><span class="ltx_note_outer">'
+            '<span class="ltx_note_content">A [note]!</span></span></span> '
+            '<a href="https://a/b">site [1]</a>! <math alttext="x_{[i]}!"></math><img src="res/x.png"/></p></div>'
+        )
+        self.assertIn("Wow\\![^1] [site \\[1\\]](https://a/b)\\! $x_{[i]}!$![](assets/x.png)", md)
+        self.assertIn("[^1]: A \\[note\\]\\!", md)
+
+    def test_link_targets_with_spaces_and_parentheses_stay_one_link(self) -> None:
+        md = self.convert(
+            '<div class="ltx_para"><p class="ltx_p">'
+            '<a href="https://en.wikipedia.org/wiki/Foo_(bar) baz?q=a b#s">Foo</a> then '
+            '<a href="https://a/x)[t](obsidian://y">trap</a> then '
+            '<a href="https://a/b (c)">https://a/b (c)</a> end.</p></div>'
+        )
+        self.assertIn("[Foo](https://en.wikipedia.org/wiki/Foo_%28bar%29%20baz?q=a%20b#s) then "
+                      "[trap](https://a/x%29%5Bt%5D%28obsidian://y) then https://a/b%20%28c%29 end.", md)
 
 
 class CliTest(unittest.TestCase):

@@ -624,6 +624,22 @@ fn inline_spans_become_placeholders_and_come_back() {
 }
 
 #[test]
+fn escaped_citations_from_arxiv_convert_are_placeholders() {
+    let text =
+        "As in \\[11, 7\\] and \\[3, 5–7\\], not \\[x\\] or \\!\\[a\\](https://e.org/p.png).";
+    let seg = protect(text, Pipeline::Arxiv);
+    assert_eq!(
+        seg.text,
+        "As in ⟦0⟧ and ⟦1⟧, not \\[x\\] or \\!\\[a\\](⟦2⟧)."
+    );
+    assert_eq!(
+        seg.spans,
+        ["\\[11, 7\\]", "\\[3, 5–7\\]", "https://e.org/p.png"]
+    );
+    assert_eq!(seg.restore(&seg.text), text);
+}
+
+#[test]
 fn speech_gets_no_placeholders() {
     let text = "ChatGPT Plus costs $20 a month and Pro costs $200 a month, see `docs` [3].";
     let seg = protect(text, Pipeline::Video);

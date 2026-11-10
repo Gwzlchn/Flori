@@ -419,15 +419,28 @@ fn span_len(s: &str, pipeline: Pipeline) -> usize {
     if s.starts_with('[') {
         // Footnote marks such as [^2], and numeric citations such as [12] or [3, 5–7].
         let Some(end) = s.find(']') else { return 0 };
-        let inner = &s[1..end];
-        let numeric = inner
-            .chars()
-            .all(|c| c.is_ascii_digit() || ", -–".contains(c));
-        if footnote_mark(s) > 0 || (numeric && inner.chars().any(|c| c.is_ascii_digit())) {
+        if footnote_mark(s) > 0 || citation(&s[1..end]) {
             return end + 1;
         }
     }
+    if let Some(rest) = s.strip_prefix("\\[") {
+        // arxiv-convert escapes every bracket of the paper text, so its citations read \[12\].
+        let Some(end) = rest.find("\\]") else {
+            return 0;
+        };
+        if citation(&rest[..end]) {
+            return end + 4;
+        }
+    }
     0
+}
+
+/// The inside of a numeric citation such as [12] or [3, 5–7].
+fn citation(inner: &str) -> bool {
+    inner
+        .chars()
+        .all(|c| c.is_ascii_digit() || ", -–".contains(c))
+        && inner.chars().any(|c| c.is_ascii_digit())
 }
 
 /// A unit of original.md, mostly blank-line separated. Kept blocks are copied verbatim: code

@@ -200,9 +200,12 @@ BLOCK_TAGS = {
 }
 # A span holding one of these is laid out as a block (LaTeXML wraps tabulars in inline-block spans).
 BLOCK_INSIDE_SPAN = sorted(BLOCK_TAGS - {"li", "dt", "dd"})
-MD_SPECIAL = re.compile(r"([\\`*_$<])")
-# Obsidian reads #word as a tag, [[ as a link, %% as a comment and == as a highlight.
-OBSIDIAN_SPECIAL = re.compile(r"#(?=\S)|\[{2,}|%{2,}|={2,}")
+# Every bracket in paper text is escaped, so text can never open a link, an image or an Obsidian
+# [[link]]; only this converter writes those. "!" is escaped as well: a text "!" right before
+# a footnote mark or link written here would turn it into an image.
+MD_SPECIAL = re.compile(r"([\\`*_$<!\[\]])")
+# Obsidian reads #word as a tag, %% as a comment and == as a highlight.
+OBSIDIAN_SPECIAL = re.compile(r"#(?=\S)|%{2,}|={2,}")
 # List labels LaTeXML writes for plain itemize and enumerate; anything else is the author's \item[...] text.
 PLAIN_LABEL = re.compile(r"[•·∙◦▪‣⋅∗–—*-]|\d+\.")
 # Blocks that must start their own line: code, tables, lists, quotes, display math, images, headings.
@@ -214,6 +217,12 @@ BLOCK_START = re.compile(r"[#>+|-]|~~~|([0-9]{1,9})([.)])(?=\s|$)")
 def escape(text: str) -> str:
     text = MD_SPECIAL.sub(r"\\\1", text)
     return OBSIDIAN_SPECIAL.sub(lambda m: "".join("\\" + c for c in m.group()), text)
+
+
+def link_target(href: str) -> str:
+    """The URL with everything but plain URL characters percent-encoded. Spaces, parentheses,
+    brackets and backslashes would end the link early or split it into text plus a second link."""
+    return urllib.parse.quote(href, safe=":/?#&=+,;@%")
 
 
 def literal_start(line: str) -> str:
@@ -442,7 +451,8 @@ class Converter:
         href = node.get("href", "") if name == "a" else ""
         if href.startswith(("http://", "https://")) and not self.plain:
             text = node.get_text(" ", strip=True)
-            return href if text in ("", href) else f"[{' '.join(self.inline(node).split())}]({href})"
+            target = link_target(href)
+            return target if text in ("", href) else f"[{' '.join(self.inline(node).split())}]({target})"
         if name == "code" or ("ltx_font_typewriter" in classes and node.find("math") is None):
             code = " ".join(node.get_text().split())
             if not code:
