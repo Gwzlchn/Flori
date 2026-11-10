@@ -662,6 +662,8 @@ async fn detail_merges_manifests_and_builds_the_obsidian_link() {
     );
     assert_eq!(detail["steps"][4]["skipped_reason"], "chinese");
     assert_eq!(detail["steps"][0]["skipped_reason"], Value::Null);
+    // Only meta.punctuated makes a translate step report punctuation.
+    assert_eq!(detail["steps"][4]["punctuation"], Value::Null);
     assert_eq!(detail["preview_base"], "/api/jobs/1/files/");
     assert_eq!(detail["job_url"], "http://nas.lan:8780/jobs/1");
     assert_eq!(
