@@ -361,6 +361,27 @@ class ConvertMarkupTest(unittest.TestCase):
         self.assertIn("**Table:**\n\n| a | b |\n", md)
         self.assertIn("- Prompt:\n  \n  ````\n  ```html\n  <img", md)
 
+    def test_list_item_starting_with_a_block_puts_the_marker_alone(self) -> None:
+        bullet = '<span class="ltx_tag ltx_tag_item">•</span>'
+        listing = ('<div class="ltx_listing"><div class="ltx_listingline">&lt;img src=x onerror=alert(1)&gt;</div>'
+                   '<div class="ltx_listingline">```</div><div class="ltx_listingline">print(1)</div></div>')
+        md = self.convert(
+            f'<ul class="ltx_itemize"><li class="ltx_item">{bullet}{listing}</li>'
+            f'<li class="ltx_item">{bullet}<div class="ltx_para"><p class="ltx_p">prose item</p></div></li></ul>'
+            '<ol class="ltx_enumerate"><li class="ltx_item"><span class="ltx_tag ltx_tag_item">1.</span>'
+            '<table class="ltx_tabular"><tr class="ltx_tr"><td class="ltx_td">a</td><td class="ltx_td">b</td></tr></table></li></ol>'
+            '<div class="ltx_para"><p class="ltx_p">After.</p></div>'
+        )
+        self.assertIn("\n-\n  ````\n  <img src=x onerror=alert(1)>\n  ```\n  print(1)\n  ````\n- prose item\n", md)
+        self.assertIn("\n1.\n   | a | b |\n   | --- | --- |\n", md)
+        rows, flags = md.split("\n"), fenced_lines(md)
+        for marker in ("<img", "print(1)"):
+            hits = [i for i, row in enumerate(rows) if marker in row]
+            self.assertTrue(hits and all(flags[i] for i in hits), (marker, md))
+        for prose in ("- prose item", "After.", "| a | b |"):
+            hits = [i for i, row in enumerate(rows) if row.strip() == prose]
+            self.assertTrue(hits and not any(flags[i] for i in hits), (prose, md))
+
     def test_prose_starting_like_a_block_stays_prose(self) -> None:
         starts = ["# of samples is 10k.", "> 0 always.", "- 1 is negative.", "+ 1 more.", "2010. The first release.",
                   "3) third.", "~~~ waves", "| a | b"]

@@ -379,7 +379,11 @@ class Converter:
             parts = self.blocks(li)
             if custom:
                 parts = self.lead(label, parts)
-            items.append(marker + "\n\n".join(parts).replace("\n", "\n" + " " * len(marker)))
+            pad = " " * len(marker)
+            # A code fence, table or other block must start its own line: the marker stands alone
+            # and the block follows directly (a blank line here would end the item).
+            start = marker if not parts or not NOT_PROSE.match(parts[0]) else marker.rstrip() + "\n" + pad
+            items.append(start + "\n\n".join(parts).replace("\n", "\n" + pad))
         return ["\n".join(items)] if items else []
 
     def description(self, node) -> list[str]:
