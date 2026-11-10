@@ -388,6 +388,8 @@ async fn files_stay_inside_the_job_and_support_range() {
             .collect();
         policies == ["sandbox allow-same-origin; frame-ancestors 'none'"]
             && headers[header::X_CONTENT_TYPE_OPTIONS] == "nosniff"
+            && headers[header::CACHE_CONTROL] == "no-store"
+            && headers[header::REFERRER_POLICY] == "no-referrer"
     };
     assert!(sandboxed(&headers), "range response");
     let (status, headers, _) = app
@@ -963,32 +965,49 @@ fn browser(method: &str, uri: &str, headers: &[(&str, &str)]) -> HttpRequest<Axu
 }
 
 #[tokio::test]
-async fn every_response_forbids_framing() {
+async fn every_response_carries_the_security_headers() {
     let app = app().await;
-    let anonymous = HttpRequest::builder()
-        .uri("/api/jobs")
-        .body(AxumBody::empty())
-        .unwrap();
-    let health = HttpRequest::builder()
-        .uri("/api/health")
-        .body(AxumBody::empty())
-        .unwrap();
+    let anonymous = |uri: &str| {
+        HttpRequest::builder()
+            .uri(uri)
+            .body(AxumBody::empty())
+            .unwrap()
+    };
+    let page = "default-src 'self'; img-src 'self' data:; media-src 'self'; \
+        style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; \
+        form-action 'self'; frame-ancestors 'none'";
     let cross_post = browser("POST", "/api/domains", &[("sec-fetch-site", "cross-site")]);
+    let framed_page = browser("GET", "/jobs/1", &[("sec-fetch-dest", "iframe")]);
+    let no_route = browser("GET", "/api/nope", &[]);
     for (what, req, expected) in [
         ("page", browser("GET", "/", &[]), StatusCode::OK),
+        ("spa route", browser("GET", "/jobs/1", &[]), StatusCode::OK),
+        ("asset", browser("GET", "/app.js", &[]), StatusCode::OK),
+        ("page 401", anonymous("/"), StatusCode::UNAUTHORIZED),
+        ("page 403", framed_page, StatusCode::FORBIDDEN),
         ("api", browser("GET", "/api/jobs", &[]), StatusCode::OK),
-        ("401", anonymous, StatusCode::UNAUTHORIZED),
-        ("403", cross_post, StatusCode::FORBIDDEN),
-        ("health", health, StatusCode::OK),
+        ("api 404", no_route, StatusCode::NOT_FOUND),
+        ("api 401", anonymous("/api/jobs"), StatusCode::UNAUTHORIZED),
+        ("api 403", cross_post, StatusCode::FORBIDDEN),
+        ("health", anonymous("/api/health"), StatusCode::OK),
     ] {
         let (status, headers, _) = app.send(req).await;
         assert_eq!(status, expected, "{what}");
         assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY", "{what}");
+        assert_eq!(headers[header::REFERRER_POLICY], "no-referrer", "{what}");
         let policies: Vec<_> = headers
             .get_all(header::CONTENT_SECURITY_POLICY)
             .iter()
             .collect();
-        assert_eq!(policies, ["frame-ancestors 'none'"], "{what}");
+        let api = what.starts_with("api") || what == "health";
+        let policy = if api { "frame-ancestors 'none'" } else { page };
+        assert_eq!(policies, [policy], "{what}");
+        let cache: Vec<_> = headers.get_all(header::CACHE_CONTROL).iter().collect();
+        if api {
+            assert_eq!(cache, ["no-store"], "{what}");
+        } else {
+            assert!(cache.is_empty(), "{what}: static files keep their caching");
+        }
     }
 }
 

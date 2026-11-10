@@ -192,7 +192,11 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
   - 其它路径下 `Sec-Fetch-Site` 为 cross-site 或 same-site,且不是顶层导航(`Sec-Fetch-Mode: navigate` 与 `Sec-Fetch-Dest: document`)。笔记里的 job_url 因此仍能打开。
   - GET/HEAD 以外的方法,`Sec-Fetch-Site` 不是 same-origin 或 none,或 `Origin` 与 `Host` 不符。
   - 不带 `Sec-Fetch-*` 的请求(curl、局域网 http)只受最后一条约束。
-- 所有响应(含 401、403 与 /api/health)带 `X-Frame-Options: DENY`;响应自己没有 CSP 时另带 `Content-Security-Policy: frame-ancestors 'none'`。
+- 响应头,含 401、403 与 /api/health:
+  - 所有响应带 `X-Frame-Options: DENY` 与 `Referrer-Policy: no-referrer`。在它之下原生表单 POST 的 `Origin` 是 null,会被上面的 Origin 检查拒绝,所以前端的写操作只用 fetch。
+  - 静态页面与资源带 `Content-Security-Policy: default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`。markdown-it 的表格对齐输出 style 属性,所以只有样式允许 inline;笔记里其它主机的图片不加载。
+  - /api 下的响应带 `Cache-Control: no-store`;响应自己没有 CSP 时带 `Content-Security-Policy: frame-ancestors 'none'`。
+  - 每个响应只有一个 CSP 值:浏览器会同时执行多个 CSP 头,不会合并。
 - 401 与 403 不在错误码集合里,也不写进 OpenAPI。
 - 错误体 `{code, message, job_id?}`。code 是封闭集合:invalid_url、invalid_name、invalid_request(400),not_found(404),conflict(409),upstream(502)。job_id 只在重复投递的 conflict 里出现。
 - 请求体不允许未知字段。

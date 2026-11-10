@@ -10,8 +10,8 @@ use axum::{
     http::{
         HeaderValue, Method, StatusCode,
         header::{
-            AUTHORIZATION, CONTENT_SECURITY_POLICY, HOST, ORIGIN, WWW_AUTHENTICATE,
-            X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+            AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, HOST, ORIGIN, REFERRER_POLICY,
+            WWW_AUTHENTICATE, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
         },
         request::Parts,
     },
@@ -55,6 +55,12 @@ const FEED_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const FEED_INTERVAL: Duration = Duration::from_millis(300);
 const LOG_CHUNK: u64 = 256 * 1024;
+/// CSP of the SPA's pages. markdown-it writes table alignment as `style` attributes, hence
+/// 'unsafe-inline' for styles but not scripts; its images may be data: URLs. Images on other
+/// hosts stay unloaded, so previewing an untrusted note does not reveal the reader to them.
+const PAGE_POLICY: &str = "default-src 'self'; img-src 'self' data:; media-src 'self'; \
+    style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; \
+    frame-ancestors 'none'";
 
 #[derive(Clone)]
 pub struct AppState {
@@ -111,6 +117,7 @@ pub fn router(state: AppState) -> Router {
 /// framed page can be clicked through by its parent. LAN http and curl send no `Sec-Fetch-*`
 /// headers; for them the response headers and the Origin check on writes remain.
 async fn guard(req: Request, next: Next) -> Response {
+    let api = is_api(req.uri().path());
     let mut res = if foreign(&req) {
         (StatusCode::FORBIDDEN, "cross-site request refused").into_response()
     } else {
@@ -118,10 +125,28 @@ async fn guard(req: Request, next: Next) -> Response {
     };
     let headers = res.headers_mut();
     headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    // The files route sets its own sandbox policy, which already forbids framing.
-    let no_frames = HeaderValue::from_static("frame-ancestors 'none'");
-    headers.entry(CONTENT_SECURITY_POLICY).or_insert(no_frames);
+    // Page addresses name this server and the job; sites that links point to must not see them.
+    // A native form POST then carries `Origin: null` and is refused as foreign; the SPA writes
+    // with fetch, whose cors mode keeps the real Origin.
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    // The files route sets its own sandbox policy, which already forbids framing. A second CSP
+    // header would be enforced as well, so the default only fills in a missing one.
+    let policy = if api {
+        "frame-ancestors 'none'"
+    } else {
+        PAGE_POLICY
+    };
+    let policy = HeaderValue::from_static(policy);
+    headers.entry(CONTENT_SECURITY_POLICY).or_insert(policy);
+    if api {
+        // Basic Auth has no logout: notes and video must not stay in a borrowed device's cache.
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     res
+}
+
+fn is_api(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
 }
 
 fn foreign(req: &Request) -> bool {
@@ -132,8 +157,7 @@ fn foreign(req: &Request) -> bool {
     let framed = matches!(dest, Some("iframe" | "frame" | "embed" | "object"));
     // Only a top-level navigation may come from elsewhere, so job_url links in notes open.
     let navigation = header("sec-fetch-mode") == Some("navigate") && dest == Some("document");
-    let path = req.uri().path();
-    let api = path == "/api" || path.starts_with("/api/");
+    let api = is_api(req.uri().path());
     let write = !matches!(*req.method(), Method::GET | Method::HEAD);
     let write_site = site.is_some_and(|site| site != "same-origin" && site != "none");
     let write_origin = header(ORIGIN.as_str()).is_some_and(|origin| {
