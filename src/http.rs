@@ -1,6 +1,12 @@
 //! Routes, Basic Auth, static files with SPA fallback, job file preview with Range, feed listing.
 
-use std::{collections::BTreeMap, io, io::SeekFrom, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io,
+    io::SeekFrom,
+    sync::{Arc, PoisonError},
+    time::Duration,
+};
 
 use axum::{
     Extension, Json, Router,
@@ -55,6 +61,14 @@ const FEED_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const FEED_INTERVAL: Duration = Duration::from_millis(300);
 const LOG_CHUNK: u64 = 256 * 1024;
+/// Wrong credentials are counted per window. Past the limit each further one is answered after
+/// the delay, so a guesser gets one try per delay on each connection it holds. The delay is fixed
+/// and nothing is locked: the user's own requests share the count.
+const FAILURE_WINDOW: Duration = Duration::from_secs(60);
+const FAILURE_LIMIT: u32 = 10;
+const FAILURE_DELAY: Duration = Duration::from_secs(2);
+/// Characters of the path kept in an auth failure line, so long paths cannot flood the log.
+const LOGGED_PATH: usize = 200;
 /// CSP of the SPA's pages. markdown-it writes table alignment as `style` attributes, hence
 /// 'unsafe-inline' for styles but not scripts; its images may be data: URLs. Images on other
 /// hosts stay unloaded, so previewing an untrusted note does not reveal the reader to them.
@@ -76,7 +90,7 @@ pub struct FeedRefresh(Arc<Mutex<Option<Instant>>>);
 
 pub fn router(state: AppState) -> Router {
     let credentials = format!("{}:{}", state.config.web_user, state.config.web_password);
-    let expected: [u8; 32] = Sha256::digest(credentials).into();
+    let auth = Auth::new(&credentials);
     let web = ServeDir::new(&state.config.static_dir)
         .fallback(ServeFile::new(state.config.static_dir.join("index.html")));
     Router::new()
@@ -104,7 +118,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/{*rest}", any(no_route))
         .fallback_service(web)
         .layer(Extension(FeedRefresh::default()))
-        .layer(middleware::from_fn_with_state(expected, basic_auth))
+        .layer(middleware::from_fn_with_state(auth, basic_auth))
         // Added after the auth layer, so it is the one route without it.
         .route("/api/health", get(health))
         // Outermost, so 401, 403 and health responses carry its headers too.
@@ -166,27 +180,91 @@ fn foreign(req: &Request) -> bool {
     framed || (other_site && (api || !navigation)) || (write && (write_site || write_origin))
 }
 
-/// Compares digests of the whole `user:password`, so neither length nor prefix leaks.
-async fn basic_auth(State(expected): State<[u8; 32]>, req: Request, next: Next) -> Response {
-    let given = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
+/// Digest of the expected `user:password` and the start and size of the current failure window.
+/// The window is shared by all clients: every public request arrives from the ECS forwarder's
+/// address, so counting or locking out per address would hit the user as well.
+#[derive(Clone)]
+struct Auth {
+    expected: [u8; 32],
+    failures: Arc<std::sync::Mutex<Option<(Instant, u32)>>>,
+}
+
+impl Auth {
+    /// `credentials` is `user:password`, as Basic Auth sends it.
+    fn new(credentials: &str) -> Auth {
+        Auth {
+            expected: Sha256::digest(credentials).into(),
+            failures: Arc::default(),
+        }
+    }
+
+    /// Records one wrong attempt and returns how many the current window holds.
+    fn fail(&self) -> u32 {
+        let now = Instant::now();
+        let mut failures = self.failures.lock().unwrap_or_else(PoisonError::into_inner);
+        let (start, count) = failures.get_or_insert((now, 0));
+        if now.duration_since(*start) >= FAILURE_WINDOW {
+            (*start, *count) = (now, 0);
+        }
+        *count = count.saturating_add(1);
+        *count
+    }
+}
+
+/// Compares digests of the whole `user:password`, so neither length nor prefix leaks. A request
+/// without Authorization is a browser's first try, answered so it asks the user; only wrong
+/// credentials are logged and counted. Correct ones never touch the count or wait.
+async fn basic_auth(State(auth): State<Auth>, req: Request, next: Next) -> Response {
+    let Some(given) = req.headers().get(AUTHORIZATION) else {
+        return challenge();
+    };
+    let digest = given
+        .to_str()
+        .ok()
         .and_then(|v| v.strip_prefix("Basic "))
         .and_then(|v| BASE64.decode(v.trim()).ok())
         .map(|credentials| <[u8; 32]>::from(Sha256::digest(credentials)));
-    let ok = given.is_some_and(|given| {
-        let diff = given
+    let ok = digest.is_some_and(|digest| {
+        let diff = digest
             .iter()
-            .zip(&expected)
+            .zip(&auth.expected)
             .fold(0, |acc, (a, b)| acc | (a ^ b));
         std::hint::black_box(diff) == 0
     });
-    if !ok {
-        let challenge = [(WWW_AUTHENTICATE, "Basic realm=\"flori\", charset=\"UTF-8\"")];
-        return (StatusCode::UNAUTHORIZED, challenge).into_response();
+    if ok {
+        return next.run(req).await;
     }
-    next.run(req).await
+    let failures = auth.fail();
+    let (line, window) = (refused(&req), FAILURE_WINDOW.as_secs());
+    if failures > FAILURE_LIMIT {
+        let delay = FAILURE_DELAY.as_secs();
+        eprintln!("flori: {line}, {failures} in {window}s, delayed {delay}s");
+        tokio::time::sleep(FAILURE_DELAY).await;
+    } else {
+        eprintln!("flori: {line}, {failures} in {window}s");
+    }
+    challenge()
+}
+
+fn challenge() -> Response {
+    let challenge = [(WWW_AUTHENTICATE, "Basic realm=\"flori\", charset=\"UTF-8\"")];
+    (StatusCode::UNAUTHORIZED, challenge).into_response()
+}
+
+/// What a wrong-credential line records: method, path and Host. Never the Authorization header,
+/// whose user name and password may be the real ones mistyped, and never the query.
+fn refused(req: &Request) -> String {
+    let path = req.uri().path();
+    let path = path
+        .char_indices()
+        .nth(LOGGED_PATH)
+        .map_or(path, |(end, _)| &path[..end]);
+    let host = req.headers().get(HOST).and_then(|v| v.to_str().ok());
+    format!(
+        "wrong credentials: {} {path:?} host {:?}",
+        req.method(),
+        host.unwrap_or("-")
+    )
 }
 
 /// Job files include fetched HTML; it must not run scripts or submit forms as this origin with the

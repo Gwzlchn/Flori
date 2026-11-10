@@ -155,6 +155,75 @@ async fn auth_guards_everything_but_health() {
     assert_eq!((status, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
 }
 
+/// Paused clock: sleeps finish at once and move `Instant::now()` by exactly their length, so an
+/// elapsed time of zero means the response was not held at all.
+#[tokio::test(start_paused = true)]
+async fn wrong_credentials_are_slowed_but_never_locked_out() {
+    let auth_layer = middleware::from_fn_with_state(Auth::new("flori:test-only"), basic_auth);
+    let router = Router::new()
+        .route("/", get(|| async { "ok" }))
+        .layer(auth_layer);
+    let timed = |authorization: Option<String>| {
+        let mut req = HttpRequest::builder().uri("/");
+        if let Some(authorization) = authorization {
+            req = req.header(AUTHORIZATION, authorization);
+        }
+        let req = req.body(AxumBody::empty()).unwrap();
+        let router = router.clone();
+        async move {
+            let start = Instant::now();
+            let status = router.oneshot(req).await.unwrap().status();
+            (status, start.elapsed())
+        }
+    };
+    let wrong = || Some(format!("Basic {}", BASE64.encode("flori:guess")));
+    let at_once = (StatusCode::UNAUTHORIZED, Duration::ZERO);
+    let slowed = (StatusCode::UNAUTHORIZED, FAILURE_DELAY);
+    // A browser's first request has no credentials yet: answered at once and not counted.
+    for _ in 0..3 * FAILURE_LIMIT {
+        assert_eq!(timed(None).await, at_once);
+    }
+    for _ in 0..FAILURE_LIMIT {
+        assert_eq!(timed(wrong()).await, at_once);
+    }
+    assert_eq!(timed(wrong()).await, slowed);
+    assert_eq!(timed(Some("Bearer x".into())).await, slowed);
+    assert_eq!(timed(Some(auth())).await, (StatusCode::OK, Duration::ZERO));
+    assert_eq!(timed(None).await, at_once);
+    // Concurrent guesses each wait the delay once instead of queueing behind each other.
+    let start = Instant::now();
+    let mut guesses = tokio::task::JoinSet::new();
+    for _ in 0..5 {
+        guesses.spawn(timed(wrong()));
+    }
+    while let Some(result) = guesses.join_next().await {
+        assert_eq!(result.unwrap(), slowed);
+    }
+    assert_eq!(start.elapsed(), FAILURE_DELAY);
+    tokio::time::advance(FAILURE_WINDOW).await;
+    assert_eq!(timed(wrong()).await, at_once, "a new window starts at zero");
+}
+
+#[test]
+fn auth_failure_lines_name_the_request_but_not_the_credentials() {
+    let request = |uri: &str| {
+        let credentials = BASE64.encode("someone:hunter2-guess");
+        HttpRequest::builder()
+            .method("POST")
+            .uri(uri)
+            .header(HOST, "203.0.113.7:8792")
+            .header(AUTHORIZATION, format!("Basic {credentials}"))
+            .body(AxumBody::empty())
+            .unwrap()
+    };
+    assert_eq!(
+        refused(&request("/api/jobs?token=from-query")),
+        r#"wrong credentials: POST "/api/jobs" host "203.0.113.7:8792""#
+    );
+    let long = refused(&request(&format!("/{}", "a".repeat(5000))));
+    assert!(long.len() < LOGGED_PATH + 60, "{}", long.len());
+}
+
 #[tokio::test]
 async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
     let app = app().await;
