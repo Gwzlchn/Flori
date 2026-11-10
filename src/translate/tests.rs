@@ -735,6 +735,32 @@ async fn cues_outside_a_section_with_text_are_dropped() {
 }
 
 #[tokio::test]
+async fn a_cue_in_a_window_without_a_section_does_not_join_the_previous_one() {
+    // 01:05 falls in 01:00-01:30, where there is no section, right after a section with text.
+    let sections = serde_json::json!([
+        {"start_ms": 0, "frames": [], "text": "Hello."},
+        {"start_ms": 30000, "frames": [], "text": "The demo starts."},
+        {"start_ms": 90000, "frames": [], "text": "The demo is over."},
+    ]);
+    let srt = "1\n00:00:05,000 --> 00:00:08,000\n你好。\n\n\
+               2\n00:00:35,000 --> 00:00:38,000\n演示开始。\n\n\
+               3\n00:01:05,000 --> 00:01:08,000\n画面说明\n\n\
+               4\n00:01:35,000 --> 00:01:38,000\n演示结束了。\n";
+    let fx = video_with_subtitle(&sections, "en", Some(srt));
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let section = |time: &str, chinese: &str| (time.to_owned(), Some(chinese.to_owned()));
+    assert_eq!(
+        chinese_by_section(&out),
+        [
+            section("00:00", "你好。"),
+            section("00:30", "演示开始。"),
+            section("01:30", "演示结束了。"),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_chinese_subtitle_does_not_override_the_chinese_skip() {
     // A Chinese transcript next to a Chinese subtitle (a misreported language) stays skipped.
     let lines: Vec<serde_json::Value> = fixture_text("lang-spoken-mixed.md")

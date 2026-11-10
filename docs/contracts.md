@@ -67,7 +67,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | 资源 | 输出 | 超时 | 尝试 |
 |---|---|---|---|---|
-| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(原声人工字幕)与 subtitle_zh.srt(中文人工字幕,作译文);meta: title, uploader, duration_ms, published,有 subtitle.srt 时另有 subtitle_language | 30m | 3 |
+| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(转写用的人工字幕,选轨规则见下)与 subtitle_zh.srt(中文人工字幕,作译文);meta: title, uploader, duration_ms, published,有 subtitle.srt 时另有 subtitle_language | 30m | 3 |
 | video-transcribe | whisper | transcript.json;字幕优先;meta: origin, language, language_probability | 2h | 2 |
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节)、由它渲染的 transcript.md | 1h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv);官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
@@ -84,7 +84,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | files | assets |
 |---|---|---|
-| video-fetch | video、subtitle(有原声人工字幕时)、subtitle_zh(原声确定不是中文且有中文人工字幕时) | 无 |
+| video-fetch | video、subtitle(有可用于转写的人工字幕时,选轨规则见下)、subtitle_zh(原声确定不是中文且有中文人工字幕时) | 无 |
 | video-transcribe | transcript_json | 无 |
 | video-frames | transcript、sections | frame-<ms>.jpg |
 | arxiv-fetch | page | 无;资源原件只作为普通文件留在步骤目录 |

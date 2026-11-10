@@ -202,10 +202,25 @@ fn subtitles_follow_the_original_language() {
         ],
     );
     assert_eq!(keep(Some("de"), &both), german);
+    // An unusable track never wins, neither as the transcript nor as the translation.
     assert_eq!(
-        keep(None, &[("en", ""), ("zh-Hans", "你好")]),
-        zh_only,
-        "an empty English track is skipped"
+        keep(None, &[("zh-Hans", ""), ("en", "hello")]),
+        en_only,
+        "an empty Chinese track is skipped"
+    );
+    let traditional = (
+        (Some("en".to_owned()), true),
+        vec![
+            "subtitle.srt=hello".to_owned(),
+            "subtitle_zh.srt=哈囉".to_owned(),
+            "video.mp4".to_owned(),
+        ],
+    );
+    let tracks = [("en", "hello"), ("zh-Hans", ""), ("zh-Hant", "哈囉")];
+    assert_eq!(
+        keep(Some("en"), &tracks),
+        traditional,
+        "an empty simplified track gives way to traditional"
     );
     assert_eq!(
         keep(None, &[]),
