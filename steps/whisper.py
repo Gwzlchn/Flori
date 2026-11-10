@@ -40,18 +40,16 @@ def detect(model, audio) -> dict:
     return {"language": info.language, "language_probability": info.language_probability}
 
 
-def transcribe(model, audio, t2s=None) -> dict:
-    """t2s converts traditional to simplified Chinese; OpenCC's when not given."""
+def transcribe(model, audio) -> dict:
     segments, info = model.transcribe(audio, **OPTIONS)
     print(f"whisper: language {info.language} p={info.language_probability:.2f}", flush=True)
     chinese = info.language == "zh"
     if chinese:
+        import opencc
+
         # The first call only detected the language; its segments were never decoded.
         segments, _ = model.transcribe(audio, language="zh", hotwords=ZH_HINT, **OPTIONS)
-        if t2s is None:
-            import opencc
-
-            t2s = opencc.OpenCC("t2s").convert
+        t2s = opencc.OpenCC("t2s").convert
     result, next_report = [], REPORT_EVERY_S
     for segment in segments:
         text = segment.text.strip()
