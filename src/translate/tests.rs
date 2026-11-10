@@ -233,17 +233,17 @@ fn fences_in_numbered_and_nested_lists_stay_whole() {
 /// A line holding nothing but list markers by CommonMark's rules: `-`, `+`, `*`, or 1 to 9
 /// digits and `.` or `)`. Written apart from the code under test, as the tests' own oracle.
 fn lone_marker(line: &str) -> bool {
+    // Byte slicing would panic inside a Chinese word, so the suffix is stripped as a char.
     let ordered = |w: &str| {
-        let digits = &w[..w.len() - 1];
-        (1..=9).contains(&digits.len())
-            && digits.bytes().all(|b| b.is_ascii_digit())
-            && w.ends_with(['.', ')'])
+        w.strip_suffix(['.', ')']).is_some_and(|digits| {
+            (1..=9).contains(&digits.len()) && digits.bytes().all(|b| b.is_ascii_digit())
+        })
     };
     let words: Vec<&str> = line.split_whitespace().collect();
     !words.is_empty()
         && words
             .iter()
-            .all(|w| ["-", "+", "*"].contains(w) || (w.len() >= 2 && ordered(w)))
+            .all(|w| ["-", "+", "*"].contains(w) || ordered(w))
 }
 
 /// Every lone marker line is followed directly by its item's first line, indented past the last
@@ -394,6 +394,35 @@ fn marker_only_blocks_are_kept() {
             (false, "", "End."),
         ]
     );
+}
+
+#[test]
+fn consecutive_marker_lines_all_lead_the_block() {
+    // arxiv-convert's output for an enumerate item whose first block is an itemize inside an
+    // itemize that starts with code: two marker lines stand above the fence.
+    let md = "1. Step one.\n2.\n   - -\n       ```\n       make all\n       ```\n\
+              \x20  - Inner text.\n3. Step three.\n";
+    let blocks = split_blocks(md);
+    assert_eq!(
+        kinds(&blocks),
+        [
+            (false, "", "1. Step one."),
+            (
+                true,
+                "2.\n   - -\n       ",
+                "```\n       make all\n       ```"
+            ),
+            (false, "", "   - Inner text.\n3. Step three."),
+        ]
+    );
+    let translated = vec!["1. 第一步。".into(), "   - 内层文字。\n3. 第三步。".into()];
+    let out = render_arxiv(&blocks, translated);
+    assert_eq!(
+        out,
+        "1. 第一步。\n\n2.\n   - -\n       ```\n       make all\n       ```\n\n\
+         \x20  - 内层文字。\n3. 第三步。\n"
+    );
+    assert_markers_attached(&out);
 }
 
 #[test]
