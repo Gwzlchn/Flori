@@ -386,7 +386,7 @@ async fn files_stay_inside_the_job_and_support_range() {
             .get_all(header::CONTENT_SECURITY_POLICY)
             .iter()
             .collect();
-        policies == ["sandbox; frame-ancestors 'none'"]
+        policies == ["sandbox allow-same-origin; frame-ancestors 'none'"]
             && headers[header::X_CONTENT_TYPE_OPTIONS] == "nosniff"
     };
     assert!(sandboxed(&headers), "range response");
@@ -922,6 +922,12 @@ async fn writes_from_other_sites_are_refused() {
         let (status, _, _) = app.send(cancel(headers)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
     }
+    // Only GET and HEAD skip the write rule; OPTIONS and TRACE do not.
+    let evil = [("origin", "http://evil.example"), ("host", "nas.lan:8780")];
+    let (status, _, _) = app
+        .send(browser("OPTIONS", "/api/jobs/1/cancel", &evil))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "OPTIONS");
     let (status, _, body) = app.send(browser("GET", "/api/jobs/1", &[])).await;
     assert_eq!(status, StatusCode::OK);
     let detail: Value = serde_json::from_slice(&body).unwrap();
@@ -1105,10 +1111,93 @@ async fn other_sites_and_frames_reach_only_top_level_pages() {
         let (status, _, _) = app.send(browser(method, uri, &headers)).await;
         assert_eq!(status, StatusCode::OK, "{method} {uri} {headers:?}");
     }
+    // The SPA's own page loads, images and video ranges, as the browser labels them.
+    let same_page = [
+        ("sec-fetch-site", "same-origin"),
+        ("sec-fetch-mode", "navigate"),
+        ("sec-fetch-dest", "document"),
+    ];
+    assert_eq!(
+        app.send(browser("GET", "/jobs/1", &same_page)).await.0,
+        StatusCode::OK
+    );
+    let ml = app.domain("ml").await;
+    let (_, job) = app
+        .post("/api/jobs", json!({"url": "2401.12345", "domain_id": ml}))
+        .await;
+    let media = app.job_dir(job["id"].as_i64().unwrap()).join("media");
+    fs::create_dir_all(&media).unwrap();
+    fs::write(media.join("fig.png"), "png").unwrap();
+    fs::write(media.join("video.mp4"), vec![0u8; 1000]).unwrap();
+    let files = format!("/api/jobs/{}/files/media", job["id"]);
+    let image = [
+        ("sec-fetch-site", "same-origin"),
+        ("sec-fetch-mode", "no-cors"),
+        ("sec-fetch-dest", "image"),
+    ];
+    let (status, _, _) = app
+        .send(browser("GET", &format!("{files}/fig.png"), &image))
+        .await;
+    assert_eq!(status, StatusCode::OK, "image in a preview");
+    let video = [
+        ("sec-fetch-site", "same-origin"),
+        ("sec-fetch-mode", "no-cors"),
+        ("sec-fetch-dest", "video"),
+        ("range", "bytes=0-99"),
+    ];
+    let (status, _, _) = app
+        .send(browser("GET", &format!("{files}/video.mp4"), &video))
+        .await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT, "video playback");
+    // Refused before authentication: a foreign page gets no 401 login prompt.
+    let anonymous = HttpRequest::builder()
+        .uri("/api/jobs")
+        .header("sec-fetch-site", "cross-site")
+        .body(AxumBody::empty())
+        .unwrap();
+    assert_eq!(app.send(anonymous).await.0, StatusCode::FORBIDDEN);
     let same = [
         ("sec-fetch-site", "same-origin"),
         ("sec-fetch-dest", "empty"),
     ];
     let (status, _, _) = app.send(browser("POST", "/api/domains", &same)).await;
     assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn a_refresh_dropped_midway_still_starts_the_interval() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    let coll = app.collection(ml, "slow").await;
+    let feed = format!("/api/collections/{coll}/feed");
+    let bind = json!({"url": "https://www.youtube.com/@slowchannel"});
+    assert_eq!(app.call("PUT", &feed, Some(bind)).await.0, StatusCode::OK);
+    let refresh = tokio::spawn({
+        let router = app.router.clone();
+        let req = browser("GET", &feed, &[]);
+        async move { router.oneshot(req).await }
+    });
+    // Lets the spawned request reach the lock first; "already running" then proves it started.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    loop {
+        let (status, body) = app.get(&feed).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        if body["message"]
+            .as_str()
+            .unwrap()
+            .contains("already running")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The client goes away: the handler and its feed.py run are dropped.
+    refresh.abort();
+    assert!(refresh.await.unwrap_err().is_cancelled());
+    let (status, body) = app.get(&feed).await;
+    assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "conflict"));
+    assert!(
+        body["message"].as_str().unwrap().contains("try again"),
+        "{body}"
+    );
 }

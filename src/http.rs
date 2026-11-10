@@ -8,7 +8,7 @@ use axum::{
         FromRequest, FromRequestParts, Path, Query, Request, State, rejection::PathRejection,
     },
     http::{
-        HeaderValue, StatusCode,
+        HeaderValue, Method, StatusCode,
         header::{
             AUTHORIZATION, CONTENT_SECURITY_POLICY, HOST, ORIGIN, WWW_AUTHENTICATE,
             X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
@@ -47,8 +47,9 @@ use crate::{
 };
 
 const FEED_TIMEOUT: Duration = Duration::from_secs(60);
-/// Least time between the end of one feed refresh and the start of the next, so a page that
-/// keeps requesting the feed cannot hammer Bilibili with the user's SESSDATA.
+/// Least time between the starts of two feed refreshes, so a page that keeps requesting the feed
+/// cannot hammer Bilibili with the user's SESSDATA. Counting from the start also covers a
+/// refresh whose client went away mid-run.
 #[cfg(not(test))]
 const FEED_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg(test)]
@@ -62,8 +63,8 @@ pub struct AppState {
     pub config: Arc<Config>,
 }
 
-/// Held while feed.py runs, with the time the last refresh ended. A refresh while another runs or
-/// within `FEED_INTERVAL` of the last one gets 409 instead of queueing.
+/// Held while feed.py runs, with the time the last refresh started. A refresh while another runs
+/// or within `FEED_INTERVAL` of the last start gets 409 instead of queueing.
 #[derive(Clone, Default)]
 pub struct FeedRefresh(Arc<Mutex<Option<Instant>>>);
 
@@ -133,7 +134,7 @@ fn foreign(req: &Request) -> bool {
     let navigation = header("sec-fetch-mode") == Some("navigate") && dest == Some("document");
     let path = req.uri().path();
     let api = path == "/api" || path.starts_with("/api/");
-    let write = !req.method().is_safe();
+    let write = !matches!(*req.method(), Method::GET | Method::HEAD);
     let write_site = site.is_some_and(|site| site != "same-origin" && site != "none");
     let write_origin = header(ORIGIN.as_str()).is_some_and(|origin| {
         origin.split_once("://").map(|(_, host)| host) != header(HOST.as_str())
@@ -164,10 +165,11 @@ async fn basic_auth(State(expected): State<[u8; 32]>, req: Request, next: Next) 
     next.run(req).await
 }
 
-/// Job files include fetched HTML; it must not run as this origin with the user's credentials.
+/// Job files include fetched HTML; it must not run scripts or submit forms as this origin with the
+/// user's credentials. `allow-same-origin` keeps its images same-origin, so they still load.
 async fn sandbox(mut res: Response) -> Response {
     let headers = res.headers_mut();
-    let policy = HeaderValue::from_static("sandbox; frame-ancestors 'none'");
+    let policy = HeaderValue::from_static("sandbox allow-same-origin; frame-ancestors 'none'");
     headers.insert(CONTENT_SECURITY_POLICY, policy);
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     res
@@ -379,13 +381,12 @@ pub async fn list_feed(
     let Ok(mut last) = refresh.0.try_lock() else {
         return Err(conflict("a feed refresh is already running").into());
     };
-    if last.is_some_and(|ended| ended.elapsed() < FEED_INTERVAL) {
+    if last.is_some_and(|started| started.elapsed() < FEED_INTERVAL) {
         let wait = FEED_INTERVAL.as_secs_f32();
         return Err(conflict(&format!("feed was just refreshed; try again in {wait}s")).into());
     }
-    let listed = run_feed(&s.config, feed.kind, &feed.url, limit).await;
     *last = Some(Instant::now());
-    let mut list = listed?;
+    let mut list = run_feed(&s.config, feed.kind, &feed.url, limit).await?;
     // Every job is read; a personal library is small enough for that.
     let jobs = db::list_jobs(&s.db, u32::MAX).await?;
     for item in &mut list.items {
