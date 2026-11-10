@@ -7,6 +7,7 @@ blanked. yt_channel comes from a yt-dlp recent enough that approximate_date fill
 
 import contextlib
 import copy
+import email.message
 import io
 import json
 import pathlib
@@ -14,6 +15,8 @@ import re
 import subprocess
 import sys
 import unittest
+import urllib.request
+import urllib.response
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -164,6 +167,8 @@ class BiliTest(unittest.TestCase):
             ("bili_season", "https://space.bilibili.com/88461692/lists/1528929?type=series"),
             ("bili_fav", "https://space.bilibili.com/84912/favlist?fid=213003412"),
             ("yt_channel", "https://www.youtube.com/watch?v=LKrwhjOI8Nc"),
+            ("yt_channel", "https://www.youtube.com/c/Vsauce"),
+            ("yt_channel", "https://www.youtube.com/user/a/b/videos"),
             ("yt_playlist", "https://evil.example/playlist?list=PL1"),
         ):
             with self.subTest(url=url):
@@ -203,6 +208,32 @@ class BiliTest(unittest.TestCase):
         self.assertEqual([cookie for _, cookie, _ in sent], ["SESSDATA=abc", None, None, None])
         self.assertTrue(all(referer == "https://space.bilibili.com/" for _, _, referer in sent))
 
+    def test_sessdata_is_not_carried_across_a_redirect(self) -> None:
+        seen = []
+
+        class Stub(urllib.request.HTTPSHandler):
+            handler_order = 100  # ahead of the real HTTPHandler for the http:// hop
+
+            def https_open(self, request):
+                seen.append((request.full_url, dict(request.header_items())))
+                headers = email.message.Message()
+                if request.host == "api.bilibili.com":
+                    headers["Location"] = "http://evil.example/collect"
+                    response = urllib.response.addinfourl(io.BytesIO(b""), headers, request.full_url, 302)
+                else:
+                    response = urllib.response.addinfourl(io.BytesIO(b"{}"), headers, request.full_url, 200)
+                response.msg = "stub"
+                return response
+
+            http_open = https_open
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), Stub())
+        with mock.patch.dict(feed.os.environ, {"FLORI_BILI_SESSDATA": "abc"}), mock.patch.object(feed, "OPENER", opener):
+            self.assertEqual(feed.http_get("https://api.bilibili.com/x/v3/fav/resource/list?media_id=1"), (200, b"{}"))
+        self.assertEqual([url for url, _ in seen], ["https://api.bilibili.com/x/v3/fav/resource/list?media_id=1", "http://evil.example/collect"])
+        self.assertEqual(seen[0][1].get("Cookie"), "SESSDATA=abc")
+        self.assertNotIn("Cookie", seen[1][1])
+
 
 class YoutubeTest(unittest.TestCase):
     def test_channel_and_playlist(self) -> None:
@@ -226,6 +257,7 @@ class YoutubeTest(unittest.TestCase):
         payload = load("yt_playlist.json")
         payload["entries"].insert(1, {"_type": "url", "id": "AAAAAAAAAAA", "title": "[Private video]", "duration": None})
         payload["entries"].insert(2, {"_type": "url", "id": "BBBBBBBBBBB", "title": "Soon", "live_status": "is_upcoming"})
+        payload["entries"].insert(3, dict(payload["entries"][0]))
         playlist = FakeYtdlp(payload)
         with mock.patch.dict(feed.os.environ, {"FLORI_PROXY": ""}):
             code, listing, _ = run("yt_playlist", "https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab", 3, ytdlp=playlist)
@@ -234,7 +266,25 @@ class YoutubeTest(unittest.TestCase):
         BiliTest.assert_items(self, listing, "youtube")
         self.assertEqual(listing["title"], "Essence of linear algebra")
         self.assertEqual([i["source_id"] for i in listing["items"]], ["fNk_zzaMoSs", "k7RM-ot2NWY", "kYB8IZa5AuE"])
+        everything = run("yt_playlist", "https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab", 30, ytdlp=FakeYtdlp(payload))[1]
+        ids = [i["source_id"] for i in everything["items"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(ids, [e["id"] for e in load("yt_playlist.json")["entries"]])
         self.assertEqual(listing["items"][0]["published"], None)
+
+    def test_channel_url_forms_from_the_contract(self) -> None:
+        for url in (
+            "https://www.youtube.com/@3blue1brown/videos",
+            "https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw/videos",
+            "https://www.youtube.com/c/Vsauce/videos",
+            "https://www.youtube.com/user/minutephysics/videos",
+        ):
+            with self.subTest(url=url):
+                ytdlp = FakeYtdlp(load("yt_channel.json"))
+                code, listing, _ = run("yt_channel", url, 5, ytdlp=ytdlp)
+                self.assertEqual(code, 0)
+                self.assertEqual(ytdlp.cmd[-2:], ["--", url])
+                self.assertEqual(len(listing["items"]), 5)
 
     def test_ytdlp_failure_reports_its_error_line(self) -> None:
         stderr = "ERROR: [youtube:tab] @nobody: This channel does not exist.\nWARNING: update yt-dlp\n"

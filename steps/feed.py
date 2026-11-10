@@ -24,16 +24,17 @@ CST = datetime.timezone(datetime.timedelta(hours=8))
 # B站 requests never go through a proxy, whatever the environment says.
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-# The normalized URL forms produced by the server (pipeline.rs), one per kind.
+# Normalized URL forms from the table in docs/contracts.md; names use the server's token
+# characters (ASCII letters, digits, "-_.%").
 URLS = {
-    "bili_up": r"https://space\.bilibili\.com/(?P<mid>\d+)",
-    "bili_season": r"https://space\.bilibili\.com/(?P<mid>\d+)/lists/(?P<id>\d+)\?type=season",
-    "bili_series": r"https://space\.bilibili\.com/(?P<mid>\d+)/lists/(?P<id>\d+)\?type=series",
-    "bili_fav": r"https://www\.bilibili\.com/medialist/detail/ml(?P<id>\d+)",
-    "yt_channel": r"https://www\.youtube\.com/(?:@[^/?#\s]+|channel/UC[\w-]{22})/videos",
-    "yt_playlist": r"https://www\.youtube\.com/playlist\?list=[\w-]+",
+    "bili_up": r"https://space\.bilibili\.com/(?P<mid>[0-9]+)",
+    "bili_season": r"https://space\.bilibili\.com/(?P<mid>[0-9]+)/lists/(?P<id>[0-9]+)\?type=season",
+    "bili_series": r"https://space\.bilibili\.com/(?P<mid>[0-9]+)/lists/(?P<id>[0-9]+)\?type=series",
+    "bili_fav": r"https://www\.bilibili\.com/medialist/detail/ml(?P<id>[0-9]+)",
+    "yt_channel": r"https://www\.youtube\.com/(?:@|(?:channel|c|user)/)[A-Za-z0-9._%-]+/videos",
+    "yt_playlist": r"https://www\.youtube\.com/playlist\?list=[A-Za-z0-9_-]+",
 }
-# kind -> (path, largest page size). Every endpoint is asked for newest first.
+# kind -> (path, largest page size). Newest first; the fav folder by time of favouriting.
 PAGES = {
     "bili_up": ("/x/series/recArchivesByKeywords?mid={mid}&keywords=&ps={ps}&pn={pn}", 100),
     "bili_season": ("/x/polymer/web-space/seasons_archives_list?mid={mid}&season_id={id}&sort_reverse=true&page_num={pn}&page_size={ps}", 100),
@@ -51,12 +52,13 @@ class FeedError(Exception):
 
 
 def http_get(url: str) -> tuple[int, bytes]:
-    headers = {"User-Agent": UA, "Referer": "https://space.bilibili.com/"}
+    request = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://space.bilibili.com/"})
     sessdata = os.environ.get("FLORI_BILI_SESSDATA", "")
     if sessdata and urllib.parse.urlsplit(url).hostname == "api.bilibili.com":
-        headers["Cookie"] = f"SESSDATA={sessdata}"
+        # Unredirected: urllib copies ordinary headers onto a redirect to any host.
+        request.add_unredirected_header("Cookie", f"SESSDATA={sessdata}")
     try:
-        with OPENER.open(urllib.request.Request(url, headers=headers), timeout=15) as response:
+        with OPENER.open(request, timeout=15) as response:
             return response.status, response.read()
     except urllib.error.HTTPError as err:
         return err.code, err.read()
@@ -134,8 +136,11 @@ def youtube(url: str, limit: int, run) -> tuple[str, list[dict]]:
         lines = [line for line in done.stderr.splitlines() if line.startswith("ERROR:")] or done.stderr.splitlines()
         raise FeedError(RETRY, "YouTube: " + (lines[-1] if lines else f"yt-dlp 退出码 {done.returncode}"))
     data = json.loads(done.stdout)
-    items = []
+    items, seen = [], set()
     for entry in data.get("entries") or []:
+        if entry.get("id") in seen:
+            continue  # a playlist may hold the same video twice
+        seen.add(entry.get("id"))
         if entry.get("title") in YT_GONE or entry.get("availability") in ("private", "needs_auth", "subscriber_only", "premium_only"):
             continue
         if entry.get("live_status") in ("is_live", "is_upcoming") or not entry.get("id"):
