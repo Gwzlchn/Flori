@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # The flori image. `just image` builds the binary and the frontend on the host (Debian 12, the
 # same glibc as bookworm) and passes the proxy; base images must already be local because
 # Docker Hub is unreachable through the NAS proxy.
