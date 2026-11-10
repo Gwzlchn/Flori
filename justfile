@@ -60,13 +60,14 @@ step name job_dir out_dir:
       flori-tools:local flori step {{name}} "$(realpath {{job_dir}})" "$(realpath {{out_dir}})"
 
 # Development instance on 8781 with the fake AI CLI. Settings come from dev.env (gitignored).
+# Loopback only: its password is weak and it runs real downloads and whisper.
 dev:
     cargo build
     cd frontend && npx vite build
     mkdir -p {{dev_data}}/vault
     docker run --rm --name flori-dev --network host --user "$(id -u):$(id -g)" --init \
       --env-file dev.env \
-      -e FLORI_DATA_DIR=/data -e FLORI_LISTEN=0.0.0.0:8781 -e HOME=/tmp \
+      -e FLORI_DATA_DIR=/data -e FLORI_LISTEN=127.0.0.1:8781 -e HOME=/tmp \
       -e FLORI_STATIC_DIR=/app/web -e FLORI_STEPS_DIR=/app/steps \
       -v "$PWD/target/debug/flori:/usr/local/bin/flori:ro" -v "$PWD/frontend/dist:/app/web:ro" \
       -v "$PWD/steps:/app/steps:ro" -v "$PWD/tests/fake/claude:/usr/local/bin/claude:ro" \
