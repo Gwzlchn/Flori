@@ -168,6 +168,7 @@ class BiliTest(unittest.TestCase):
             ("bili_fav", "https://space.bilibili.com/84912/favlist?fid=213003412"),
             ("yt_channel", "https://www.youtube.com/watch?v=LKrwhjOI8Nc"),
             ("yt_channel", "https://www.youtube.com/c/Vsauce"),
+            ("yt_channel", "https://www.youtube.com/@a+b/videos"),
             ("yt_channel", "https://www.youtube.com/user/a/b/videos"),
             ("yt_playlist", "https://evil.example/playlist?list=PL1"),
         ):

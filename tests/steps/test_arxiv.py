@@ -262,9 +262,13 @@ class FetchConvertTest(unittest.TestCase):
 
 
 def fenced_lines(md: str) -> list[bool]:
-    """For each line, whether it sits inside a fenced code block (CommonMark backtick fences)."""
+    """For each line, whether it sits inside a fenced code block (CommonMark backtick fences).
+
+    Leading spaces are allowed because list items indent their fences.
+    """
     inside, opener, flags = False, "", []
     for line in md.split("\n"):
+        line = line.lstrip(" ")
         run = len(line) - len(line.lstrip("`"))
         if not inside and run >= 3 and "`" not in line[run:]:
             inside, opener = True, "`" * run
@@ -315,13 +319,45 @@ class ConvertMarkupTest(unittest.TestCase):
             '<dd class="ltx_item"><div class="ltx_para"><p class="ltx_p">interacts.</p></div></dd></dl>'
             '<ul class="ltx_itemize"><li class="ltx_item"><span class="ltx_tag ltx_tag_item">Q1:</span>'
             '<div class="ltx_para"><p class="ltx_p">Does it work?</p></div></li>'
-            '<li class="ltx_item"><span class="ltx_tag ltx_tag_item">•</span><div class="ltx_para"><p class="ltx_p">plain</p></div></li></ul>'
+            '<li class="ltx_item"><span class="ltx_tag ltx_tag_item">•</span><div class="ltx_para"><p class="ltx_p">plain</p></div></li>'
+            '<li class="ltx_item"><span class="ltx_tag ltx_tag_item">·</span><div class="ltx_para"><p class="ltx_p">fourth level</p></div></li></ul>'
             '<ol class="ltx_enumerate"><li class="ltx_item"><span class="ltx_tag ltx_tag_item">1.</span>'
             '<div class="ltx_para"><p class="ltx_p">numbered</p></div></li></ol>'
         )
         self.assertIn("**Offline RL:** learns from a fixed dataset.\n\n**Online RL:** interacts.", md)
-        self.assertIn("- Q1: Does it work?\n- plain\n", md)
+        self.assertIn("- Q1: Does it work?\n- plain\n- fourth level\n", md)
         self.assertIn("\n1. numbered\n", md)
+
+    def test_labels_never_share_a_line_with_a_block(self) -> None:
+        def dd(first: str) -> str:
+            return f'<dd class="ltx_item">{first}<div class="ltx_para"><p class="ltx_p">Tail.</p></div></dd>'
+
+        def dt(term: str) -> str:
+            return f'<dt class="ltx_item"><span class="ltx_tag ltx_tag_item"><span class="ltx_font_bold">{term}</span></span></dt>'
+
+        listing = ('<div class="ltx_listing"><div class="ltx_listingline">```html</div>'
+                   '<div class="ltx_listingline">&lt;iframe src="https://example.org"&gt;</div></div>')
+        md = self.convert(
+            '<dl class="ltx_description">'
+            + dt("Code:") + dd('<pre class="ltx_verbatim">&lt;img src=x onerror=alert(1)&gt;\n```</pre>')
+            + dt("Listing:") + dd(listing)
+            + dt("Steps:") + dd('<ul class="ltx_itemize"><li class="ltx_item"><span class="ltx_tag ltx_tag_item">•</span>'
+                                '<div class="ltx_para"><p class="ltx_p">one</p></div></li></ul>')
+            + dt("Table:") + dd('<table class="ltx_tabular"><tr class="ltx_tr"><td class="ltx_td">a</td><td class="ltx_td">b</td></tr></table>')
+            + '</dl><ul class="ltx_itemize"><li class="ltx_item"><span class="ltx_tag ltx_tag_item">Prompt:</span>'
+            + listing.replace("iframe", "img") + '</li></ul>'
+            '<section class="ltx_section"><h2 class="ltx_title">Next</h2><div class="ltx_para"><p class="ltx_p">After.</p></div></section>'
+        )
+        rows, flags = md.split("\n"), fenced_lines(md)
+        for marker in ("<img", "<iframe", "```html"):
+            hits = [i for i, row in enumerate(rows) if marker in row]
+            self.assertTrue(hits and all(flags[i] for i in hits), (marker, md))
+        for prose in ("## Next", "After.", "Tail.", "**Code:**", "**Listing:**", "**Steps:**", "**Table:**", "- Prompt:"):
+            hits = [i for i, row in enumerate(rows) if row.strip() == prose]
+            self.assertTrue(hits and not any(flags[i] for i in hits), (prose, md))
+        self.assertIn("**Steps:**\n\n- one\n", md)
+        self.assertIn("**Table:**\n\n| a | b |\n", md)
+        self.assertIn("- Prompt:\n  \n  ````\n  ```html\n  <img", md)
 
     def test_footnote_type_prefixes_and_bare_marks_are_dropped(self) -> None:
         md = self.convert(

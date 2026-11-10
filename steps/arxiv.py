@@ -204,7 +204,9 @@ MD_SPECIAL = re.compile(r"([\\`*_$<])")
 # Obsidian reads #word as a tag, [[ as a link, %% as a comment and == as a highlight.
 OBSIDIAN_SPECIAL = re.compile(r"#(?=\S)|\[{2,}|%{2,}|={2,}")
 # List labels LaTeXML writes for plain itemize and enumerate; anything else is the author's \item[...] text.
-PLAIN_LABEL = re.compile(r"[•∙◦▪‣⋅∗–—*-]|\d+\.")
+PLAIN_LABEL = re.compile(r"[•·∙◦▪‣⋅∗–—*-]|\d+\.")
+# Blocks that must start their own line: code, tables, lists, quotes, display math, images, headings.
+NOT_PROSE = re.compile(r"```|~~~|\||- |\d+\. |>|\$\$|!\[|#")
 
 
 def escape(text: str) -> str:
@@ -361,12 +363,14 @@ class Converter:
             label = self.plain_text(tag) if tag else ""
             custom = label and not PLAIN_LABEL.fullmatch(label)
             marker = f"{n}. " if node.name == "ol" and not custom else "- "
-            body = (f"{label} " if custom else "") + "\n\n".join(self.blocks(li))
-            items.append(marker + body.replace("\n", "\n" + " " * len(marker)))
+            parts = self.blocks(li)
+            if custom:
+                parts = self.lead(label, parts)
+            items.append(marker + "\n\n".join(parts).replace("\n", "\n" + " " * len(marker)))
         return ["\n".join(items)] if items else []
 
     def description(self, node) -> list[str]:
-        """dt terms (LaTeXML puts them in an ltx_tag_item span) lead the first paragraph of their dd."""
+        """dt terms (LaTeXML puts them in an ltx_tag_item span) in bold, leading their dd."""
         out, term = [], ""
         for child in node.find_all(["dt", "dd"], recursive=False):
             if child.name == "dt":
@@ -375,12 +379,16 @@ class Converter:
                 tag = child.find(class_="ltx_tag_item")
                 term = self.plain_text(tag or child)
                 continue
-            parts = self.blocks(child)
-            if term:
-                parts = [f"**{term}** {parts[0]}" if parts else f"**{term}**"] + parts[1:]
-                term = ""
-            out.extend(parts)
+            out.extend(self.lead(f"**{term}**", self.blocks(child)) if term else self.blocks(child))
+            term = ""
         return out + ([f"**{term}**"] if term else [])
+
+    @staticmethod
+    def lead(label: str, parts: list[str]) -> list[str]:
+        """Puts a term or list label in front of a paragraph; other blocks get it on its own line."""
+        if parts and not NOT_PROSE.match(parts[0]):
+            return [f"{label} {parts[0]}"] + parts[1:]
+        return [label] + parts
 
     def listing(self, node) -> list[str]:
         for noise in node.select(".ltx_tag_listingline, .ltx_listing_data"):
