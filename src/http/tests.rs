@@ -736,3 +736,28 @@ async fn only_one_feed_refresh_runs_at_a_time() {
     assert_eq!(first.await.unwrap(), StatusCode::OK);
     assert_eq!(app.get(&format!("{feed}?limit=1")).await.0, StatusCode::OK);
 }
+
+/// The fake feed.py accepts only the contract's normal forms, so this catches a parser that
+/// stores something feed.py would refuse.
+#[tokio::test]
+async fn every_feed_kind_binds_to_a_form_feed_py_accepts() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    let coll = app.collection(ml, "feeds").await;
+    let feed = format!("/api/collections/{coll}/feed");
+    for input in [
+        "https://space.bilibili.com/946974/video",
+        "https://space.bilibili.com/100/channel/collectiondetail?sid=200",
+        "https://space.bilibili.com/100/lists/200?type=series",
+        "https://space.bilibili.com/247209804/favlist?fid=987654&ftype=create",
+        "https://www.bilibili.com/medialist/detail/ml987654",
+        "https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw/featured",
+        "https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab",
+    ] {
+        let (status, body) = app.call("PUT", &feed, Some(json!({"url": input}))).await;
+        assert_eq!(status, StatusCode::OK, "{input}: {body}");
+        let (status, list) = app.get(&format!("{feed}?limit=1")).await;
+        assert_eq!(status, StatusCode::OK, "{input}: {list}");
+        assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    }
+}

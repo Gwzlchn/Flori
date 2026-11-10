@@ -333,7 +333,17 @@ fn feed_urls_parse_to_kind_and_normal_form() {
         (
             "https://space.bilibili.com/247209804/favlist?ftype=create&fid=987654",
             FeedKind::BiliFav,
-            "https://space.bilibili.com/247209804/favlist?fid=987654",
+            "https://www.bilibili.com/medialist/detail/ml987654",
+        ),
+        (
+            "https://www.bilibili.com/medialist/detail/ml987654?type=1",
+            FeedKind::BiliFav,
+            "https://www.bilibili.com/medialist/detail/ml987654",
+        ),
+        (
+            "https://www.bilibili.com/list/ml987654",
+            FeedKind::BiliFav,
+            "https://www.bilibili.com/medialist/detail/ml987654",
         ),
         (
             "https://www.youtube.com/@3blue1brown",
@@ -376,6 +386,8 @@ fn feed_urls_parse_to_kind_and_normal_form() {
         "https://example.com/@3blue1brown",
         "https://space.bilibili.com.evil.example/100",
         "https://space.bilibili.com/100/favlist",
+        "https://www.bilibili.com/medialist/detail/987654",
+        "https://www.bilibili.com/list/watchlater",
         "https://space.bilibili.com/100/lists/200",
         "https://space.bilibili.com/100/channel/seriesdetail",
         "https://space.bilibili.com/abc",
@@ -387,4 +399,85 @@ fn feed_urls_parse_to_kind_and_normal_form() {
     assert_eq!(feed_kind_arg(FeedKind::BiliSeason), "bili_season");
     let json = serde_json::to_string(&FeedKind::YtPlaylist).unwrap();
     assert_eq!(json, format!("\"{}\"", feed_kind_arg(FeedKind::YtPlaylist)));
+}
+
+/// Normal forms against the contract 3 table, with `<x>` standing for one non-empty segment.
+#[test]
+fn feed_normal_forms_follow_the_contract_table() {
+    let table = [
+        (FeedKind::BiliUp, "https://space.bilibili.com/<mid>"),
+        (
+            FeedKind::BiliSeason,
+            "https://space.bilibili.com/<mid>/lists/<id>?type=season",
+        ),
+        (
+            FeedKind::BiliSeries,
+            "https://space.bilibili.com/<mid>/lists/<id>?type=series",
+        ),
+        (
+            FeedKind::BiliFav,
+            "https://www.bilibili.com/medialist/detail/ml<id>",
+        ),
+        (
+            FeedKind::YtChannel,
+            "https://www.youtube.com/@<handle>/videos",
+        ),
+        (
+            FeedKind::YtChannel,
+            "https://www.youtube.com/channel/<id>/videos",
+        ),
+        (
+            FeedKind::YtChannel,
+            "https://www.youtube.com/c/<name>/videos",
+        ),
+        (
+            FeedKind::YtChannel,
+            "https://www.youtube.com/user/<name>/videos",
+        ),
+        (
+            FeedKind::YtPlaylist,
+            "https://www.youtube.com/playlist?list=<id>",
+        ),
+    ];
+    let fits = |url: &str, form: &str| {
+        let mut rest = url;
+        for (i, part) in form.split(['<', '>']).enumerate() {
+            if i % 2 == 0 {
+                let Some(r) = rest.strip_prefix(part) else {
+                    return false;
+                };
+                rest = r;
+            } else {
+                let end = rest.find(['/', '?']).unwrap_or(rest.len());
+                if end == 0 {
+                    return false;
+                }
+                rest = &rest[end..];
+            }
+        }
+        rest.is_empty()
+    };
+    let inputs = [
+        "https://space.bilibili.com/946974/dynamic",
+        "https://space.bilibili.com/100/channel/collectiondetail?sid=200",
+        "https://space.bilibili.com/100/channel/seriesdetail?sid=200",
+        "https://space.bilibili.com/1/favlist?fid=42&ftype=create",
+        "https://m.youtube.com/@demo/shorts",
+        "https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw",
+        "https://www.youtube.com/c/demo/about",
+        "https://www.youtube.com/user/demo",
+        "https://youtube.com/playlist?list=PL123",
+    ];
+    for input in inputs {
+        let (kind, url) = parse_feed(input).unwrap_or_else(|| panic!("{input}"));
+        assert!(
+            table.iter().any(|(k, form)| *k == kind && fits(&url, form)),
+            "{input} -> {url} is not in the contract table"
+        );
+    }
+    let kinds: std::collections::BTreeSet<&str> = inputs
+        .iter()
+        .map(|i| feed_kind_arg(parse_feed(i).unwrap().0))
+        .collect();
+    assert_eq!(kinds.len(), 6);
 }

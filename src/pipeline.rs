@@ -518,10 +518,8 @@ fn number(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// A collection feed URL, normalized to one form per kind (feed.py parses these forms):
-/// `https://space.bilibili.com/<mid>`, `.../<mid>/lists/<sid>?type=season|series`,
-/// `.../<mid>/favlist?fid=<media_id>`, `https://www.youtube.com/<@handle | channel/<id> |
-/// c/<name> | user/<name>>/videos`, `https://www.youtube.com/playlist?list=<id>`.
+/// A collection feed URL, normalized to the one form per kind that feed.py accepts. The table of
+/// forms is in contract 3 (docs/contracts.md).
 pub fn parse_feed(input: &str) -> Option<(FeedKind, String)> {
     let url = split_url(input)?;
     let lists = |mid: &str, sid: &str, kind| {
@@ -538,6 +536,11 @@ pub fn parse_feed(input: &str) -> Option<(FeedKind, String)> {
         })
     };
     let yt = |kind, path: String| Some((kind, format!("https://www.youtube.com/{path}")));
+    // The favlist `fid` is the media id, so every form reduces to the one without a mid.
+    let fav = |id: &str| {
+        let url = format!("https://www.bilibili.com/medialist/detail/ml{id}");
+        number(id).then_some((FeedKind::BiliFav, url))
+    };
     match (url.host.as_str(), url.segs.as_slice()) {
         ("space.bilibili.com", [mid, rest @ ..]) if number(mid) => match rest {
             [] | ["video" | "upload" | "dynamic", ..] => Some((
@@ -555,14 +558,10 @@ pub fn parse_feed(input: &str) -> Option<(FeedKind, String)> {
                 "series" => lists(mid, sid, FeedKind::BiliSeries),
                 _ => None,
             },
-            ["favlist"] => query(url.query, "fid").filter(|f| number(f)).map(|fid| {
-                (
-                    FeedKind::BiliFav,
-                    format!("https://space.bilibili.com/{mid}/favlist?fid={fid}"),
-                )
-            }),
+            ["favlist"] => fav(query(url.query, "fid")?),
             _ => None,
         },
+        ("bilibili.com", ["medialist", "detail", ml] | ["list", ml]) => fav(ml.strip_prefix("ml")?),
         ("youtube.com", [handle, ..])
             if handle.len() > 1 && handle.starts_with('@') && token(&handle[1..], b"-_.%") =>
         {
