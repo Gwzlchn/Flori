@@ -6,14 +6,16 @@
 
 把 B站、YouTube 视频和 arXiv HTML 论文变成 Obsidian 笔记。NAS 上一个 `flori` 容器提供网页(投递、流水线与日志、预览、领域/集合、手动订阅)并执行两条固定流水线,发布到 vault 目录;电脑和手机用 Remotely Save 经 WebDAV 同步。
 
-不做:PDF、网页文章、音频、本地视频、站内搜索、问答、术语/概念、SRS、MCP、多 worker、定时订阅、公网入口。扩大范围先问用户。
+不做:PDF、网页文章、音频、本地视频、站内搜索、问答、术语/概念、SRS、MCP、多 worker、定时订阅。扩大范围先问用户。
+
+外网访问只经 ECS 原样转发 TCP,TLS 在 NAS 的 Caddy 终止;ECS 未备案,带域名的连接会被重置,所以一律按 IP 访问:WebDAV 走 :8790,网页走 :8792。
 
 使用门:每周投递至少 3 次;连续 2 周未达标,冻结新功能只修 bug。
 
 ## 架构
 
 - 单 crate `flori`,单二进制:`flori serve` 与 `flori step <name>`。下载、抓取、转写、AI 都走子进程。
-- 按职责成文件,一个文件讲清一件事;不建只转发的层,第三个真实调用方出现前不抽通用框架。
+- 按职责成文件,一个文件讲清一件事;文件长到难以维护时按职责拆成多个文件,不为控制行数删功能。不建只转发的层,第三个真实调用方出现前不抽通用框架。
 - 契约只在 [docs/contracts.md](docs/contracts.md):步骤 CLI、vault 布局、HTTP API。改契约时 `src/pipeline.rs`、`src/api.rs` 与它同一提交。
 - 类型链:Rust 类型 → utoipa → `docs/openapi.json` → openapi-typescript → 前端。前端不手写 API 类型;改接口后跑 `just openapi`。
 - SQLite 是唯一结构化真相,SQLx 运行时查询,迁移只向前。
