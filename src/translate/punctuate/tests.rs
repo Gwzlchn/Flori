@@ -13,6 +13,10 @@ fn inserted_punctuation_passes() {
             "浮盈1.5亿，GPT-4和Node.js，don't？10:30。",
         ),
         ("machine learning", "machine, learning."),
+        // A decimal point that opens a number stays; an ellipsis before a number is punctuation.
+        ("降了.5个点", "降了.5个点。"),
+        ("降了 .5个点", "降了，.5个点。"),
+        ("等等...5月份", "等等……5月份。"),
         // Only an ASCII mark can be part of a number: 、 between digits is punctuation.
         ("第1 2 3条", "第1、2、3条。"),
         ("第一第二", "第一（第二）【】《》"),
@@ -53,6 +57,13 @@ fn any_other_change_fails() {
         ("浮盈1.5亿", "浮盈1。5亿"),
         ("1,000股", "1000股"),
         ("10:30开盘", "10，30开盘"),
+        // A decimal point that opens a number, dropped, turned into punctuation, or merged into
+        // the number before it.
+        ("降了.5个点", "降了5个点。"),
+        ("降了.5个点", "降了，5个点。"),
+        ("涨了6 .06%", "涨了6，06%。"),
+        ("涨了6 .06%", "涨了6.06%。"),
+        ("涨了6.06%", "涨了6 .06%。"),
         // An added word.
         ("今天聊股市", "今天我们聊股市。"),
         ("今天聊股市", "今天聊股市吧。"),

@@ -23,18 +23,23 @@ const PUNCTUATION: &[char] = &[
 /// What punctuation and whitespace may not change: every other character in order, and the
 /// break between two ASCII letters or digits, which separates two words. An ASCII mark directly
 /// between two ASCII letters or digits belongs to a number or term (3.5, 1,000, 10:30, Node.js,
-/// don't) and counts as content.
+/// don't) and counts as content. So does a `.` that opens a number (.5), unless it ends an
+/// ellipsis (...5); the break before it separates two words as well.
 fn bare(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let word = |i: usize| chars.get(i).is_some_and(char::is_ascii_alphanumeric);
     let (mut out, mut gap) = (String::with_capacity(text.len()), false);
     for (i, &c) in chars.iter().enumerate() {
         let inner = c.is_ascii() && i > 0 && word(i - 1) && word(i + 1);
-        if c.is_whitespace() || (PUNCTUATION.contains(&c) && !inner) {
+        let decimal = c == '.'
+            && chars.get(i + 1).is_some_and(char::is_ascii_digit)
+            && (i == 0 || chars[i - 1] != '.');
+        if c.is_whitespace() || (PUNCTUATION.contains(&c) && !inner && !decimal) {
             gap = true;
             continue;
         }
-        if gap && c.is_ascii_alphanumeric() && out.ends_with(|p: char| p.is_ascii_alphanumeric()) {
+        let opens_word = c.is_ascii_alphanumeric() || decimal;
+        if gap && opens_word && out.ends_with(|p: char| p.is_ascii_alphanumeric()) {
             out.push(' ');
         }
         gap = false;
