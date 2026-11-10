@@ -8,7 +8,9 @@ FAKE_AUTH, FAKE_RATE_LIMIT, FAKE_FAIL, FAKE_EMPTY, FAKE_HANG, FAKE_INVALID (the 
 FAKE_INVALID_ONCE (not JSON unless the prompt has a `---FLORI-FEEDBACK---` re-ask section),
 FAKE_NO_RESULT_429 (a full init event, no result event, "API Error: 429" on stderr, exit 1),
 FAKE_NO_RESULT_CHATTY (no result event, assistant text that mentions a rate limit, a plain
-stderr, exit 1).
+stderr, exit 1), FAKE_PUNCTUATE (the input JSON comes back with every whitespace run in each
+segment text turned into "，" and a "。" appended; a segment holding FAKE_EDIT also gets that word
+changed, which is more than punctuation).
 Otherwise the reply echoes the text after the last line `---FLORI-INPUT---`, or a fixed note when
 there is none. stdout is stream-json: a system event, an assistant event and a result event.
 Every call appends one JSON line to $HOME/fake-ai.log so tests can count calls."""
@@ -115,4 +117,10 @@ if "FAKE_INVALID_ONCE" in prompt:
 elif "FAKE_INVALID" in prompt:
     reply("not json")
 marker = "---FLORI-INPUT---\n"
+if "FAKE_PUNCTUATE" in prompt and marker in prompt:
+    payload = json.loads(prompt.rsplit(marker, 1)[1])
+    for segment in payload["segments"]:
+        text = "，".join(segment["text"].split()) + "。"
+        segment["text"] = text.replace("FAKE_EDIT", "FAKE_EDITED")
+    reply(json.dumps(payload, ensure_ascii=False))
 reply(prompt.rsplit(marker, 1)[1] if marker in prompt else "# 笔记\n\n这是假笔记。\n")

@@ -17,6 +17,7 @@ use tokio::process::Command;
 
 pub use fetch::fetch;
 pub use frames::frames;
+pub(crate) use frames::render_transcript;
 pub(crate) use transcribe::parse_srt;
 pub use transcribe::transcribe;
 

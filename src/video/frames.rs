@@ -256,8 +256,9 @@ pub(super) fn build_sections(segments: &[Segment], frames: &[(u64, String)]) -> 
     sections.into_values().collect()
 }
 
-/// `## mm:ss` per section, then its keyframes, then its text.
-pub(super) fn render_transcript(sections: &[Section]) -> String {
+/// `## mm:ss` per section, then its keyframes, then its text. translate writes a Chinese video's
+/// punctuated transcript with it too, so both layouts stay one.
+pub(crate) fn render_transcript(sections: &[Section]) -> String {
     let mut md = String::new();
     for section in sections {
         md.push_str(&format!("## {}\n\n", clock(section.start_ms)));

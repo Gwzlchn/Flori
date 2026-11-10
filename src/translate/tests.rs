@@ -899,26 +899,157 @@ async fn chinese_and_unknown_sources_only_write_meta() {
         assert_eq!(manifest.meta["skipped_reason"], text(reason));
         assert_eq!(manifest.meta["language"], text(language));
         assert_eq!(manifest.meta["translated"], MetaValue::Bool(false));
+        // Only a Chinese video gets punctuation; a Chinese paper is left alone.
+        assert!(!manifest.meta.contains_key("punctuated"));
         assert!(!out.join("translation.md").exists());
         assert!(fx.calls().is_empty());
     }
 }
 
+/// What the fake CLI makes of a segment under FAKE_PUNCTUATE.
+fn fake_punctuated(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join("，") + "。"
+}
+
 #[tokio::test]
-async fn chinese_video_is_skipped_and_keeps_the_transcribed_language() {
-    let lines: Vec<serde_json::Value> = fixture_text("lang-spoken-mixed.md")
-        .lines()
-        .enumerate()
-        .map(|(i, line)| serde_json::json!({"start_ms": i * 30_000, "frames": [], "text": line}))
-        .collect();
-    let fx = video(&serde_json::Value::Array(lines), "zh");
+async fn chinese_video_is_punctuated_in_video_frames_layout() {
+    let spoken = fixture_text("lang-spoken-mixed.md");
+    let lines: Vec<&str> = spoken.lines().collect();
+    let edited = format!("{} FAKE_EDIT", lines[1]);
+    let sections = serde_json::json!([
+        {"start_ms": 0, "frames": ["frame-0.jpg"], "text": "大家好 我是 Pacon FAKE_PUNCTUATE"},
+        {"start_ms": 30000, "frames": ["frame-30000.jpg", "frame-41000.jpg"], "text": ""},
+        {"start_ms": 60000, "frames": [], "text": lines[0]},
+        {"start_ms": 90000, "frames": ["frame-90000.jpg"], "text": edited},
+        {"start_ms": 120000, "frames": [], "text": lines[2]},
+        {"start_ms": 150000, "frames": [], "text": lines[3]},
+        {"start_ms": 3_690_000, "frames": [], "text": lines[4]},
+    ]);
+    let fx = video(&sections, "zh");
     let (out, result) = translate(&fx).await;
     result.unwrap();
+    let punctuated = |line: &str| escape_markdown(&fake_punctuated(line));
+    // The section whose reply changed a word keeps its transcribed text.
+    let want = format!(
+        "## 00:00\n\n![](assets/frame-0.jpg)\n\n大家好，我是，Pacon，FAKE\\_PUNCTUATE。\n\n\
+         ## 00:30\n\n![](assets/frame-30000.jpg)\n\n![](assets/frame-41000.jpg)\n\n\
+         ## 01:00\n\n{}\n\n## 01:30\n\n![](assets/frame-90000.jpg)\n\n{}\n\n\
+         ## 02:00\n\n{}\n\n## 02:30\n\n{}\n\n## 1:01:30\n\n{}\n",
+        punctuated(lines[0]),
+        escape_markdown(&edited),
+        punctuated(lines[2]),
+        punctuated(lines[3]),
+        punctuated(lines[4]),
+    );
+    assert_eq!(fs::read_to_string(out.join("transcript.md")).unwrap(), want);
+    let sections: Vec<Section> = serde_json::from_value(sections).unwrap();
+    let mut rendered = sections.clone();
+    for section in rendered
+        .iter_mut()
+        .filter(|s| s.has_text() && s.text != edited)
+    {
+        section.text = fake_punctuated(&section.text);
+    }
+    assert_eq!(want, crate::video::render_transcript(&rendered));
     let manifest = pipeline::read_manifest(&out).unwrap();
-    assert!(manifest.files.is_empty());
-    assert_eq!(manifest.meta["skipped_reason"], text("chinese"));
-    assert_eq!(manifest.meta["language"], text("zh"));
-    assert!(fx.calls().is_empty());
+    assert_eq!(manifest.files["transcript"], "transcript.md");
+    assert!(manifest.assets.is_empty());
+    assert_eq!(
+        manifest.meta,
+        BTreeMap::from([
+            ("language".to_owned(), text("zh")),
+            ("translated".to_owned(), MetaValue::Bool(false)),
+            ("punctuated".to_owned(), MetaValue::Bool(true)),
+            ("sections".to_owned(), MetaValue::Int(6)),
+            ("kept_original".to_owned(), MetaValue::Int(1)),
+        ])
+    );
+    let calls = fx.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["model"], "model-translate");
+    let prompt = calls[0]["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with(punctuate::PROMPT));
+    let (_, input) = prompt.rsplit_once(INPUT_MARKER).unwrap();
+    let payload: Payload = serde_json::from_str(input.trim()).unwrap();
+    let sent: Vec<&str> = payload.segments.iter().map(|s| s.text.as_str()).collect();
+    let with_text: Vec<&str> = sections
+        .iter()
+        .filter(|s| s.has_text())
+        .map(|s| s.text.as_str())
+        .collect();
+    assert_eq!(sent, with_text);
+
+    // The checked reply is cached: a retry makes no call and writes the same transcript.
+    let (again, result) = translate(&fx).await;
+    result.unwrap();
+    assert_eq!(fx.calls().len(), 1);
+    assert_eq!(
+        fs::read_to_string(again.join("transcript.md")).unwrap(),
+        want
+    );
+}
+
+/// Text of section `i` in [`long_chinese`]: about 4000 characters, and no two alike, so no chunk
+/// is answered from another's cache entry.
+fn long_section(i: u64) -> String {
+    format!("第{i}节") + &"股市大跌".repeat(1000)
+}
+
+/// `count` Chinese sections of about 4000 characters each.
+fn long_chinese(count: u64) -> serde_json::Value {
+    (0..count)
+        .map(|i| serde_json::json!({"start_ms": i * 30_000, "frames": [], "text": long_section(i)}))
+        .collect()
+}
+
+#[tokio::test]
+async fn punctuation_chunks_are_smaller_than_translation_chunks() {
+    let fx = video(&long_chinese(2), "zh");
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    assert_eq!(meta(&out)["punctuated"], MetaValue::Bool(true));
+    // Two sections fit one translation chunk, but a punctuation chunk holds only one.
+    assert_eq!(fx.calls().len(), 2);
+    let segments: Vec<Segment> = (0..2)
+        .map(|i| protect(&long_section(i), Pipeline::Video))
+        .collect();
+    assert_eq!(chunk(&segments, CHUNK_CHARS).len(), 1);
+}
+
+#[tokio::test]
+async fn cache_key_includes_the_prompt() {
+    let fx = video(&long_chinese(1), "zh");
+    translate(&fx).await.1.unwrap();
+    assert_eq!(fx.calls().len(), 1);
+    // The same payload under another prompt, such as an edited one, is asked anew.
+    let job = pipeline::read_job(fx.job_dir()).unwrap();
+    let part = [protect(&long_section(0), Pipeline::Video)];
+    let (env, cache) = (with_cache(&fx), cache_dir(&fx));
+    ask_chunk(&env, &job, PROMPT, &cache, &part).await.unwrap();
+    assert_eq!(fx.calls().len(), 2);
+    ask_chunk(&env, &job, punctuate::PROMPT, &cache, &part)
+        .await
+        .unwrap();
+    assert_eq!(fx.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn a_chinese_video_past_the_chunk_limit_is_skipped_without_calls() {
+    // A Chinese subtitle does not lift the limit: it is no translation of a Chinese transcript.
+    let srt = "1\n00:00:01,000 --> 00:00:05,000\n股市\n";
+    for subtitle in [None, Some(srt)] {
+        let sections = long_chinese(MAX_CHUNKS as u64 + 1);
+        let fx = video_with_subtitle(&sections, "zh", subtitle);
+        let out = fx.out_dir("04-translate");
+        // No FLORI_CACHE_DIR: the step must not get that far.
+        run_with(fx.job_dir(), &out, &fx.env()).await.unwrap();
+        let manifest = pipeline::read_manifest(&out).unwrap();
+        assert_eq!(manifest.meta["skipped_reason"], text("too_long"));
+        assert_eq!(manifest.meta["chunks"], MetaValue::Int(26));
+        assert!(!manifest.meta.contains_key("punctuated"));
+        assert!(manifest.files.is_empty());
+        assert!(fx.calls().is_empty());
+    }
 }
 
 #[tokio::test]
@@ -1091,9 +1222,10 @@ async fn a_cue_in_a_window_without_a_section_does_not_join_the_previous_one() {
 }
 
 #[tokio::test]
-async fn a_chinese_subtitle_does_not_override_the_chinese_skip() {
-    // A Chinese transcript next to a Chinese subtitle (a misreported language) stays skipped.
-    let lines: Vec<serde_json::Value> = fixture_text("lang-spoken-mixed.md")
+async fn a_chinese_subtitle_is_no_translation_of_a_chinese_transcript() {
+    // A Chinese transcript next to a Chinese subtitle (a misreported language) gets punctuation.
+    let spoken = fixture_text("lang-spoken-mixed.md");
+    let lines: Vec<serde_json::Value> = spoken
         .lines()
         .enumerate()
         .map(|(i, line)| serde_json::json!({"start_ms": i * 30_000, "frames": [], "text": line}))
@@ -1103,11 +1235,15 @@ async fn a_chinese_subtitle_does_not_override_the_chinese_skip() {
     let (out, result) = translate(&fx).await;
     result.unwrap();
     let manifest = pipeline::read_manifest(&out).unwrap();
-    assert_eq!(manifest.meta["skipped_reason"], text("chinese"));
+    assert_eq!(manifest.meta["punctuated"], MetaValue::Bool(true));
     assert_eq!(manifest.meta["translated"], MetaValue::Bool(false));
     assert!(!manifest.meta.contains_key("translation_source"));
-    assert!(manifest.files.is_empty());
-    assert!(!out.join("transcript.md").exists());
+    assert!(!manifest.meta.contains_key("skipped_reason"));
+    // The fake echoes, so every section keeps its text and the subtitle is nowhere.
+    let transcript = fs::read_to_string(out.join("transcript.md")).unwrap();
+    assert!(!transcript.contains("好的") && !transcript.contains("[!quote]"));
+    assert!(transcript.contains(&escape_markdown(spoken.lines().next().unwrap())));
+    assert_eq!(fx.calls().len(), 1);
 }
 
 #[tokio::test]

@@ -25,6 +25,17 @@ fn plan_drops_translate_only_when_off() {
         names(Pipeline::Arxiv, TranslateMode::Off),
         ["arxiv-fetch", "arxiv-convert", "note", "publish"]
     );
+    // translate=off never reaches the AI: a Chinese video gets no punctuation pass either.
+    assert_eq!(
+        names(Pipeline::Video, TranslateMode::Off),
+        [
+            "video-fetch",
+            "video-transcribe",
+            "video-frames",
+            "note",
+            "publish"
+        ]
+    );
 }
 
 #[test]

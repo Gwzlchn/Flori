@@ -1,6 +1,9 @@
 //! Chinese detection, chunking with placeholders, per-chunk cache, validation with one re-ask,
-//! and the two output layouts (arXiv translation.md, bilingual video transcript.md).
+//! and the two output layouts (arXiv translation.md, bilingual video transcript.md). A Chinese
+//! video gets the punctuation pass in punctuate.rs instead, over the same chunks and replies.
 //! Rules: contract 1 "translate" in docs/contracts.md.
+
+mod punctuate;
 
 use std::{
     collections::BTreeMap,
@@ -104,9 +107,19 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
         ("language".to_owned(), MetaValue::Text(language)),
         ("translated".to_owned(), MetaValue::Bool(false)),
     ]);
-    let chunks = chunk(&segments, CHUNK_CHARS);
+    // A Chinese paper stays as it is. A Chinese transcript gets punctuation even when it came
+    // with some: neither subtitles nor whisper punctuate reliably.
+    let punctuate = detected == "zh" && job.pipeline == Pipeline::Video;
+    let limit = if punctuate {
+        punctuate::CHUNK_CHARS
+    } else {
+        CHUNK_CHARS
+    };
+    let chunks = chunk(&segments, limit);
+    // A Chinese subtitle next to a Chinese transcript is no translation of it.
+    let subtitle_zh = subtitle_zh.filter(|_| !punctuate);
     let skipped = match detected {
-        "zh" => Some("chinese"),
+        "zh" if !punctuate => Some("chinese"),
         // A subtitle translation costs no AI call, so neither length nor letter count matters.
         _ if subtitle_zh.is_some() => None,
         "unknown" => Some("unknown"),
@@ -119,10 +132,22 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
     let mut manifest = Manifest::default();
     if let Some(reason) = skipped {
         meta.insert("skipped_reason".into(), MetaValue::Text(reason.into()));
+    } else if punctuate {
+        let replies = ask_all(env, &job, punctuate::PROMPT, &segments, &chunks).await?;
+        let (punctuated, kept) = punctuate::apply(&sections, replies);
+        let file = "transcript.md";
+        fs::write(
+            out_dir.join(file),
+            crate::video::render_transcript(&punctuated),
+        )?;
+        manifest.files.insert("transcript".into(), file.into());
+        meta.insert("punctuated".into(), MetaValue::Bool(true));
+        meta.insert("sections".into(), MetaValue::Int(segments.len() as i64));
+        meta.insert("kept_original".into(), MetaValue::Int(kept as i64));
     } else {
         let (translated, source) = match subtitle_zh {
             Some(texts) => (texts, "subtitle"),
-            None => (translate_all(env, &job, &segments, &chunks).await?, "ai"),
+            None => (ask_all(env, &job, PROMPT, &segments, &chunks).await?, "ai"),
         };
         let (name, body) = match job.pipeline {
             Pipeline::Arxiv => ("translation", render_arxiv(&blocks, translated)),
@@ -171,10 +196,12 @@ fn chinese_subtitle(
     Ok(Some(with_text.map(|(_, text)| text).collect()))
 }
 
-/// Restored translations of every segment, chunk by chunk.
-async fn translate_all(
+/// Restored replies to `prompt` for every segment, chunk by chunk: translations, or the
+/// punctuated transcript.
+async fn ask_all(
     env: &Env,
     job: &JobSpec,
+    prompt: &str,
     segments: &[Segment],
     chunks: &[Range<usize>],
 ) -> Result<Vec<String>, StepFailure> {
@@ -184,18 +211,18 @@ async fn translate_all(
         .map(|(_, v)| PathBuf::from(v))
         .ok_or_else(|| StepFailure::permanent("FLORI_CACHE_DIR is not set"))?;
     fs::create_dir_all(&cache)?;
-    let mut translated = Vec::with_capacity(segments.len());
+    let mut replies = Vec::with_capacity(segments.len());
     for (i, range) in chunks.iter().enumerate() {
         let part = &segments[range.clone()];
-        let texts = translate_chunk(env, job, &cache, part)
+        let texts = ask_chunk(env, job, prompt, &cache, part)
             .await
             .map_err(|mut failure| {
                 failure.message = format!("chunk {}/{}: {}", i + 1, chunks.len(), failure.message);
                 failure
             })?;
-        translated.extend(part.iter().zip(texts).map(|(seg, text)| seg.restore(&text)));
+        replies.extend(part.iter().zip(texts).map(|(seg, text)| seg.restore(&text)));
     }
-    Ok(translated)
+    Ok(replies)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -209,18 +236,19 @@ struct Item {
     text: String,
 }
 
-/// Translated texts of one chunk, still holding placeholders. Valid replies are cached under
+/// Reply texts of one chunk, still holding placeholders. Valid replies are cached under
 /// sha256(prompt, model, payload), so a retry only calls the AI for chunks not yet cached.
-async fn translate_chunk(
+async fn ask_chunk(
     env: &Env,
     job: &JobSpec,
+    prompt: &str,
     cache: &Path,
     part: &[Segment],
 ) -> Result<Vec<String>, StepFailure> {
     let payload = to_payload(part.iter().map(|seg| seg.text.as_str()));
     let model = &job.ai.model_translate;
     let mut hash = Sha256::new();
-    for piece in [PROMPT, model, &payload] {
+    for piece in [prompt, model, &payload] {
         hash.update(piece.len().to_le_bytes());
         hash.update(piece);
     }
@@ -232,7 +260,7 @@ async fn translate_chunk(
     {
         return Ok(texts);
     }
-    let ask = |feedback: String| format!("{PROMPT}\n{feedback}{INPUT_MARKER}\n{payload}");
+    let ask = |feedback: String| format!("{prompt}\n{feedback}{INPUT_MARKER}\n{payload}");
     let reply = ai::complete(
         env,
         job.ai.tool,
@@ -290,7 +318,7 @@ fn check(reply: &str, part: &[Segment]) -> Result<Vec<String>, String> {
             return Err(format!("第 {id} 个 segment 的 id 应为 \"{id}\""));
         }
         if item.text.trim().is_empty() {
-            return Err(format!("id {id} 的译文为空"));
+            return Err(format!("id {id} 的 text 为空"));
         }
         let mut found: Vec<usize> = pieces(&item.text)
             .into_iter()

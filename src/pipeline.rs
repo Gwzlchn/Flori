@@ -186,7 +186,8 @@ impl FromStr for StepName {
 }
 
 /// Steps of one job in execution order. `off` drops translate; `auto` always schedules it
-/// and the step itself records `meta.skipped_reason` when the source is Chinese.
+/// and the step itself decides: a Chinese paper is skipped with `meta.skipped_reason`, a Chinese
+/// video gets punctuation instead of a translation.
 pub fn plan(pipeline: Pipeline, translate: TranslateMode) -> Vec<StepSpec> {
     let names: &[StepName] = match pipeline {
         Pipeline::Video => &[
