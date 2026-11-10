@@ -1,6 +1,5 @@
-//! The note step: the source text and up to 16 video frames or 10 paper figures in one AI call.
-//! The model places images
-//! with `![描述](img:N)`; the note on disk links `assets/<basename>` instead, which publish
+//! The note step: the source text and every video keyframe or up to 10 paper figures in one AI
+//! call. The model places images with `![描述](img:N)`; the note on disk links `assets/<basename>` instead, which publish
 //! resolves because it merges every step's assets.
 
 use std::{
@@ -23,15 +22,20 @@ const NOTE_ARXIV: &str = include_str!("../../prompts/note-arxiv.md");
 const NOTE_VIDEO: &str = include_str!("../../prompts/note-video.md");
 /// Appended only when images go along.
 const NOTE_IMAGES: &str = include_str!("../../prompts/note-images.md");
-/// Videos get a frame per key point, so they send more pictures than papers do.
-const MAX_FRAMES: usize = 16;
+/// A paper sends its figures spread over the text. A video sends every keyframe so each key
+/// point can get one; video-frames bounds them per section, and only the API's per-request
+/// image limit bounds them here.
 const MAX_FIGURES: usize = 10;
+const MAX_REQUEST_IMAGES: usize = 600;
 /// How much of a frame's section text, or of a figure caption, the image list shows.
 const FRAME_TEXT_CHARS: usize = 150;
 const CAPTION_CHARS: usize = 300;
-/// Larger images are shrunk for the model; the vault keeps linking the original.
+/// Larger images are shrunk for the model; the vault keeps linking the original. Frames go as
+/// small copies so a long video costs per minute, not per pixel of its source; figures keep up
+/// to the model's standard resolution, since their text is small.
 const MAX_IMAGE_BYTES: u64 = 1 << 20;
-const MAX_IMAGE_SIDE: u32 = 1568;
+const FRAME_SIDE: u32 = 768;
+const FIGURE_SIDE: u32 = 1568;
 const SHRINK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// An image the note may show.
@@ -51,7 +55,7 @@ pub async fn note(job_dir: &Path, out_dir: &Path) -> StepResult {
 
 pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepResult {
     let job = pipeline::read_job(job_dir)?;
-    let (template, fetch, text, pictures) = match job.pipeline {
+    let (template, fetch, text, pictures, side) = match job.pipeline {
         Pipeline::Arxiv => {
             let (dir, _) = pipeline::prior_step(job_dir, StepName::ArxivConvert)?;
             let original = fs::read_to_string(pipeline::step_file(
@@ -60,7 +64,13 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
                 "original",
             )?)?;
             let figures = paper_figures(&original, &dir.join("assets"));
-            (NOTE_ARXIV, StepName::ArxivFetch, original, figures)
+            (
+                NOTE_ARXIV,
+                StepName::ArxivFetch,
+                original,
+                figures,
+                FIGURE_SIDE,
+            )
         }
         // Sections carry the transcript without image links, with times the note can cite.
         Pipeline::Video => {
@@ -72,13 +82,14 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
                 .map(|s| format!("[{}] {}", pipeline::clock(s.start_ms), s.text.trim()))
                 .collect();
             let frames = video_frames(&sections, &dir.join("assets"));
-            (NOTE_VIDEO, StepName::VideoFetch, lines.join("\n"), frames)
+            let text = lines.join("\n");
+            (NOTE_VIDEO, StepName::VideoFetch, text, frames, FRAME_SIDE)
         }
     };
     let title = pipeline::prior_step(job_dir, fetch)?.1.title;
     let title = title.unwrap_or_else(|| job.source.id.clone());
     let scratch = Scratch::new()?;
-    let pictures = sendable(env, pictures, &scratch.0).await;
+    let pictures = sendable(env, pictures, side, &scratch.0).await;
     let mut prompt = template.to_owned();
     let mut list = String::new();
     if !pictures.is_empty() {
@@ -111,8 +122,7 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
     Ok(())
 }
 
-/// Keyframes spread evenly over the video's time, each with its time and the start of its
-/// section's text. Frame names carry their time (`frame-<ms>.jpg`).
+/// Every keyframe in time order, each with its time and the start of its section's text. Frame names carry their time (`frame-<ms>.jpg`).
 fn video_frames(sections: &[Section], dir: &Path) -> Vec<Picture> {
     let mut frames = Vec::new();
     for section in sections {
@@ -136,7 +146,7 @@ fn video_frames(sections: &[Section], dir: &Path) -> Vec<Picture> {
             }
         }
     }
-    spread(frames, MAX_FRAMES)
+    spread(frames, MAX_REQUEST_IMAGES)
 }
 
 /// What a paragraph of original.md is when matching captions to images.
@@ -292,33 +302,32 @@ fn spread(mut items: Vec<(u64, Picture)>, k: usize) -> Vec<Picture> {
     items.sort_by_key(|(key, _)| *key);
     if items.len() > k && k > 1 {
         let (first, last) = (items[0].0, items[items.len() - 1].0);
-        let mut chosen: Vec<usize> = Vec::with_capacity(k);
+        let mut taken = vec![false; items.len()];
         for i in 0..k as u64 {
             let target = first + (last - first) * i / (k as u64 - 1);
             let nearest = (0..items.len())
-                .filter(|j| !chosen.contains(j))
+                .filter(|&j| !taken[j])
                 .min_by_key(|&j| items[j].0.abs_diff(target));
-            chosen.extend(nearest);
+            if let Some(j) = nearest {
+                taken[j] = true;
+            }
         }
-        let mut index = 0;
-        items.retain(|_| {
-            index += 1;
-            chosen.contains(&(index - 1))
-        });
+        let mut taken = taken.into_iter();
+        items.retain(|_| taken.next().unwrap_or(false));
     }
     items.into_iter().map(|(_, picture)| picture).collect()
 }
 
-/// Pictures ready to send. One that is too large is shrunk by ffmpeg into `scratch`; one that
+/// Pictures ready to send. One that is too large for `side` is shrunk by ffmpeg into `scratch`; one that
 /// cannot be read or shrunk, or is still too large afterwards, is left out, since a note without
 /// it is still a note and a rejected image would fail the whole call.
-async fn sendable(env: &Env, pictures: Vec<Picture>, scratch: &Path) -> Vec<Picture> {
+async fn sendable(env: &Env, pictures: Vec<Picture>, side: u32, scratch: &Path) -> Vec<Picture> {
     let mut out = Vec::with_capacity(pictures.len());
     for (i, mut picture) in pictures.into_iter().enumerate() {
-        let shrunk = match too_large(&picture.path) {
+        let shrunk = match too_large(&picture.path, side) {
             Ok(false) => Ok(None),
-            Ok(true) => match shrink(env, &picture.path, scratch, i).await {
-                Ok(copy) if too_large(&copy).unwrap_or(true) => {
+            Ok(true) => match shrink(env, &picture.path, side, scratch, i).await {
+                Ok(copy) if too_large(&copy, side).unwrap_or(true) => {
                     Err(io::Error::other("still too large after shrinking"))
                 }
                 result => result.map(Some),
@@ -337,12 +346,12 @@ async fn sendable(env: &Env, pictures: Vec<Picture>, scratch: &Path) -> Vec<Pict
     out
 }
 
-/// Over 1 MiB, or a long side over 1568px when the header tells: WebP is judged by bytes only.
-fn too_large(path: &Path) -> io::Result<bool> {
+/// Over 1 MiB, or a long side over `side` when the header tells: WebP is judged by bytes only.
+fn too_large(path: &Path, side: u32) -> io::Result<bool> {
     if fs::metadata(path)?.len() > MAX_IMAGE_BYTES {
         return Ok(true);
     }
-    Ok(image_size(&fs::read(path)?).is_some_and(|(w, h)| w.max(h) > MAX_IMAGE_SIDE))
+    Ok(image_size(&fs::read(path)?).is_some_and(|(w, h)| w.max(h) > side))
 }
 
 /// Width and height from a PNG, GIF or JPEG header; None for other formats.
@@ -386,11 +395,17 @@ fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-/// A copy within 1568x1568 for the model only. PNG stays PNG so transparency stays readable;
+/// A copy within `side` x `side` for the model only. PNG stays PNG so transparency stays readable;
 /// everything else becomes JPEG. The image bytes come from the paper, so ffmpeg reads them with
 /// a demuxer fixed by their real type, may only open local files, and gets no credentials: of
 /// the step's environment only PATH, LANG and TMPDIR.
-async fn shrink(env: &Env, source: &Path, scratch: &Path, n: usize) -> io::Result<PathBuf> {
+async fn shrink(
+    env: &Env,
+    source: &Path,
+    side: u32,
+    scratch: &Path,
+    n: usize,
+) -> io::Result<PathBuf> {
     let demuxer = match media_type(&head(source)?) {
         Some("image/png") => "png_pipe",
         Some("image/jpeg") => "jpeg_pipe",
@@ -400,9 +415,8 @@ async fn shrink(env: &Env, source: &Path, scratch: &Path, n: usize) -> io::Resul
     };
     let extension = if demuxer == "png_pipe" { "png" } else { "jpg" };
     let target = scratch.join(format!("image-{n}.{extension}"));
-    let scale = format!(
-        "scale='min({MAX_IMAGE_SIDE},iw)':'min({MAX_IMAGE_SIDE},ih)':force_original_aspect_ratio=decrease"
-    );
+    let scale =
+        format!("scale='min({side},iw)':'min({side},ih)':force_original_aspect_ratio=decrease");
     let allowed = env
         .iter()
         .filter(|(k, _)| ["PATH", "LANG", "TMPDIR"].iter().any(|name| k == name));

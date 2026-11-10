@@ -284,16 +284,31 @@ fn video_job(fx: &Fixture, frames_per_section: u64, sections: u64) {
     real_images(&dir, &assets, "jpg");
 }
 
+/// Width and height from the head the fake claude logged for an image.
+fn sent_size(image: &serde_json::Value) -> Option<(u32, u32)> {
+    let hex = image["head"].as_str()?;
+    let bytes: Option<Vec<u8>> = (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect();
+    image_size(&bytes?)
+}
+
 #[tokio::test]
-async fn a_video_sends_sixteen_frames_spread_over_time() {
+async fn a_video_sends_every_keyframe_as_a_small_copy() {
     let fx = Fixture::new(Pipeline::Video, AiTool::Claude);
-    // Eighteen frames at 0s, 10s, ... 170s.
+    // Eighteen 800x600 frames at 0s, 10s, ... 170s.
     video_job(&fx, 3, 6);
     let (out, result) = run_note(&fx, "04-note").await;
     result.unwrap();
     let images = sent_images(&fx);
-    assert_eq!(images.len(), MAX_FRAMES);
+    assert_eq!(images.len(), 18);
     assert!(images.iter().all(|i| i["media_type"] == "image/jpeg"));
+    assert!(images.iter().all(|i| sent_size(i) == Some((768, 576))));
+    let shrinks = ffmpeg_calls(&fx);
+    assert_eq!(shrinks.len(), 18);
+    let scale = format!("min({FRAME_SIDE},iw)");
+    assert!(shrinks.iter().all(|call| call.contains(&scale)));
     let note = read_note(&out);
     let times: Vec<&str> = note
         .lines()
@@ -301,17 +316,33 @@ async fn a_video_sends_sixteen_frames_spread_over_time() {
         .filter(|(n, _)| n.bytes().all(|b| b.is_ascii_digit()))
         .map(|(_, rest)| rest.split(' ').next().unwrap())
         .collect();
-    // Targets every 11.3s pick the nearest frame; 00:40 and 02:10 are the two left out.
-    assert_eq!(
-        times,
-        [
-            "00:00", "00:10", "00:20", "00:30", "00:50", "01:00", "01:10", "01:20", "01:30",
-            "01:40", "01:50", "02:00", "02:20", "02:30", "02:40", "02:50"
-        ]
-    );
+    let every: Vec<String> = (0..18).map(|i| pipeline::clock(i * 10_000)).collect();
+    assert_eq!(times, every);
     assert!(note.contains("[1] 00:00 Section 0 explains step 0 of the demo in some detail.\n"));
     // The transcript itself still follows the list.
     assert!(note.contains("\n[00:30] Section 1 explains"), "{note}");
+}
+
+#[test]
+fn a_long_video_sends_at_most_the_api_image_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let count = MAX_REQUEST_IMAGES as u64 + 1;
+    let sections: Vec<Section> = (0..count)
+        .map(|s| {
+            let name = format!("frame-{}.jpg", s * 30_000);
+            fs::write(dir.path().join(&name), image_bytes("jpg", 10, 10)).unwrap();
+            Section {
+                start_ms: s * 30_000,
+                frames: vec![name],
+                text: String::new(),
+            }
+        })
+        .collect();
+    let frames = video_frames(&sections, dir.path());
+    assert_eq!(frames.len(), MAX_REQUEST_IMAGES);
+    assert_eq!(frames[0].basename, "frame-0.jpg");
+    let last = format!("frame-{}.jpg", (count - 1) * 30_000);
+    assert_eq!(frames[MAX_REQUEST_IMAGES - 1].basename, last);
 }
 
 #[tokio::test]
@@ -435,13 +466,20 @@ fn large_images_are_shrunk_by_size_or_pixels() {
         fs::write(&path, bytes).unwrap();
         path
     };
-    assert!(!too_large(&write("ok.png", image_bytes("png", 1568, 1000))).unwrap());
-    assert!(too_large(&write("wide.png", image_bytes("png", 1569, 10))).unwrap());
-    assert!(too_large(&write("tall.jpg", image_bytes("jpg", 10, 2000))).unwrap());
+    let ok = write("ok.png", image_bytes("png", 1568, 1000));
+    assert!(!too_large(&ok, FIGURE_SIDE).unwrap());
+    assert!(too_large(&ok, FRAME_SIDE).unwrap());
+    let frame = write("frame.jpg", image_bytes("jpg", 768, 432));
+    assert!(!too_large(&frame, FRAME_SIDE).unwrap());
+    let wide = write("wide.png", image_bytes("png", 1569, 10));
+    assert!(too_large(&wide, FIGURE_SIDE).unwrap());
+    let tall = write("tall.jpg", image_bytes("jpg", 10, 2000));
+    assert!(too_large(&tall, FIGURE_SIDE).unwrap());
     let mut heavy = image_bytes("jpg", 100, 100);
     heavy.resize(MAX_IMAGE_BYTES as usize + 1, 0);
-    assert!(too_large(&write("heavy.jpg", heavy)).unwrap());
-    assert!(!too_large(&write("unknown.webp", vec![0; 100])).unwrap());
+    assert!(too_large(&write("heavy.jpg", heavy), FIGURE_SIDE).unwrap());
+    let unknown = write("unknown.webp", vec![0; 100]);
+    assert!(!too_large(&unknown, FIGURE_SIDE).unwrap());
 }
 
 #[tokio::test]

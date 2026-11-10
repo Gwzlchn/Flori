@@ -1,4 +1,5 @@
-//! video-frames: keyframes by scene cuts and similarity dedup, 30s sections and transcript.md.
+//! video-frames: keyframes by scene cuts and similarity dedup, at most two per 30s section,
+//! sections and transcript.md.
 
 use std::{collections::BTreeMap, fs, path::Path, process::Stdio};
 
@@ -20,7 +21,9 @@ const SCAN_FILTER: &str = concat!(
 );
 /// Bursts of cuts (fades, flashes) keep only their first usable frame.
 const MIN_GAP_MS: u64 = 2_000;
-pub(super) const MAX_FRAMES: usize = 60;
+/// Frames follow the timeline like master's transcript did: a long video gets more of them, a
+/// section never more than this.
+pub(super) const FRAMES_PER_SECTION: usize = 2;
 /// Near-uniform frames (black, white, fades) carry nothing.
 const FLAT_VARIANCE: f64 = 25.0;
 pub(super) const PHASH_DUPLICATE: u32 = 6;
@@ -117,40 +120,51 @@ pub(super) fn showinfo_times(stderr: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Flat filter, gap to the last kept frame, then dedup against every kept frame: a close
+/// A frame that passed the filters: time, perceptual hash, thumbnail.
+type Kept<'a> = (u64, u64, &'a [u8]);
+
+/// Flat filter, gap to the last frame, then dedup against every frame kept so far: a close
 /// perceptual hash is a duplicate outright, a moderately close one only when SSIM agrees.
+/// Each 30s section then keeps at most [`FRAMES_PER_SECTION`] of its frames, spread over it,
+/// before the next section is judged, so a slide thinned out here can still return later.
 /// Dropped candidates do not open a gap window, so a black first frame cannot hide the title
-/// card a second later.
+/// card a second later. Candidates come in time order.
 pub(super) fn pick_keyframes(candidates: &[(u64, Vec<u8>)]) -> Vec<u64> {
-    let mut kept: Vec<(u64, u64, &[u8])> = Vec::new();
+    let mut kept: Vec<Kept> = Vec::new();
+    let mut section: Vec<Kept> = Vec::new();
     for (ms, pixels) in candidates {
+        if section
+            .first()
+            .is_some_and(|(first, _, _)| first / SECTION_MS != ms / SECTION_MS)
+        {
+            kept.extend(evenly_bounded(&section, FRAMES_PER_SECTION));
+            section.clear();
+        }
         if variance(pixels) < FLAT_VARIANCE {
             continue;
         }
-        if kept
-            .last()
-            .is_some_and(|(last, _, _)| ms.saturating_sub(*last) < MIN_GAP_MS)
-        {
+        let last = section.last().or(kept.last());
+        if last.is_some_and(|(last, _, _)| ms.saturating_sub(*last) < MIN_GAP_MS) {
             continue;
         }
         let Some(hash) = perceptual_hash(pixels) else {
             continue;
         };
-        let duplicate = kept.iter().any(|(_, seen_hash, seen)| {
+        let duplicate = kept.iter().chain(&section).any(|(_, seen_hash, seen)| {
             let distance = (hash ^ seen_hash).count_ones();
             distance <= PHASH_DUPLICATE
                 || (distance <= PHASH_SIMILAR && ssim(pixels, seen) >= SSIM_DUPLICATE)
         });
         if !duplicate {
-            kept.push((*ms, hash, pixels));
+            section.push((*ms, hash, pixels));
         }
     }
-    let times: Vec<u64> = kept.into_iter().map(|(ms, _, _)| ms).collect();
-    evenly_bounded(&times, MAX_FRAMES)
+    kept.extend(evenly_bounded(&section, FRAMES_PER_SECTION));
+    kept.into_iter().map(|(ms, _, _)| ms).collect()
 }
 
-/// At most `limit` items spread over the whole list, keeping both ends.
-pub(super) fn evenly_bounded(items: &[u64], limit: usize) -> Vec<u64> {
+/// At most `limit` items spread over the whole list, keeping both ends. `limit` is at least 2.
+pub(super) fn evenly_bounded<T: Copy>(items: &[T], limit: usize) -> Vec<T> {
     if items.len() <= limit {
         return items.to_vec();
     }

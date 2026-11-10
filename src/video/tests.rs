@@ -436,13 +436,17 @@ fn moderately_close_hashes_are_decided_by_ssim() {
 }
 
 #[test]
-fn keyframe_cap_keeps_timeline_ends() {
+fn each_section_keeps_at_most_two_frames_spread_over_it() {
     assert_eq!(evenly_bounded(&[1, 2, 3, 4, 5], 3), [1, 3, 5]);
     assert_eq!(evenly_bounded(&[1, 2], 3), [1, 2]);
-    let many: Vec<u64> = (0..200).collect();
-    let capped = evenly_bounded(&many, MAX_FRAMES);
-    assert_eq!(capped.len(), MAX_FRAMES);
-    assert_eq!((capped[0], capped[MAX_FRAMES - 1]), (0, 199));
+    let candidates = vec![
+        (0, slide(0)),         // kept: first of its section
+        (10_000, slide(1)),    // thinned out: middle of three
+        (20_000, slide(2)),    // kept: last of its section
+        (40_000, slide(1)),    // kept: the frame it repeats was not kept
+        (3_600_000, slide(3)), // an hour in, still kept: no cap on the whole video
+    ];
+    assert_eq!(pick_keyframes(&candidates), [0, 20_000, 40_000, 3_600_000]);
 }
 
 #[test]
