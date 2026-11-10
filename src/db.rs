@@ -10,10 +10,8 @@ use std::{
 };
 
 use sqlx::{
-    Row, SqliteExecutor, SqlitePool,
-    sqlite::{
-        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
-    },
+    SqliteExecutor, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339, macros::offset};
 
@@ -99,32 +97,21 @@ async fn delete_unused(
 }
 
 pub async fn list_domains(db: &SqlitePool) -> sqlx::Result<Vec<Domain>> {
-    let rows: Vec<(i64, String, String)> =
-        sqlx::query_as("SELECT id, name, created FROM domains ORDER BY name")
-            .fetch_all(db)
-            .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, name, created)| Domain { id, name, created })
-        .collect())
+    sqlx::query_as("SELECT id, name, created FROM domains ORDER BY name")
+        .fetch_all(db)
+        .await
 }
 
 pub async fn create_domain(db: &SqlitePool, name: &str) -> sqlx::Result<Result<Domain, ApiError>> {
-    let created = now();
-    let id: Option<i64> = sqlx::query_scalar(
-        "INSERT INTO domains (name, created) VALUES (?, ?) ON CONFLICT DO NOTHING RETURNING id",
+    let domain: Option<Domain> = sqlx::query_as(
+        "INSERT INTO domains (name, created) VALUES (?, ?) ON CONFLICT DO NOTHING \
+         RETURNING id, name, created",
     )
     .bind(name)
-    .bind(&created)
+    .bind(now())
     .fetch_optional(db)
     .await?;
-    Ok(id
-        .map(|id| Domain {
-            id,
-            name: name.to_owned(),
-            created,
-        })
-        .ok_or_else(|| conflict("domain name already exists")))
+    Ok(domain.ok_or_else(|| conflict("domain name already exists")))
 }
 
 pub async fn delete_domain(db: &SqlitePool, id: i64) -> sqlx::Result<Result<(), ApiError>> {
@@ -133,7 +120,7 @@ pub async fn delete_domain(db: &SqlitePool, id: i64) -> sqlx::Result<Result<(), 
     delete_unused(db, "domains", guard, id).await
 }
 
-const COLLECTION: &str = "SELECT id, domain_id, name, feed_url, created FROM collections";
+const COLUMNS: &str = "id, domain_id, name, feed_url, created";
 
 type CollectionRow = (i64, i64, String, Option<String>, String);
 
@@ -153,7 +140,7 @@ fn collection((id, domain_id, name, feed_url, created): CollectionRow) -> Collec
 }
 
 pub async fn list_collections(db: &SqlitePool) -> sqlx::Result<Vec<Collection>> {
-    let sql = format!("{COLLECTION} ORDER BY domain_id, name");
+    let sql = format!("SELECT {COLUMNS} FROM collections ORDER BY domain_id, name");
     let rows: Vec<CollectionRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .fetch_all(db)
         .await?;
@@ -161,7 +148,7 @@ pub async fn list_collections(db: &SqlitePool) -> sqlx::Result<Vec<Collection>> 
 }
 
 pub async fn get_collection(db: &SqlitePool, id: i64) -> sqlx::Result<Option<Collection>> {
-    let sql = format!("{COLLECTION} WHERE id = ?");
+    let sql = format!("SELECT {COLUMNS} FROM collections WHERE id = ?");
     let row: Option<CollectionRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(db)
@@ -174,20 +161,19 @@ pub async fn create_collection(
     domain_id: i64,
     name: &str,
 ) -> sqlx::Result<Result<Collection, ApiError>> {
-    let id: Option<i64> = sqlx::query_scalar(
+    let sql = format!(
         "INSERT INTO collections (domain_id, name, created) \
          SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM domains WHERE id = ?1) \
-         ON CONFLICT DO NOTHING RETURNING id",
-    )
-    .bind(domain_id)
-    .bind(name)
-    .bind(now())
-    .fetch_optional(db)
-    .await?;
-    match id {
-        Some(id) => Ok(get_collection(db, id)
-            .await?
-            .ok_or_else(|| not_found("collection"))),
+         ON CONFLICT DO NOTHING RETURNING {COLUMNS}"
+    );
+    let row: Option<CollectionRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(domain_id)
+        .bind(name)
+        .bind(now())
+        .fetch_optional(db)
+        .await?;
+    match row {
+        Some(row) => Ok(Ok(collection(row))),
         None if exists(db, "domains", domain_id).await? => Ok(Err(conflict(
             "collection name already exists in this domain",
         ))),
@@ -205,14 +191,13 @@ pub async fn set_feed(
     id: i64,
     feed_url: Option<&str>,
 ) -> sqlx::Result<Result<Collection, ApiError>> {
-    sqlx::query("UPDATE collections SET feed_url = ? WHERE id = ?")
+    let sql = format!("UPDATE collections SET feed_url = ? WHERE id = ? RETURNING {COLUMNS}");
+    let row: Option<CollectionRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(feed_url)
         .bind(id)
-        .execute(db)
+        .fetch_optional(db)
         .await?;
-    Ok(get_collection(db, id)
-        .await?
-        .ok_or_else(|| not_found("collection")))
+    Ok(row.map(collection).ok_or_else(|| not_found("collection")))
 }
 
 /// The current step is the first one running, failed or canceled; `current_exit_code` is its
@@ -223,33 +208,19 @@ const JOB: &str = "SELECT jobs.id, pipeline, platform, source_id, url, domain_id
     LEFT JOIN steps cur ON cur.job_id = jobs.id AND cur.seq = (SELECT min(seq) FROM steps \
     WHERE job_id = jobs.id AND status IN ('running', 'failed', 'canceled'))";
 
-fn job(row: SqliteRow) -> sqlx::Result<(JobSummary, Option<String>)> {
-    let summary = JobSummary {
-        id: row.try_get("id")?,
-        pipeline: row.try_get("pipeline")?,
-        platform: row.try_get("platform")?,
-        source_id: row.try_get("source_id")?,
-        url: row.try_get("url")?,
-        domain_id: row.try_get("domain_id")?,
-        collection_id: row.try_get("collection_id")?,
-        translate: row.try_get("translate")?,
-        status: row.try_get("status")?,
-        title: row.try_get("title")?,
-        current_step: row.try_get("current_step")?,
-        current_exit_code: row.try_get("current_exit_code")?,
-        created: row.try_get("created")?,
-        updated: row.try_get("updated")?,
-    };
-    Ok((summary, row.try_get("vault_path")?))
-}
-
 pub async fn list_jobs(db: &SqlitePool, limit: u32) -> sqlx::Result<Vec<JobSummary>> {
     let sql = format!("{JOB} ORDER BY jobs.id DESC LIMIT ?");
-    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+    sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(limit)
         .fetch_all(db)
-        .await?;
-    rows.into_iter().map(|r| job(r).map(|j| j.0)).collect()
+        .await
+}
+
+#[derive(sqlx::FromRow)]
+struct JobRow {
+    #[sqlx(flatten)]
+    job: JobSummary,
+    vault_path: Option<String>,
 }
 
 /// The job and its `vault_path`.
@@ -258,11 +229,11 @@ pub async fn get_job(
     id: i64,
 ) -> sqlx::Result<Option<(JobSummary, Option<String>)>> {
     let sql = format!("{JOB} WHERE jobs.id = ?");
-    let row = sqlx::query(sqlx::AssertSqlSafe(sql))
+    let row: Option<JobRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(db)
         .await?;
-    row.map(job).transpose()
+    Ok(row.map(|row| (row.job, row.vault_path)))
 }
 
 async fn job_summary(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSummary, ApiError>> {
@@ -273,28 +244,13 @@ async fn job_summary(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSummary
 }
 
 pub async fn steps(db: &SqlitePool, job_id: i64) -> sqlx::Result<Vec<StepInfo>> {
-    let rows = sqlx::query(
+    sqlx::query_as(
         "SELECT seq, name, status, attempts, exit_code, error, started, finished \
          FROM steps WHERE job_id = ? ORDER BY seq",
     )
     .bind(job_id)
     .fetch_all(db)
-    .await?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(StepInfo {
-                seq: row.try_get("seq")?,
-                name: row.try_get("name")?,
-                status: row.try_get("status")?,
-                attempts: row.try_get("attempts")?,
-                exit_code: row.try_get("exit_code")?,
-                error: row.try_get("error")?,
-                skipped_reason: None,
-                started: row.try_get("started")?,
-                finished: row.try_get("finished")?,
-            })
-        })
-        .collect()
+    .await
 }
 
 /// Inserts one job per source with its steps and `job.json`, in one transaction. Each result is
@@ -347,7 +303,7 @@ pub async fn create_jobs(
         .fetch_optional(&mut *tx)
         .await?;
         let Some(id) = id else {
-            let (id, status): (i64, JobStatus) = sqlx::query_as(
+            let existing: JobRef = sqlx::query_as(
                 "SELECT id, status FROM jobs WHERE domain_id = ? AND collection_id IS ? \
                  AND platform = ? AND source_id = ?",
             )
@@ -357,7 +313,7 @@ pub async fn create_jobs(
             .bind(&source.id)
             .fetch_one(&mut *tx)
             .await?;
-            results.push(Err(JobRef { id, status }));
+            results.push(Err(existing));
             continue;
         };
         for (seq, step) in (1..).zip(plan(pipeline, translate)) {

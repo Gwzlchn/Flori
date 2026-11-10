@@ -194,17 +194,8 @@ async fn job_rows_carry_the_current_step_exit_code() {
     let db = pool(dir.path()).await;
     let id = queued_job(&db, dir.path()).await;
     let exit_code = || async {
-        let sql = format!("{JOB} WHERE jobs.id = ?");
-        let row = sqlx::query(sqlx::AssertSqlSafe(sql))
-            .bind(id)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-        let step: Option<StepName> = row.try_get("current_step").unwrap();
-        (
-            step,
-            row.try_get::<Option<i32>, _>("current_exit_code").unwrap(),
-        )
+        let (job, _) = get_job(&db, id).await.unwrap().unwrap();
+        (job.current_step, job.current_exit_code)
     };
     assert_eq!(exit_code().await, (None, None));
     claim_job(&db, id).await.unwrap();

@@ -124,7 +124,7 @@ pub enum StepStatus {
     Canceled,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct Domain {
     pub id: i64,
     /// Slug `^[a-z0-9][a-z0-9-]{0,47}$`; also the vault folder name. Immutable.
@@ -194,7 +194,7 @@ pub struct FeedItem {
     pub job: Option<JobRef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct JobRef {
     pub id: i64,
     pub status: JobStatus,
@@ -247,7 +247,7 @@ pub struct JobsQuery {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct JobSummary {
     pub id: i64,
     pub pipeline: Pipeline,
@@ -284,7 +284,7 @@ pub struct JobDetail {
     pub job_url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct StepInfo {
     pub seq: u32,
     pub name: StepName,
@@ -295,6 +295,7 @@ pub struct StepInfo {
     /// Last stderr line of the failed attempt.
     pub error: Option<String>,
     /// `meta.skipped_reason` from the step manifest.
+    #[sqlx(skip)]
     pub skipped_reason: Option<String>,
     pub started: Option<String>,
     pub finished: Option<String>,
