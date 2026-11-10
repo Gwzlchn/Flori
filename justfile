@@ -89,16 +89,21 @@ up tag="local":
     test -e "$FLORI_DATA_DIR/home/.claude.json" || install -m 0600 docker/claude.json "$FLORI_DATA_DIR/home/.claude.json"
     FLORI_TAG={{tag}} {{compose}} up -d
 
-# Post-deploy checks that cost nothing: health, authenticated page, WebDAV refuses anonymous access.
+# Post-deploy checks that cost nothing, all on this host: going out through the ECS loops back
+# here and domain SNI on the ECS gets reset, so Caddy is reached with --connect-to.
 smoke:
     #!/usr/bin/env bash
     set -euo pipefail
     set -a; . .local/deploy.env; . .local/secrets.env; set +a
-    base="${FLORI_PUBLIC_URL%/}"
-    curl -fsS --noproxy '*' "$base/api/health"; echo
-    test "$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "$base/")" = 401
-    test "$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -u "$FLORI_WEB_USER:$FLORI_WEB_PASSWORD" "$base/")" = 200
-    test "$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --connect-to "$DAV_DOMAIN:8790:127.0.0.1:8790" -X PROPFIND "https://$DAV_DOMAIN:8790/")" = 401
+    code() { curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "$@"; }
+    web="https://$DAV_IP:8792"; dav="https://$DAV_IP:8790"
+    to_web="--connect-to $DAV_IP:8792:127.0.0.1:8792"; to_dav="--connect-to $DAV_IP:8790:127.0.0.1:8790"
+    curl -fsS --noproxy '*' http://127.0.0.1:8780/api/health; echo
+    test "$(code http://127.0.0.1:8780/)" = 401
+    test "$(code -u "$FLORI_WEB_USER:$FLORI_WEB_PASSWORD" http://127.0.0.1:8780/)" = 200
+    test "$(code $to_web "$web/")" = 401
+    test "$(code $to_web -u "$FLORI_WEB_USER:$FLORI_WEB_PASSWORD" "$web/")" = 200
+    test "$(code $to_dav -X PROPFIND "$dav/")" = 401
     echo smoke ok
 
 # Cut a release: version in Cargo.toml, tag, image, database copy, then deploy with the new tag.

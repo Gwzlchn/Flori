@@ -1,6 +1,8 @@
 # TLS terminates here on the NAS. ECS only relays raw TCP:
 #   ECS :8790 -> NAS :8790 (WebDAV), ECS :80 -> NAS :8791 (HTTP-01 for the IP cert).
-# 443 stays closed: the ECS is not ICP-filed and domain SNI on 443 gets reset.
+# The ECS is not ICP-filed: TLS with a domain SNI gets reset on 443 and also on 8790, so
+# clients use the IP address (no SNI) and its short-lived IP certificate. The web UI has its
+# own port, ECS :8792 -> NAS :8792, because 8790 on the IP is WebDAV at the root.
 # DAV_DOMAIN (A record -> ECS) and DAV_IP (the ECS public IP) come from the environment.
 {
 	http_port 8791
@@ -22,7 +24,7 @@
 	}
 }
 
-{$DAV_DOMAIN} {
+(dns_tls) {
 	tls {
 		issuer acme {
 			dir {env.ACME_CA}
@@ -33,11 +35,15 @@
 			resolvers 223.5.5.5 223.6.6.6
 		}
 	}
+}
+
+{$DAV_DOMAIN} {
+	import dns_tls
 	import dav
 }
 
 # Let's Encrypt issues IP certificates only under the 6-day shortlived profile.
-{$DAV_IP} {
+(ip_tls) {
 	tls {
 		issuer acme {
 			dir {env.ACME_CA}
@@ -45,5 +51,16 @@
 			disable_tlsalpn_challenge
 		}
 	}
+}
+
+{$DAV_IP} {
+	import ip_tls
 	import dav
+}
+
+# The flori web UI from outside the LAN. flori checks Basic Auth, framing and cross-site
+# requests itself; Caddy keeps the Host header, which that check compares with Origin.
+{$DAV_IP}:8792 {
+	import ip_tls
+	reverse_proxy flori:8780
 }

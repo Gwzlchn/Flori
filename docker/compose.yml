@@ -56,6 +56,8 @@ services:
     ports:
       - "8790:8790"
       - "8791:8791"
+      # The web UI for clients outside the LAN (ECS :8792 relays here).
+      - "8792:8792"
     environment:
       DAV_DOMAIN: ${DAV_DOMAIN:?}
       DAV_IP: ${DAV_IP:?}
