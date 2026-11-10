@@ -2,9 +2,6 @@
 //! `flori serve` starts the server and executor. `flori step <name> <job_dir> <out_dir>` runs one
 //! built-in step as a child process of the executor (contract 1 in docs/contracts.md).
 
-// Skeleton: remove once every module is implemented.
-#![allow(dead_code)]
-
 mod ai;
 mod api;
 mod db;

@@ -9,11 +9,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use utoipa::{IntoParams, OpenApi, ToSchema};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::pipeline::{FeedKind, Pipeline, Platform, StepName, TranslateMode};
 
-#[derive(OpenApi)]
+/// Only the drift test builds the document; the server never serves it.
+#[cfg(test)]
+#[derive(utoipa::OpenApi)]
 #[openapi(
     info(
         title = "Flori",
