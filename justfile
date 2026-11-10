@@ -74,9 +74,10 @@ dev:
       -v "$(realpath {{dev_data}}):/data" \
       flori-tools:local flori serve
 
-# Frontend with hot reload; /api goes to the dev instance.
+# Frontend with hot reload; /api goes to the dev instance. Loopback only like the dev instance:
+# on other interfaces its proxy would hand the dev API to the LAN.
 dev-web:
-    cd frontend && npx vite --host 0.0.0.0
+    cd frontend && npx vite --host 127.0.0.1
 
 compose := "docker compose --env-file .local/deploy.env --env-file .local/secrets.env -f docker/compose.yml"
 
