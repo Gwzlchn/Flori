@@ -84,7 +84,7 @@ up tag="local":
     #!/usr/bin/env bash
     set -euo pipefail
     set -a; . .local/deploy.env; set +a
-    install -d -m 0700 "$FLORI_DATA_DIR" "$FLORI_DATA_DIR/home" "$FLORI_DATA_DIR/vault" "$FLORI_DATA_DIR/models" \
+    install -d -m 0700 "$FLORI_DATA_DIR" "$FLORI_DATA_DIR/home" "$FLORI_DATA_DIR/home/.claude" "$FLORI_DATA_DIR/vault" "$FLORI_DATA_DIR/models" \
       .local/flori-dav/data .local/flori-dav/config
     test -e "$FLORI_DATA_DIR/home/.claude.json" || install -m 0600 docker/claude.json "$FLORI_DATA_DIR/home/.claude.json"
     FLORI_TAG={{tag}} {{compose}} up -d

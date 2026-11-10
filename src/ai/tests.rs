@@ -199,6 +199,26 @@ async fn claude_gets_the_fixed_arguments_and_stdin() {
 }
 
 #[tokio::test]
+async fn claude_always_runs_in_one_empty_cwd_under_home() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let cwd = fx.home.path().join("ai-cwd");
+    fs::create_dir_all(cwd.join(".claude")).unwrap();
+    fs::write(cwd.join(".claude/settings.json"), "{}").unwrap();
+    for _ in 0..2 {
+        let prompt = format!("x\n{INPUT_MARKER}\nhi");
+        complete(&fx.env(), AiTool::Claude, "m-1", &prompt, 20 * SECOND)
+            .await
+            .unwrap();
+    }
+    let calls = fx.calls();
+    assert_eq!(calls.len(), 2);
+    for call in &calls {
+        assert_eq!(call["cwd"], cwd.to_str().unwrap());
+        assert_eq!(call["cwd_entries"], serde_json::json!([]));
+    }
+}
+
+#[tokio::test]
 async fn codex_reads_the_last_message_file() {
     let (fx, result) = ask(AiTool::Codex, &format!("x\n{INPUT_MARKER}\n你好")).await;
     assert_eq!(result.unwrap(), "你好");

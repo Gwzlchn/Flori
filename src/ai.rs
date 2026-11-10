@@ -139,10 +139,11 @@ pub async fn complete(
         return Err(StepFailure::permanent("AI model is not configured"));
     }
     let scratch = Scratch::new()?;
-    let cwd = scratch.0.join("cwd");
+    let mut cwd = scratch.0.join("cwd");
     let last_message = scratch.0.join("last-message.md");
     let (name, mut cmd) = match tool {
         AiTool::Claude => {
+            cwd = claude_cwd(env)?;
             let mut cmd = Command::new("claude");
             cmd.args(["-p", "--model", model, "--tools", ""])
                 .args(CLAUDE_FLAGS.split_whitespace());
@@ -337,6 +338,26 @@ async fn read_all(pipe: Option<impl AsyncRead + Unpin>) -> String {
         let _ = pipe.read_to_end(&mut buf).await;
     }
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// claude creates `~/.claude/projects/<cwd>/` for every working directory it runs in, even with
+/// --no-session-persistence, and that directory is shared with the host CLI. A fixed cwd under
+/// HOME keeps it to one entry; it is recreated empty each call so no project settings can appear.
+/// AI steps never overlap (ai Semaphore(1)), so the fixed path is not contended.
+fn claude_cwd(env: &Env) -> io::Result<PathBuf> {
+    let home = env
+        .iter()
+        .find(|(k, _)| k == "HOME")
+        .map(|(_, v)| PathBuf::from(v))
+        .ok_or_else(|| io::Error::other("HOME is not set for the AI CLI"))?;
+    let cwd = home.join("ai-cwd");
+    match fs::remove_dir_all(&cwd) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    fs::create_dir_all(&cwd)?;
+    Ok(cwd)
 }
 
 /// Per-call scratch directory under TMPDIR: `cwd/` stays empty, codex writes its reply beside it.
