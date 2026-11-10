@@ -19,6 +19,28 @@ OPTIONS = {"beam_size": 5, "vad_filter": True, "condition_on_previous_text": Fal
 # reaches the first window; hotwords go into the prompt of every window. Only for zh: in another
 # language a Chinese prompt would pull the text towards Chinese.
 ZH_HINT = "以下是普通话的句子，使用简体中文和标点符号。"
+# With the hint whisper often makes a whole 30s window one segment, and video-frames files a
+# segment's text under the section its start falls in.
+ZH_BREAKS = frozenset("。！？；，,!?;")
+
+
+def zh_pieces(start_ms: int, end_ms: int, text: str) -> list[dict]:
+    """A Chinese segment cut after each ZH_BREAKS mark that an ideograph follows, every piece
+    timed by its share of the characters. push_text puts no space next to an ideograph, so the
+    pieces join back into the same text, and digits like 1,300 are never cut."""
+    cuts = [
+        i + 1
+        for i, c in enumerate(text[:-1])
+        if c in ZH_BREAKS and "\u4e00" <= text[i + 1] <= "\u9fff"
+    ]
+    bounds = [0, *cuts, len(text)]
+
+    def ms(i: int) -> int:
+        return start_ms + (end_ms - start_ms) * i // len(text)
+
+    return [
+        {"start_ms": ms(a), "end_ms": ms(b), "text": text[a:b]} for a, b in zip(bounds, bounds[1:])
+    ]
 
 
 def load_model():
@@ -58,7 +80,10 @@ def transcribe(model, audio) -> dict:
             text = t2s(text)
         if text:
             start_ms, end_ms = round(segment.start * 1000), round(segment.end * 1000)
-            result.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
+            if chinese:
+                result.extend(zh_pieces(start_ms, end_ms, text))
+            else:
+                result.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
         if segment.end >= next_report:
             print(f"whisper: {segment.end / 60:.0f} of {info.duration / 60:.0f} min", flush=True)
             next_report += REPORT_EVERY_S

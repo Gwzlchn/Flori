@@ -54,7 +54,7 @@ class WhisperTest(unittest.TestCase):
         # opencc converts a few characters and records the configs it is built with;
         # faster_whisper hands out self.model.
         self.configs: list[str] = []
-        table = str.maketrans("隻動變從無", "只动变从无")
+        table = str.maketrans("隻動變從無為勝", "只动变从无为胜")
         configs = self.configs
 
         class OpenCC:
@@ -113,6 +113,29 @@ class WhisperTest(unittest.TestCase):
         self.assertNotIn("hotwords", detect)
         self.assertEqual(decode, {**whisper.OPTIONS, "language": "zh", "hotwords": whisper.ZH_HINT})
         self.assertFalse(decode["condition_on_previous_text"])
+
+    def test_chinese_segments_are_cut_where_an_ideograph_follows_punctuation(self) -> None:
+        text = "仅用19个交易日,吃进1,300万股。一度浮盈3个亿,Paykin在这里解释!好"
+        self.assertEqual(
+            whisper.zh_pieces(10_000, 40_000, text),
+            [
+                {"start_ms": 10_000, "end_ms": 16_750, "text": "仅用19个交易日,"},
+                {"start_ms": 16_750, "end_ms": 24_250, "text": "吃进1,300万股。"},
+                {"start_ms": 24_250, "end_ms": 39_250, "text": "一度浮盈3个亿,Paykin在这里解释!"},
+                {"start_ms": 39_250, "end_ms": 40_000, "text": "好"},
+            ],
+        )
+        # Through transcribe: a Chinese segment is cut, another language never is.
+        zh = run("transcribe", FakeModel("zh", ["本以為勝券在握，只可惜。"]))
+        self.assertEqual(
+            zh["segments"],
+            [
+                {"start_ms": 0, "end_ms": 833, "text": "本以为胜券在握，"},
+                {"start_ms": 833, "end_ms": 1250, "text": "只可惜。"},
+            ],
+        )
+        ja = run("transcribe", FakeModel("ja", ["東京,大阪。京都"]))
+        self.assertEqual([s["text"] for s in ja["segments"]], ["東京,大阪。京都"])
 
     def test_main_writes_the_mode_output_as_utf8_json(self) -> None:
         self.model = FakeModel("zh", ["一隻股票"])

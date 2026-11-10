@@ -98,6 +98,11 @@ fn text_join_spaces_only_between_latin_words() {
     push_text(&mut out, "Rust");
     push_text(&mut out, "");
     assert_eq!(out, "Hello world你好世界。Rust");
+    // whisper.py cuts Chinese after punctuation only where an ideograph follows, so the pieces
+    // join back into the same text.
+    let mut zh = String::from("仅用19个交易日,");
+    push_text(&mut zh, "吃进1,300万股。");
+    assert_eq!(zh, "仅用19个交易日,吃进1,300万股。");
     // Korean separates words with spaces.
     let mut korean = String::from("안녕하세요");
     push_text(&mut korean, "여러분");
