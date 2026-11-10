@@ -30,12 +30,12 @@ RUN python3 -m venv /opt/venv && \
       "yt-dlp[default]==${YT_DLP_VERSION}" && \
     rm /tmp/requirements.txt
 
-RUN curl -fsSL -o /usr/local/bin/claude \
+RUN curl -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/claude \
       "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/linux-x64/claude" && \
     echo "${CLAUDE_SHA256}  /usr/local/bin/claude" | sha256sum -c - && \
     chmod 755 /usr/local/bin/claude
 
-RUN curl -fsSL -o /tmp/codex.tar.gz \
+RUN curl -fsSL --retry 5 --retry-all-errors -o /tmp/codex.tar.gz \
       "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-x86_64-unknown-linux-musl.tar.gz" && \
     echo "${CODEX_SHA256}  /tmp/codex.tar.gz" | sha256sum -c - && \
     mkdir /tmp/codex && tar -xzf /tmp/codex.tar.gz -C /tmp/codex && \
@@ -43,7 +43,7 @@ RUN curl -fsSL -o /tmp/codex.tar.gz \
     rm -rf /tmp/codex /tmp/codex.tar.gz
 
 # yt-dlp needs a JavaScript runtime for YouTube challenges.
-RUN curl -fsSL -o /tmp/deno.zip \
+RUN curl -fsSL --retry 5 --retry-all-errors -o /tmp/deno.zip \
       "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" && \
     echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - && \
     python3 -m zipfile -e /tmp/deno.zip /usr/local/bin && \

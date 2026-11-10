@@ -331,9 +331,14 @@ pub fn read_manifest(step_dir: &Path) -> io::Result<Manifest> {
 }
 
 pub fn write_manifest(out_dir: &Path, manifest: &Manifest) -> io::Result<()> {
-    let mut text = serde_json::to_string_pretty(manifest).map_err(io::Error::other)?;
+    write_json(&out_dir.join(MANIFEST_FILE), manifest)
+}
+
+/// Pretty JSON with a trailing newline, the format of every JSON file steps write.
+pub fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let mut text = serde_json::to_string_pretty(value).map_err(io::Error::other)?;
     text.push('\n');
-    fs::write(out_dir.join(MANIFEST_FILE), text)
+    fs::write(path, text)
 }
 
 /// Finished output directory of an earlier step (`steps/<nn>-<name>/`), if any.
@@ -361,7 +366,74 @@ pub fn find_step(job_dir: &Path, name: StepName) -> io::Result<Option<PathBuf>> 
     Ok(None)
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
+/// Finished output of an earlier step and its manifest. The executor starts a step only after
+/// the steps before it succeeded, so a missing directory is permanent.
+pub fn prior_step(job_dir: &Path, step: StepName) -> Result<(PathBuf, Manifest), StepFailure> {
+    let dir = find_step(job_dir, step)?
+        .ok_or_else(|| StepFailure::permanent(format!("{step} output is missing")))?;
+    let manifest = read_manifest(&dir)?;
+    Ok((dir, manifest))
+}
+
+/// Path of an earlier step's file by its logical name in `manifest.files`.
+pub fn step_file(job_dir: &Path, step: StepName, name: &str) -> Result<PathBuf, StepFailure> {
+    let (dir, manifest) = prior_step(job_dir, step)?;
+    let rel = manifest
+        .files
+        .get(name)
+        .ok_or_else(|| StepFailure::permanent(format!("{step} has no {name} file")))?;
+    Ok(dir.join(rel))
+}
+
+/// One entry of video-frames' sections.json. `text` is the raw transcript; whoever writes it
+/// into Markdown escapes it with [`escape_markdown`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Section {
+    pub start_ms: u64,
+    /// Basenames under video-frames' `assets/`.
+    pub frames: Vec<String>,
+    pub text: String,
+}
+
+impl Section {
+    pub fn has_text(&self) -> bool {
+        !self.text.trim().is_empty()
+    }
+}
+
+pub fn read_sections(job_dir: &Path) -> Result<Vec<Section>, StepFailure> {
+    let path = step_file(job_dir, StepName::VideoFrames, "sections")?;
+    read_json(&path).map_err(|e| StepFailure::permanent(e.to_string()))
+}
+
+/// Section time in transcripts and notes: `MM:SS`, or `H:MM:SS` from one hour on.
+pub fn clock(ms: u64) -> String {
+    let s = ms / 1000;
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+    } else {
+        format!("{:02}:{:02}", s / 60, s % 60)
+    }
+}
+
+/// Escapes plain transcript text so Obsidian shows it literally: emphasis, code, links, tags,
+/// math, HTML, `%%` comments, and list or fence markers at the start of a line.
+pub fn escape_markdown(text: &str) -> String {
+    const SPECIAL: &[char] = &['\\', '`', '*', '_', '[', ']', '<', '>', '$', '#', '%'];
+    let mut out = String::with_capacity(text.len());
+    let mut line_start = true;
+    for c in text.chars() {
+        if SPECIAL.contains(&c) || (line_start && matches!(c, '-' | '+' | '~')) {
+            out.push('\\');
+        }
+        out.push(c);
+        line_start = c == '\n';
+    }
+    out
+}
+
+pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
     let text = fs::read_to_string(path)?;
     serde_json::from_str(&text).map_err(|err| {
         io::Error::new(

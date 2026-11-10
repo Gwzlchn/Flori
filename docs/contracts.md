@@ -96,6 +96,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 进 vault 的逻辑名只有 note、transcript、original、translation:note 写成 `<标题>.md`,其余写成 `<逻辑名>.md`;合并后的 assets 放进 `assets/`。其余逻辑名只留在 job 目录。
 - 标题取步骤顺序中第一个非 null 的 manifest.title。
 - transcript.json:`{"language": str|null, "segments": [{"start_ms": int, "end_ms": int, "text": str}]}`。
+- sections.json 的 text 是未转义的原文;写进 Markdown 的一方(video-frames 的 transcript.md、translate 的双语版)统一用 `pipeline::escape_markdown` 转义。Section 类型、取前序文件(`pipeline::step_file`)与节时间格式(`pipeline::clock`)只在 src/pipeline.rs 定义一次。
 - translate 的 meta 总有 language 与 translated(bool);language 取 zh、ja、ko、en(拉丁等字母为主,不细分语种)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long),too_long 时另有 chunks(int)。
 
 - arxiv-fetch:官方 HTML 偶尔返回 200 但内容被截断,必须检查完整闭合;ar5iv 对没有 HTML 的论文返回 200 落地页,必须识别;两者都不可用时退出 20,不回退 PDF。

@@ -95,3 +95,64 @@ fn manifest_round_trips_and_rejects_unknown_fields() {
     .unwrap();
     assert!(read_manifest(dir.path()).is_err());
 }
+
+#[test]
+fn escape_markdown_neutralizes_obsidian_syntax() {
+    assert_eq!(
+        escape_markdown("call `__init__` #rust"),
+        "call \\`\\_\\_init\\_\\_\\` \\#rust"
+    );
+    assert_eq!(
+        escape_markdown("$5-$10 50%% <b>"),
+        "\\$5-\\$10 50\\%\\% \\<b\\>"
+    );
+    assert_eq!(escape_markdown("~~~ 音乐 ~~~"), "\\~~~ 音乐 ~~~");
+    assert_eq!(
+        escape_markdown("- a\n+ b\n[[x]]"),
+        "\\- a\n\\+ b\n\\[\\[x\\]\\]"
+    );
+    assert_eq!(escape_markdown("中文 a-b"), "中文 a-b");
+}
+
+#[test]
+fn clock_switches_to_hours_at_one_hour() {
+    assert_eq!(clock(0), "00:00");
+    assert_eq!(clock(61_999), "01:01");
+    assert_eq!(clock(3_599_000), "59:59");
+    assert_eq!(clock(3_600_000), "1:00:00");
+}
+
+#[test]
+fn sections_round_trip_through_the_frames_step() {
+    let job = tempfile::tempdir().unwrap();
+    let frames = job
+        .path()
+        .join("steps")
+        .join(step_dir_name(3, StepName::VideoFrames));
+    fs::create_dir_all(&frames).unwrap();
+    let sections = vec![
+        Section {
+            start_ms: 0,
+            frames: vec!["frame-0.jpg".into()],
+            text: "hello".into(),
+        },
+        Section {
+            start_ms: 30_000,
+            frames: vec![],
+            text: "  ".into(),
+        },
+    ];
+    write_json(&frames.join("sections.json"), &sections).unwrap();
+    let mut manifest = Manifest::default();
+    manifest
+        .files
+        .insert("sections".into(), "sections.json".into());
+    write_manifest(&frames, &manifest).unwrap();
+
+    assert_eq!(read_sections(job.path()).unwrap(), sections);
+    assert!(sections[0].has_text() && !sections[1].has_text());
+    let missing = step_file(job.path(), StepName::VideoFrames, "transcript").unwrap_err();
+    assert_eq!(missing.exit, StepExit::Permanent);
+    let absent = prior_step(job.path(), StepName::Note).unwrap_err();
+    assert_eq!(absent.exit, StepExit::Permanent);
+}
