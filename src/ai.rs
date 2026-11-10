@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::atomic::{AtomicU32, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rustix::process::{Pid, Signal, kill_process_group};
@@ -164,6 +164,12 @@ pub async fn complete(
     cmd.current_dir(&cwd)
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)));
+    // One line per call in job.log: the only record of how many AI calls a job made.
+    eprintln!(
+        "{name} --model {model}: {} prompt chars",
+        prompt.chars().count()
+    );
+    let started = Instant::now();
     let run = run_cli(cmd, prompt, timeout, TERM_GRACE)
         .await
         .map_err(|e| StepFailure::permanent(format!("{name}: {e}")))?;
@@ -173,7 +179,7 @@ pub async fn complete(
             "{name} timed out after {secs}s"
         )));
     };
-    match tool {
+    let result = match tool {
         AiTool::Claude => claude_result(status, &run.stdout, &run.stderr),
         AiTool::Codex => {
             let text = fs::read_to_string(&last_message).unwrap_or_default();
@@ -191,7 +197,10 @@ pub async fn complete(
                 &format!("{detail} {}", run.stderr),
             ))
         }
-    }
+    };
+    let outcome = if result.is_ok() { "ok" } else { "failed" };
+    eprintln!("{name} {outcome} after {}s", started.elapsed().as_secs());
+    result
 }
 
 #[derive(Deserialize)]
