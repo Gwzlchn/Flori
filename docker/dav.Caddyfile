@@ -4,6 +4,9 @@
 # clients use the IP address (no SNI) and its short-lived IP certificate. The web UI has its
 # own port, ECS :8792 -> NAS :8792, because 8790 on the IP is WebDAV at the root.
 # DAV_DOMAIN (A record -> ECS) and DAV_IP (the ECS public IP) come from the environment.
+# Every public connection arrives from the ECS relay's private-network address. No rule may
+# trust private ranges (remote_ip private_ranges and the like) or skip auth for them: that would
+# let the whole internet in.
 {
 	http_port 8791
 	https_port 8790
@@ -12,6 +15,11 @@
 	order webdav before file_server
 	servers {
 		protocols h1 h2
+		# The ECS relay has few connection slots; idle and slow clients give theirs back sooner.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
 	}
 }
 
@@ -62,5 +70,11 @@
 # requests itself; Caddy keeps the Host header, which that check compares with Origin.
 {$DAV_IP}:8792 {
 	import ip_tls
+	# Access log on stderr, rotated by the json-file driver. Caddy masks Authorization in it;
+	# never turn on log_credentials.
+	log {
+		output stderr
+		format json
+	}
 	reverse_proxy flori:8780
 }
