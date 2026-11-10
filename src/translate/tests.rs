@@ -230,6 +230,266 @@ fn fences_in_numbered_and_nested_lists_stay_whole() {
     );
 }
 
+/// A line holding nothing but list markers by CommonMark's rules: `-`, `+`, `*`, or 1 to 9
+/// digits and `.` or `)`. Written apart from the code under test, as the tests' own oracle.
+fn lone_marker(line: &str) -> bool {
+    let ordered = |w: &str| {
+        let digits = &w[..w.len() - 1];
+        (1..=9).contains(&digits.len())
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && w.ends_with(['.', ')'])
+    };
+    let words: Vec<&str> = line.split_whitespace().collect();
+    !words.is_empty()
+        && words
+            .iter()
+            .all(|w| ["-", "+", "*"].contains(w) || (w.len() >= 2 && ordered(w)))
+}
+
+/// Every lone marker line is followed directly by its item's first line, indented past the last
+/// marker: a blank line or a shallower line there would leave the item empty.
+fn assert_markers_attached(md: &str) {
+    let lines: Vec<&str> = md.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if lone_marker(line) {
+            let next = lines.get(i + 1).copied().unwrap_or("");
+            let indent = next.len() - next.trim_start().len();
+            assert!(
+                !next.trim().is_empty() && indent > line.trim_end().len(),
+                "line {} {line:?} is followed by {next:?}",
+                i + 1
+            );
+        }
+    }
+}
+
+fn kinds(blocks: &[Block]) -> Vec<(bool, &str, &str)> {
+    blocks
+        .iter()
+        .map(|b| (b.keep, b.lead.as_str(), b.text.as_str()))
+        .collect()
+}
+
+/// lists.md is arxiv-convert's real output: an item whose first block is not a paragraph has its
+/// marker alone on a line, and the block follows on the next line at the item's content column.
+#[test]
+fn a_lone_list_marker_leads_the_block_its_item_starts_with() {
+    let blocks = split_blocks(&fixture_text("lists.md"));
+    assert_eq!(
+        kinds(&blocks),
+        [
+            (false, "", "# A Twelve Step Recipe"),
+            (false, "", "## 1 Method"),
+            (false, "", "The procedure has twelve steps:"),
+            (false, "", "1. Step 1 prepares the data."),
+            (
+                true,
+                "2.\n   ",
+                "```\n   def step(batch):\n   \n       return model(batch)\n   ```"
+            ),
+            (
+                true,
+                "3.\n   ",
+                "| Split | Size |\n   | --- | --- |\n   | train | 50k |"
+            ),
+            (
+                true,
+                "4. -\n     ",
+                "```\n     for x in xs:\n         print(x)\n     ```"
+            ),
+            (false, "", "   - The inner loop logs each sample."),
+            (false, "", "   Item four ends here."),
+            (
+                false,
+                "5.\n   ",
+                "- Clean the text.\n   - Tokenize it.\n6. Step 6 prepares the data.\n\
+                 7. Step 7 prepares the data.\n8. Step 8 prepares the data.\n\
+                 9. Step 9 prepares the data."
+            ),
+            (
+                true,
+                "10.\n    ",
+                "```\n    def step(batch):\n    \n        return model(batch)\n    ```"
+            ),
+            (
+                true,
+                "11.\n    ",
+                "| Split | Size |\n    | --- | --- |\n    | train | 50k |"
+            ),
+            (true, "12.\n    ", "$$x=1$$"),
+            (false, "", "After the list we report results."),
+            (true, "-\n  ", "```\n  make train\n  ```"),
+            (false, "", "- Second bullet."),
+            (false, "", "  - Inner one."),
+            (true, "  -\n    ", "```\n    inner code\n    ```"),
+            (false, "", "The end."),
+        ]
+    );
+}
+
+#[test]
+fn other_markers_lead_too_and_a_table_ends_at_its_last_row() {
+    let md = "*\n  ```\n  a\n  ```\n\n+\n  | a |\n  | - |\n+ Next.\n\n\
+              7)\n   $$y$$\n\n\
+              1. Text first.\n   \n   | b |\n   | - |\n2. Second.\n";
+    assert_eq!(
+        kinds(&split_blocks(md)),
+        [
+            (true, "*\n  ", "```\n  a\n  ```"),
+            (true, "+\n  ", "| a |\n  | - |"),
+            (false, "", "+ Next."),
+            (true, "7)\n   ", "$$y$$"),
+            (false, "", "1. Text first."),
+            (true, "", "   | b |\n   | - |"),
+            (false, "", "2. Second."),
+        ]
+    );
+}
+
+#[test]
+fn marker_columns_follow_commonmark() {
+    let cases = [
+        ("-", Some(2)),
+        ("+ ", Some(2)),
+        ("  *", Some(4)),
+        ("1.", Some(3)),
+        ("9)", Some(3)),
+        ("10.", Some(4)),
+        ("123456789.", Some(11)),
+        ("4. -", Some(5)),
+        ("2.  ", Some(3)),
+        ("1234567890.", None),
+        ("1.5", None),
+        ("-1.", None),
+        ("10.x", None),
+        ("#", None),
+        ("", None),
+        ("   ", None),
+        ("---", None),
+        ("- - -", None),
+        ("4. * * *", None),
+    ];
+    for (line, want) in cases {
+        assert_eq!(marker_column(line), want, "{line:?}");
+    }
+    assert!(leads("10.", "    ```"));
+    assert!(!leads("10.", "   ```"));
+    assert!(!leads("10.", "    "));
+    assert!(!leads("2. ", "3. Next."));
+}
+
+#[test]
+fn marker_only_blocks_are_kept() {
+    // Empty items, and a marker whose next line sits left of the item's content column, so
+    // CommonMark ends the item there and the marker leads nothing.
+    let md = "Intro.\n\n-\n\n1. \n2. \n\n10.\n   ```\n   x = 1\n   ```\n\nEnd.\n";
+    assert_eq!(
+        kinds(&split_blocks(md)),
+        [
+            (false, "", "Intro."),
+            (true, "", "-"),
+            (true, "", "1. \n2. "),
+            (true, "", "10."),
+            (true, "", "   ```\n   x = 1\n   ```"),
+            (false, "", "End."),
+        ]
+    );
+}
+
+#[test]
+fn list_items_starting_with_text_split_as_before() {
+    let items: Vec<String> = (1..=11).map(|n| format!("{n}. Item {n} text.")).collect();
+    let md = format!(
+        "{}\n    \n    Second paragraph of eleven.\n    \n    ```\n    x = 1\n    ```\n\
+         12. Twelve.\n13. \n14. Fourteen.\n\n- Outer.\n  \n  - Inner.\n- Last.\n",
+        items.join("\n")
+    );
+    let blocks = split_blocks(&md);
+    let first = items.join("\n");
+    assert_eq!(
+        kinds(&blocks),
+        [
+            (false, "", first.as_str()),
+            (false, "", "    Second paragraph of eleven."),
+            (true, "", "    ```\n    x = 1\n    ```"),
+            (false, "", "12. Twelve.\n13. \n14. Fourteen."),
+            (false, "", "- Outer."),
+            (false, "", "  - Inner.\n- Last."),
+        ]
+    );
+}
+
+#[test]
+fn a_lone_marker_renders_directly_above_its_block() {
+    let blocks = split_blocks(&fixture_text("lists.md"));
+    // A stand-in translation that keeps every mark and space but visibly changes the words.
+    let translated = blocks
+        .iter()
+        .filter(|b| !b.keep)
+        .map(|b| b.text.to_uppercase())
+        .collect();
+    let md = render_arxiv(&blocks, translated);
+    let want = concat!(
+        "# A TWELVE STEP RECIPE\n\n## 1 METHOD\n\nTHE PROCEDURE HAS TWELVE STEPS:\n\n",
+        "1. STEP 1 PREPARES THE DATA.\n\n",
+        "2.\n   ```\n   def step(batch):\n   \n       return model(batch)\n   ```\n\n",
+        "3.\n   | Split | Size |\n   | --- | --- |\n   | train | 50k |\n\n",
+        "4. -\n     ```\n     for x in xs:\n         print(x)\n     ```\n\n",
+        "   - THE INNER LOOP LOGS EACH SAMPLE.\n\n   ITEM FOUR ENDS HERE.\n\n",
+        "5.\n   - CLEAN THE TEXT.\n   - TOKENIZE IT.\n6. STEP 6 PREPARES THE DATA.\n",
+        "7. STEP 7 PREPARES THE DATA.\n8. STEP 8 PREPARES THE DATA.\n",
+        "9. STEP 9 PREPARES THE DATA.\n\n",
+        "10.\n    ```\n    def step(batch):\n    \n        return model(batch)\n    ```\n\n",
+        "11.\n    | Split | Size |\n    | --- | --- |\n    | train | 50k |\n\n",
+        "12.\n    $$x=1$$\n\n",
+        "AFTER THE LIST WE REPORT RESULTS.\n\n",
+        "-\n  ```\n  make train\n  ```\n\n- SECOND BULLET.\n\n",
+        "  - INNER ONE.\n\n  -\n    ```\n    inner code\n    ```\n\n",
+        "THE END.\n",
+    );
+    assert_eq!(md, want);
+    assert_markers_attached(&md);
+}
+
+#[tokio::test]
+async fn list_markers_and_their_blocks_never_reach_the_ai() {
+    let original = fixture_text("lists.md");
+    let fx = arxiv(&original);
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let calls = fx.calls();
+    assert_eq!(calls.len(), 1);
+    let prompt = calls[0]["prompt"].as_str().unwrap();
+    let (_, input) = prompt.rsplit_once(INPUT_MARKER).unwrap();
+    let payload: Payload = serde_json::from_str(input.trim()).unwrap();
+    let sent: Vec<&str> = payload.segments.iter().map(|s| s.text.as_str()).collect();
+    // An item that starts with text is sent as before, marker and all.
+    assert!(sent.contains(&"1. Step 1 prepares the data."), "{sent:#?}");
+    for text in &sent {
+        assert!(!text.lines().all(lone_marker), "marker only: {text:?}");
+        assert!(!text.lines().any(lone_marker), "lone marker in {text:?}");
+        for code in [
+            "```",
+            "|",
+            "$$",
+            "batch",
+            "print",
+            "make train",
+            "inner code",
+        ] {
+            assert!(!text.contains(code), "{code} sent in {text:?}");
+        }
+    }
+    let translation = fs::read_to_string(out.join("translation.md")).unwrap();
+    assert_markers_attached(&translation);
+    // The echo gives back every line; only blank lines between blocks may differ.
+    let filled = |md: &str| -> Vec<String> {
+        let lines = md.lines().filter(|l| !l.trim().is_empty());
+        lines.map(str::to_owned).collect()
+    };
+    assert_eq!(filled(&translation), filled(&original));
+}
+
 #[test]
 fn fence_open_and_close_edge_cases() {
     assert_eq!(fence("```py`x"), None);

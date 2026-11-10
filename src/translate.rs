@@ -430,30 +430,46 @@ fn span_len(s: &str, pipeline: Pipeline) -> usize {
     0
 }
 
-/// A blank-line separated unit of original.md. Kept blocks are copied verbatim: code fences and
-/// `$$` math (even across blank lines), tables, image-only paragraphs, and the References
-/// section up to the next heading of the same or a higher level. Footnote definitions are prose
-/// wherever they stand; their `[^label]: ` lead stays out of the text so the AI cannot move it.
+/// A unit of original.md, mostly blank-line separated. Kept blocks are copied verbatim: code
+/// fences and `$$` math (even across blank lines), tables, image-only paragraphs, list markers
+/// with no content, and the References section up to the next heading of the same or a higher
+/// level. Footnote definitions are prose wherever they stand; their `[^label]: ` lead stays out
+/// of the text so the AI cannot move it.
 #[derive(Debug)]
 struct Block {
-    /// Written verbatim before the translated text, e.g. `[^3]: `.
+    /// Written verbatim before the text, kept or translated: a footnote definition's `[^3]: `, or
+    /// the lone marker lines of the list item this block starts plus its first line's indent.
     lead: String,
     text: String,
     keep: bool,
 }
 
 fn split_blocks(md: &str) -> Vec<Block> {
+    let lines: Vec<&str> = md.lines().collect();
     let mut out = Vec::new();
-    let mut lines = md.lines().peekable();
     let mut references: Option<usize> = None;
-    let starts_block = |l: &str| {
-        let t = l.trim_start();
-        fence(l).is_some() || display(t) || heading(t).is_some()
+    let leads_at = |i: usize| lines.get(i + 1).is_some_and(|next| leads(lines[i], next));
+    let starts_block = |i: usize| {
+        let (l, t) = (lines[i], lines[i].trim_start());
+        fence(l).is_some() || display(t) || heading(t).is_some() || leads_at(i)
     };
-    while let Some(line) = lines.next() {
-        if line.trim().is_empty() {
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim().is_empty() {
+            i += 1;
             continue;
         }
+        // arxiv-convert writes an item whose first block is not a paragraph as its marker alone
+        // on a line, the block directly below. A blank line between them would end the item,
+        // so the marker travels with the block and never reaches the AI.
+        let mut lead = String::new();
+        while leads_at(i) {
+            lead.push_str(lines[i]);
+            lead.push('\n');
+            i += 1;
+        }
+        let line = lines[i];
+        i += 1;
         let first = line.trim_start();
         let mut text = line.to_owned();
         let mut take = |l: &str| {
@@ -461,8 +477,9 @@ fn split_blocks(md: &str) -> Vec<Block> {
             text.push_str(l);
         };
         let keep = if let Some(open) = fence(line) {
-            for l in lines.by_ref() {
+            while let Some(l) = lines.get(i) {
                 take(l);
+                i += 1;
                 if closes(l, open) {
                     break;
                 }
@@ -470,9 +487,9 @@ fn split_blocks(md: &str) -> Vec<Block> {
             true
         } else if display(first) {
             let mut closed = first[2..].contains("$$");
-            while !closed {
-                let Some(l) = lines.next() else { break };
+            while let Some(l) = lines.get(i).filter(|_| !closed) {
                 take(l);
+                i += 1;
                 closed = l.contains("$$");
             }
             true
@@ -488,21 +505,83 @@ fn split_blocks(md: &str) -> Vec<Block> {
             }
             references.is_some()
         } else {
-            while let Some(l) = lines.next_if(|l| !l.trim().is_empty() && !starts_block(l)) {
+            // A table ends at its last row: in a list the next item follows it directly.
+            let table = first.starts_with('|');
+            let joins = |l: &str| !table || l.trim_start().starts_with('|');
+            while let Some(l) = lines
+                .get(i)
+                .filter(|l| !l.trim().is_empty() && !starts_block(i) && joins(l))
+            {
                 take(l);
+                i += 1;
             }
             let all = |p: &str| text.lines().all(|l| l.trim_start().starts_with(p));
             let reference = references.is_some() && footnote_lead(&text) == 0;
-            reference || all("|") || all("![")
+            let markers = text.lines().all(|l| marker_column(l).is_some());
+            reference || markers || all("|") || all("![")
         };
-        let lead = if keep { 0 } else { footnote_lead(&text) };
+        // The first line's indent goes with the markers: a reply that drops leading spaces must
+        // not move the block out of its item.
+        let indent = if lead.is_empty() {
+            0
+        } else {
+            line.len() - first.len()
+        };
+        let note = if keep {
+            0
+        } else {
+            footnote_lead(&text[indent..])
+        };
+        lead.push_str(&text[..indent + note]);
         out.push(Block {
-            lead: text[..lead].to_owned(),
-            text: text[lead..].to_owned(),
+            lead,
+            text: text[indent + note..].to_owned(),
             keep,
         });
     }
     out
+}
+
+/// The content column of a line holding nothing but list markers, or None. `4. -` is item 4
+/// whose first block is a list, and that list's first item starts with a block. Markers are
+/// CommonMark's: `-`, `+`, `*`, or 1 to 9 digits and `.` or `)`, each followed by a space or the
+/// end of the line. The last item begins with a blank line, so its content column is one past
+/// its marker. `- - -` and `* * *` are thematic breaks, not markers.
+fn marker_column(line: &str) -> Option<usize> {
+    let mut end = None;
+    loop {
+        let at = end.unwrap_or(0);
+        let rest = line[at..].trim_start_matches(' ');
+        if rest.is_empty() {
+            return end.map(|e| e + 1);
+        }
+        let ink: Vec<char> = rest.chars().filter(|c| *c != ' ').collect();
+        if ink.len() >= 3 && "-*_".contains(ink[0]) && ink.iter().all(|c| *c == ink[0]) {
+            return None;
+        }
+        let width = if rest.starts_with(['-', '+', '*']) {
+            1
+        } else {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            let closed = rest[digits..].starts_with(['.', ')']);
+            if !(1..=9).contains(&digits) || !closed {
+                return None;
+            }
+            digits + 1
+        };
+        let after = &rest[width..];
+        if !after.is_empty() && !after.starts_with(' ') {
+            return None;
+        }
+        end = Some(line.len() - after.len());
+    }
+}
+
+/// Whether `line` holds only list markers and `next` starts their item's content: not blank and
+/// indented to the content column. A shallower line means CommonMark ends the item empty.
+fn leads(line: &str, next: &str) -> bool {
+    let indent = next.len() - next.trim_start_matches(' ').len();
+    marker_column(line).is_some_and(|column| !next.trim().is_empty() && indent >= column)
 }
 
 /// Byte length of a footnote mark `[^label]` at the start of `s`, or 0.
@@ -581,11 +660,12 @@ fn render_arxiv(blocks: &[Block], translated: Vec<String>) -> String {
     let parts: Vec<String> = blocks
         .iter()
         .map(|b| {
-            if b.keep {
+            let text = if b.keep {
                 b.text.clone()
             } else {
-                b.lead.clone() + &translated.next().unwrap_or_default()
-            }
+                translated.next().unwrap_or_default()
+            };
+            b.lead.clone() + &text
         })
         .collect();
     parts.join("\n\n") + "\n"
