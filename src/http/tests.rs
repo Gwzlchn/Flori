@@ -213,22 +213,31 @@ async fn wrong_credentials_are_slowed_but_never_locked_out() {
 
 #[test]
 fn auth_failure_lines_name_the_request_but_not_the_credentials() {
-    let request = |uri: &str| {
+    let request = |method: &str, uri: &str, host: &str| {
         let credentials = BASE64.encode("someone:hunter2-guess");
         HttpRequest::builder()
-            .method("POST")
+            .method(method)
             .uri(uri)
-            .header(HOST, "203.0.113.7:8792")
+            .header(HOST, host)
             .header(AUTHORIZATION, format!("Basic {credentials}"))
             .body(AxumBody::empty())
             .unwrap()
     };
+    let host = "203.0.113.7:8792";
     assert_eq!(
-        refused(&request("/api/jobs?token=from-query")),
+        refused(&request("POST", "/api/jobs?token=from-query", host)),
         r#"wrong credentials: POST "/api/jobs" host "203.0.113.7:8792""#
     );
-    let long = refused(&request(&format!("/{}", "a".repeat(5000))));
-    assert!(long.len() < LOGGED_PATH + 60, "{}", long.len());
+    // hyper bounds these only by the size of the whole head, about 400KB.
+    let long = "a".repeat(5000);
+    for (method, uri, host) in [
+        ("POST", &*format!("/{long}"), host),
+        (&*long.to_uppercase(), "/", host),
+        ("POST", "/", &*long),
+    ] {
+        let line = refused(&request(method, uri, host));
+        assert!(line.len() < LOGGED_CHARS + 60, "{}", line.len());
+    }
 }
 
 #[tokio::test]

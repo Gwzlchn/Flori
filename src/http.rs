@@ -67,8 +67,9 @@ const LOG_CHUNK: u64 = 256 * 1024;
 const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const FAILURE_LIMIT: u32 = 10;
 const FAILURE_DELAY: Duration = Duration::from_secs(2);
-/// Characters of the path kept in an auth failure line, so long paths cannot flood the log.
-const LOGGED_PATH: usize = 200;
+/// Characters kept of each request field in an auth failure line. hyper only bounds the request
+/// head as a whole, so a long method, path or Host would otherwise flood the log.
+const LOGGED_CHARS: usize = 200;
 /// CSP of the SPA's pages. markdown-it writes table alignment as `style` attributes, hence
 /// 'unsafe-inline' for styles but not scripts; its images may be data: URLs. Images on other
 /// hosts stay unloaded, so previewing an untrusted note does not reveal the reader to them.
@@ -258,17 +259,20 @@ fn challenge() -> Response {
 /// What a wrong-credential line records: method, path and Host. Never the Authorization header,
 /// whose user name and password may be the real ones mistyped, and never the query.
 fn refused(req: &Request) -> String {
-    let path = req.uri().path();
-    let path = path
-        .char_indices()
-        .nth(LOGGED_PATH)
-        .map_or(path, |(end, _)| &path[..end]);
     let host = req.headers().get(HOST).and_then(|v| v.to_str().ok());
     format!(
-        "wrong credentials: {} {path:?} host {:?}",
-        req.method(),
-        host.unwrap_or("-")
+        "wrong credentials: {} {:?} host {:?}",
+        clip(req.method().as_str()),
+        clip(req.uri().path()),
+        clip(host.unwrap_or("-"))
     )
+}
+
+fn clip(field: &str) -> &str {
+    field
+        .char_indices()
+        .nth(LOGGED_CHARS)
+        .map_or(field, |(end, _)| &field[..end])
 }
 
 /// Job files include fetched HTML; it must not run scripts or submit forms as this origin with the

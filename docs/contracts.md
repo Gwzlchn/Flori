@@ -188,7 +188,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 - 认证:Basic Auth,用户名 FLORI_WEB_USER,口令 FLORI_WEB_PASSWORD,服务端常量时间比较,不存哈希。静态页面和 /api 都要认证。
 - 认证失败:
   - 不带 `Authorization` 的请求是浏览器的第一次请求,直接 401,不记日志也不计数。
-  - 带了 `Authorization` 但不对时,stderr 记一行:方法、路径(不含查询串,截到 200 字符)和 Host,不记凭据。
+  - 带了 `Authorization` 但不对时,stderr 记一行:方法、路径(不含查询串)和 Host,各截到 200 字符,不记凭据。
   - 失败按 60s 窗口全局计数,不按来源:外网请求都来自 ECS 同一个地址。窗口内超过 10 次后,每次失败响应延迟 2s 再返回。不锁定,正确口令不计数也不延迟。
 - 跨站与嵌入:浏览器给跨站请求和框架里的页面也带上缓存的 Basic Auth,所以服务端在认证之前对下列请求返回 403:
   - `Sec-Fetch-Dest` 为 iframe、frame、embed 或 object,不论方法与路径。
