@@ -199,6 +199,13 @@ async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
         (status, code(&body)),
         (StatusCode::BAD_REQUEST, "invalid_name")
     );
+    let unsorted = json!({"domain_id": ml, "name": "unsorted"});
+    let (status, body) = app.post("/api/collections", unsorted).await;
+    assert_eq!(
+        (status, code(&body)),
+        (StatusCode::BAD_REQUEST, "invalid_name"),
+        "reserved name"
+    );
     let (_, list) = app.get("/api/collections").await;
     assert_eq!(list.as_array().unwrap().len(), 2);
 
@@ -227,6 +234,18 @@ async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = app.call("DELETE", "/api/domains/999", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // A domain whose only dependant is a job without a collection.
+    let solo = app.domain("unsorted").await;
+    let job = json!({"url": "2401.12345", "domain_id": solo});
+    assert_eq!(app.post("/api/jobs", job).await.0, StatusCode::CREATED);
+    let (status, body) = app
+        .call("DELETE", &format!("/api/domains/{solo}"), None)
+        .await;
+    assert_eq!(
+        (status, code(&body)),
+        (StatusCode::CONFLICT, "conflict"),
+        "domain with a job"
+    );
     let lone = app.domain("lone").await;
     let (status, _) = app
         .call("DELETE", &format!("/api/domains/{lone}"), None)
@@ -239,7 +258,10 @@ async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
         .iter()
         .map(|d| d["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, [format!("0{}", "a".repeat(47)).as_str(), "ml"]);
+    assert_eq!(
+        names,
+        [format!("0{}", "a".repeat(47)).as_str(), "ml", "unsorted"]
+    );
 }
 
 #[tokio::test]
@@ -329,6 +351,11 @@ async fn files_stay_inside_the_job_and_support_range() {
     let video: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
     fs::create_dir_all(dir.join("media")).unwrap();
     fs::write(dir.join("media/video.mp4"), &video).unwrap();
+    fs::write(
+        dir.join("media/page.html"),
+        "<script>fetch('/api/jobs')</script>",
+    )
+    .unwrap();
     fs::write(app.dir.path().join("secret.txt"), "secret").unwrap();
     std::os::unix::fs::symlink(app.dir.path().join("secret.txt"), dir.join("link.txt")).unwrap();
 
@@ -353,10 +380,30 @@ async fn files_stay_inside_the_job_and_support_range() {
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(headers[header::CONTENT_RANGE], "bytes 100-199/1000");
     assert_eq!(body, video[100..200]);
+    let sandboxed = |headers: &axum::http::HeaderMap| {
+        headers[header::CONTENT_SECURITY_POLICY] == "sandbox"
+            && headers[header::X_CONTENT_TYPE_OPTIONS] == "nosniff"
+    };
+    assert!(sandboxed(&headers), "range response");
+    let (status, headers, _) = app
+        .send(get(format!("/api/jobs/{id}/files/media/page.html"), None))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    assert!(sandboxed(&headers), "html response");
+    let (_, headers, _) = app
+        .send(get(format!("/api/jobs/{id}/files/missing"), None))
+        .await;
+    assert!(sandboxed(&headers), "404 response");
 
     for path in [
-        "../../secret.txt",
-        "..%2F..%2Fsecret.txt",
+        "../../../secret.txt",
+        "..%2F..%2F..%2Fsecret.txt",
         "link.txt",
         "%2Fetc%2Fpasswd",
         "media",
@@ -378,19 +425,7 @@ async fn files_stay_inside_the_job_and_support_range() {
 async fn logs_return_whole_lines_from_an_offset() {
     let app = app().await;
     let ml = app.domain("ml").await;
-    // A step that hangs keeps the executor away from job.log while the test owns it.
-    fs::create_dir_all(app.job_dir(1).join("fake")).unwrap();
-    fake(&app.state.config, 1, "arxiv-fetch", "hang");
-    let (_, job) = app
-        .post("/api/jobs", json!({"url": "2401.12345", "domain_id": ml}))
-        .await;
-    let id = job["id"].as_i64().unwrap();
-    assert_eq!(id, 1);
-    let log = app.job_dir(id).join("job.log");
-    wait_for("attempt header", || {
-        fs::read_to_string(&log).is_ok_and(|t| t.contains("action hang"))
-    })
-    .await;
+    let (id, log) = hold_log(&app, ml).await;
     let header = fs::read_to_string(&log).unwrap();
     fs::OpenOptions::new()
         .append(true)
@@ -410,11 +445,66 @@ async fn logs_return_whole_lines_from_an_offset() {
     );
     let (status, _) = app.get("/api/jobs/999/logs").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, body) = app.get(&format!("/api/jobs/{id}/logs?offset=-1")).await;
-    assert_eq!(
-        (status, code(&body)),
-        (StatusCode::BAD_REQUEST, "invalid_request")
-    );
+    let past = fs::metadata(&log).unwrap().len() + 1;
+    for offset in [
+        "-1".to_owned(),
+        past.to_string(),
+        "9223372036854775808".into(),
+        u64::MAX.to_string(),
+    ] {
+        let (status, body) = app
+            .get(&format!("/api/jobs/{id}/logs?offset={offset}"))
+            .await;
+        assert_eq!(
+            (status, code(&body)),
+            (StatusCode::BAD_REQUEST, "invalid_request"),
+            "{offset}"
+        );
+    }
+    app.post(&format!("/api/jobs/{id}/cancel"), json!(null))
+        .await;
+}
+
+/// A job whose second step hangs, so the test can append to job.log undisturbed.
+async fn hold_log(app: &App, domain_id: i64) -> (i64, PathBuf) {
+    let id = 1;
+    fake(&app.state.config, id, "video-transcribe", "hang");
+    let job = json!({"url": "https://youtu.be/dQw4w9WgXcQ", "domain_id": domain_id});
+    let (_, job) = app.post("/api/jobs", job).await;
+    assert_eq!(job["id"], id);
+    let log = app.job_dir(id).join("job.log");
+    let hanging = || {
+        fs::read_to_string(&log).is_ok_and(|t| t.contains("video-transcribe attempt 1 token hang"))
+    };
+    wait_for("hanging step", hanging).await;
+    (id, log)
+}
+
+#[tokio::test]
+async fn log_lines_longer_than_a_chunk_split_between_characters() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    let (id, log) = hold_log(&app, ml).await;
+    // 256KiB from the start of this line ends inside the first 数.
+    let line = format!("{}数数数\n", "a".repeat(256 * 1024 - 1));
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()))
+        .unwrap();
+    let whole = fs::read_to_string(&log).unwrap();
+    let (mut text, mut offset) = (String::new(), 0);
+    while offset < whole.len() as u64 {
+        let (status, chunk) = app
+            .get(&format!("/api/jobs/{id}/logs?offset={offset}"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let piece = chunk["text"].as_str().unwrap();
+        assert!(!piece.is_empty() && !piece.contains('\u{FFFD}'));
+        text.push_str(piece);
+        offset = chunk["next_offset"].as_u64().unwrap();
+    }
+    assert_eq!(text, whole);
     app.post(&format!("/api/jobs/{id}/cancel"), json!(null))
         .await;
 }
@@ -760,4 +850,53 @@ async fn every_feed_kind_binds_to_a_form_feed_py_accepts() {
         assert_eq!(status, StatusCode::OK, "{input}: {list}");
         assert_eq!(list["items"].as_array().unwrap().len(), 1);
     }
+}
+
+#[tokio::test]
+async fn writes_from_other_sites_are_refused() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    hold_log(&app, ml).await;
+    let cancel = |headers: &[(&str, &str)]| {
+        let mut req = HttpRequest::builder()
+            .method("POST")
+            .uri("/api/jobs/1/cancel")
+            .header(AUTHORIZATION, auth());
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        req.body(AxumBody::empty()).unwrap()
+    };
+    for headers in [
+        &[("sec-fetch-site", "cross-site")][..],
+        &[("sec-fetch-site", "same-site")],
+        &[("origin", "http://evil.example"), ("host", "nas.lan:8780")],
+        &[("origin", "null"), ("host", "nas.lan:8780")],
+    ] {
+        let (status, _, _) = app.send(cancel(headers)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
+    }
+    let (status, _, body) = app
+        .send(
+            HttpRequest::builder()
+                .uri("/api/jobs/1")
+                .header(AUTHORIZATION, auth())
+                .header("sec-fetch-site", "cross-site")
+                .body(AxumBody::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "reads stay allowed");
+    let detail: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        detail["job"]["status"], "running",
+        "refused cancels changed nothing"
+    );
+    let same = [
+        ("sec-fetch-site", "same-origin"),
+        ("origin", "http://nas.lan:8780"),
+        ("host", "nas.lan:8780"),
+    ];
+    let (status, _, _) = app.send(cancel(&same)).await;
+    assert_eq!(status, StatusCode::OK);
 }

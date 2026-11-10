@@ -8,8 +8,11 @@ use axum::{
         FromRequest, FromRequestParts, Path, Query, Request, State, rejection::PathRejection,
     },
     http::{
-        StatusCode,
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        HeaderValue, StatusCode,
+        header::{
+            AUTHORIZATION, CONTENT_SECURITY_POLICY, HOST, ORIGIN, WWW_AUTHENTICATE,
+            X_CONTENT_TYPE_OPTIONS,
+        },
         request::Parts,
     },
     middleware::{self, Next},
@@ -79,7 +82,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{id}/logs", get(get_logs))
         .route("/api/jobs/{id}/retry", post(retry_job))
         .route("/api/jobs/{id}/cancel", post(cancel_job))
-        .route("/api/jobs/{id}/files/{*path}", get(get_file))
+        .route(
+            "/api/jobs/{id}/files/{*path}",
+            get(get_file).layer(middleware::map_response(sandbox)),
+        )
         .route("/api/{*rest}", any(no_route))
         .fallback_service(web)
         .layer(Extension(FeedRefresh::default()))
@@ -105,12 +111,33 @@ async fn basic_auth(State(expected): State<[u8; 32]>, req: Request, next: Next) 
             .fold(0, |acc, (a, b)| acc | (a ^ b));
         std::hint::black_box(diff) == 0
     });
-    if ok {
-        next.run(req).await
-    } else {
+    if !ok {
         let challenge = [(WWW_AUTHENTICATE, "Basic realm=\"flori\", charset=\"UTF-8\"")];
-        (StatusCode::UNAUTHORIZED, challenge).into_response()
+        return (StatusCode::UNAUTHORIZED, challenge).into_response();
     }
+    if cross_site(&req) {
+        return (StatusCode::FORBIDDEN, "cross-site request refused").into_response();
+    }
+    next.run(req).await
+}
+
+/// Browsers attach cached Basic credentials to a cross-site form post, so a write must come from
+/// this origin. Clients that send neither header, like curl, are not browsers and pass.
+fn cross_site(req: &Request) -> bool {
+    let header = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
+    let site = header("sec-fetch-site").is_some_and(|site| site != "same-origin" && site != "none");
+    let origin = header(ORIGIN.as_str()).is_some_and(|origin| {
+        origin.split_once("://").map(|(_, host)| host) != header(HOST.as_str())
+    });
+    !req.method().is_safe() && (site || origin)
+}
+
+/// Job files include fetched HTML; it must not run as this origin with the user's credentials.
+async fn sandbox(mut res: Response) -> Response {
+    let headers = res.headers_mut();
+    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    res
 }
 
 /// Handler error: a contract error body, or a 500 for broken database or disk.
@@ -264,6 +291,10 @@ pub async fn create_collection(
     Body(body): Body<NewCollection>,
 ) -> Res<(StatusCode, Json<Collection>)> {
     check_name(&body.name)?;
+    if body.name == "unsorted" {
+        let reserved = "unsorted is the vault folder of jobs without a collection";
+        return Err(ApiError::new(ErrorCode::InvalidName, reserved).into());
+    }
     let collection = db::create_collection(&s.db, body.domain_id, &body.name).await??;
     Ok((StatusCode::CREATED, Json(collection)))
 }
@@ -566,7 +597,7 @@ fn encode(text: &str) -> String {
 
 #[utoipa::path(
     get, path = "/api/jobs/{id}/logs", params(("id" = i64, Path), LogQuery),
-    responses((status = 200, body = LogChunk), (status = 404, body = ApiError))
+    responses((status = 200, body = LogChunk), (status = 400, body = ApiError), (status = 404, body = ApiError))
 )]
 pub async fn get_logs(
     State(s): State<AppState>,
@@ -577,22 +608,27 @@ pub async fn get_logs(
         .await?
         .ok_or_else(|| not_found("job"))?;
     let offset = query.offset.unwrap_or(0);
-    let empty = LogChunk {
-        text: String::new(),
-        next_offset: offset,
-    };
-    let mut file = match tokio::fs::File::open(job_dir(&s.config, id).join("job.log")).await {
-        Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Json(empty)),
+    let file = match tokio::fs::File::open(job_dir(&s.config, id).join("job.log")).await {
+        Ok(file) => Some(file),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.into()),
     };
-    file.seek(SeekFrom::Start(offset)).await?;
+    let len = match &file {
+        Some(file) => file.metadata().await?.len(),
+        None => 0,
+    };
+    if offset > len {
+        return Err(invalid("offset is past the end of job.log").into());
+    }
     let mut buf = Vec::new();
-    file.take(LOG_CHUNK).read_to_end(&mut buf).await?;
-    // Whole lines only; a single line longer than a chunk is returned in pieces.
+    if let Some(mut file) = file {
+        file.seek(SeekFrom::Start(offset)).await?;
+        file.take(LOG_CHUNK).read_to_end(&mut buf).await?;
+    }
     let end = match buf.iter().rposition(|&b| b == b'\n') {
         Some(i) => i + 1,
-        None if buf.len() as u64 == LOG_CHUNK => buf.len(),
+        // A line longer than a chunk goes out in pieces, cut between characters.
+        None if buf.len() as u64 == LOG_CHUNK => char_boundary(&buf),
         None => 0,
     };
     buf.truncate(end);
@@ -600,6 +636,24 @@ pub async fn get_logs(
         text: String::from_utf8_lossy(&buf).into_owned(),
         next_offset: offset + end as u64,
     }))
+}
+
+/// Length of `buf` without a trailing incomplete UTF-8 sequence.
+fn char_boundary(buf: &[u8]) -> usize {
+    let Some(start) = buf.iter().rposition(|b| b & 0xC0 != 0x80) else {
+        return buf.len();
+    };
+    let width = match buf[start] {
+        0xF0.. => 4,
+        0xE0.. => 3,
+        0xC0.. => 2,
+        _ => 1,
+    };
+    if start + width > buf.len() {
+        start
+    } else {
+        buf.len()
+    }
 }
 
 #[utoipa::path(
