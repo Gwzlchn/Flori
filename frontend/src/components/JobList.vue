@@ -54,6 +54,7 @@ function place(job: Schemas["JobSummary"]): string {
         <a class="job-row" :href="`/jobs/${job.id}`">
           <span class="title">{{ job.title || job.source_id }}</span>
           <span class="pill" :class="`state-${job.status}`">{{ jobStatusText[job.status] }}</span>
+          <span v-if="job.status === 'failed' && job.current_exit_code === 30" class="pill state-failed">凭据失效</span>
           <small class="meta">
             #{{ job.id }} · {{ platformText[job.platform] }} · {{ place(job) }} · {{ shortTime(job.created) }}
             <template v-if="job.status === 'running' && job.current_step"> · {{ stepText[job.current_step] }}</template>

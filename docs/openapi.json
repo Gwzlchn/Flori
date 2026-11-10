@@ -1224,6 +1224,14 @@
           "created": {
             "type": "string"
           },
+          "current_exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Exit code of `current_step`; 30 means credentials expired."
+          },
           "current_step": {
             "oneOf": [
               {

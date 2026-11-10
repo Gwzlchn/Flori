@@ -325,6 +325,11 @@ export interface components {
             /** Format: int64 */
             collection_id?: number | null;
             created: string;
+            /**
+             * Format: int32
+             * @description Exit code of `current_step`; 30 means credentials expired.
+             */
+            current_exit_code?: number | null;
             current_step?: null | components["schemas"]["StepName"];
             /** Format: int64 */
             domain_id: number;
@@ -946,6 +951,14 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LogChunk"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
                 };
             };
             404: {

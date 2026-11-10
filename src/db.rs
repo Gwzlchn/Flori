@@ -236,6 +236,7 @@ fn job(row: SqliteRow) -> sqlx::Result<(JobSummary, Option<String>)> {
         status: row.try_get("status")?,
         title: row.try_get("title")?,
         current_step: row.try_get("current_step")?,
+        current_exit_code: row.try_get("current_exit_code")?,
         created: row.try_get("created")?,
         updated: row.try_get("updated")?,
     };

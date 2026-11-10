@@ -259,6 +259,8 @@ pub struct JobSummary {
     pub title: Option<String>,
     /// Step running now, or the step that failed or was canceled.
     pub current_step: Option<StepName>,
+    /// Exit code of `current_step`; 30 means credentials expired.
+    pub current_exit_code: Option<i32>,
     pub created: String,
     pub updated: String,
 }

@@ -217,10 +217,9 @@ async fn job_rows_carry_the_current_step_exit_code() {
         .await
         .unwrap();
     assert_eq!(exit_code().await, (Some(StepName::ArxivConvert), Some(30)));
-    assert_eq!(
-        list_jobs(&db, 10).await.unwrap()[0].current_step,
-        Some(StepName::ArxivConvert)
-    );
+    let listed = &list_jobs(&db, 10).await.unwrap()[0];
+    assert_eq!(listed.current_step, Some(StepName::ArxivConvert));
+    assert_eq!(listed.current_exit_code, Some(30));
 }
 
 async fn queued_job(db: &SqlitePool, dir: &Path) -> i64 {
