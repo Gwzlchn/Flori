@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fake `codex exec ... --output-last-message FILE -` for tests. Same markers and log as
-tests/fake/claude; the reply goes to the --output-last-message file."""
+tests/fake/claude, plus FAKE_AUTH_REFRESH with codex's real refresh-token failure text; the reply
+goes to the --output-last-message file."""
 
 import json
 import os
@@ -19,6 +20,10 @@ if out_file is None or model is None:
     sys.exit(2)
 if "FAKE_HANG" in prompt:
     time.sleep(3600)
+if "FAKE_AUTH_REFRESH" in prompt:
+    print(json.dumps({"type": "error", "message": "Your access token could not be refreshed because "
+                      "your refresh token was already used. Please log out and sign in again."}))
+    sys.exit(1)
 if "FAKE_AUTH" in prompt:
     print(json.dumps({"type": "error", "message": "401 Unauthorized: token expired"}))
     sys.exit(1)
@@ -29,7 +34,9 @@ if "FAKE_FAIL" in prompt:
     print(json.dumps({"type": "error", "message": "turn failed"}))
     sys.exit(1)
 marker = "---FLORI-INPUT---\n"
-text = "" if "FAKE_EMPTY" in prompt else (
+invalid = "FAKE_INVALID" in prompt and (
+    "FAKE_INVALID_ONCE" not in prompt or "---FLORI-FEEDBACK---" not in prompt)
+text = "" if "FAKE_EMPTY" in prompt else "not json" if invalid else (
     prompt.rsplit(marker, 1)[1] if marker in prompt else "# 笔记\n\n这是假笔记。\n")
 with open(out_file, "w") as fh:
     fh.write(text)
