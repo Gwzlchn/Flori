@@ -472,6 +472,24 @@ class ConvertMarkupTest(unittest.TestCase):
         self.assertIn("Wow\\![^1] [site \\[1\\]](https://a/b)\\! $x_{[i]}!$![](assets/x.png)", md)
         self.assertIn("[^1]: A \\[note\\]\\!", md)
 
+    def test_math_keeps_its_content_inside_the_delimiters(self) -> None:
+        # Markdown math ends at the first unescaped $ (or $$), so none may remain inside it.
+        md = self.convert(
+            '<div class="ltx_para"><p class="ltx_p">'
+            '<math alttext="1\\text{ if $x&gt;0$}"></math>, '
+            '<math alttext="\\text{$ ![x](https://e/p.png) [l](obsidian://new) $}"></math>, '
+            '<math alttext="\\$5+\\\\$y$ a\\ "></math> then '
+            '<math display="block" alttext="a\\text{$$} ![y](https://e/q.png) \\text{$$}b"></math></p></div>'
+            '<table class="ltx_equation"><tr><td><math alttext="x=1"></math></td>'
+            '<td><span class="ltx_tag ltx_tag_equation">($$ ![t](https://e/t.png) $$)</span></td></tr></table>'
+        )
+        self.assertIn(
+            "$1\\text{ if \\(x>0\\)}$, $\\text{\\( ![x](https://e/p.png) [l](obsidian://new) \\)}$, "
+            "$\\$5+\\\\\\(y\\) a$ then $$a\\text{\\(\\)} ![y](https://e/q.png) \\text{\\(\\)}b$$",
+            md,
+        )
+        self.assertIn("\n$$x=1 \\tag{![t](https://e/t.png)}$$\n", md)
+
     def test_link_targets_with_spaces_and_parentheses_stay_one_link(self) -> None:
         md = self.convert(
             '<div class="ltx_para"><p class="ltx_p">'

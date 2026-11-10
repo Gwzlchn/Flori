@@ -212,6 +212,8 @@ PLAIN_LABEL = re.compile(r"[•·∙◦▪‣⋅∗–—*-]|\d+\.")
 NOT_PROSE = re.compile(r"```|~~~|\||- |\d+\. |>|\$\$|!\[|#")
 # How a line of text would open a block (heading, quote, list item, fence, table row) instead of a paragraph.
 BLOCK_START = re.compile(r"[#>+|-]|~~~|([0-9]{1,9})([.)])(?=\s|$)")
+# A $ after an even run of backslashes, which TeX reads as a math shift.
+UNESCAPED_DOLLAR = re.compile(r"(?<!\\)((?:\\\\)*)\$")
 
 
 def escape(text: str) -> str:
@@ -242,13 +244,30 @@ def fence(code: str) -> str:
 
 
 def tex(math) -> str:
-    """LaTeX source of a MathML element on one line, with % comments dropped."""
+    """LaTeX source of a MathML element on one line, with % comments dropped, ready to sit
+    between Markdown $ delimiters.
+
+    A $ of the source (math inside \\text{...}) would end the Markdown math right there and turn
+    the rest of the formula, links and images included, into Markdown. Unescaped ones become \\(
+    and \\) in turn, which MathJax reads the same way. A trailing backslash, left over from a
+    control space, would escape the closing delimiter, so it is dropped."""
     source = math.get("alttext") or ""
     if not source:
         annotation = math.find("annotation", attrs={"encoding": "application/x-tex"})
         source = annotation.get_text() if annotation else math.get_text()
     lines = (re.sub(r"(?<!\\)%.*", "", line) for line in source.splitlines())
-    return " ".join(" ".join(lines).split())
+    source = " ".join(" ".join(lines).split())
+    opened = False
+
+    def delimiter(m: re.Match) -> str:
+        nonlocal opened
+        opened = not opened
+        return m.group(1) + ("\\(" if opened else "\\)")
+
+    source = UNESCAPED_DOLLAR.sub(delimiter, source)
+    while (len(source) - len(source.rstrip("\\"))) % 2:
+        source = source[:-1].rstrip()
+    return source
 
 
 class Converter:
@@ -353,6 +372,8 @@ class Converter:
                 continue
             number = row.select_one(".ltx_tag_equation, .ltx_tag_equationgroup")
             label = number.get_text(strip=True).strip("()") if number and number.find_parent("tr") is row else ""
+            # The number is plain text; a $ in it would end the display math early.
+            label = label.replace("$", "").strip()
             body = " ".join(parts) + (f" \\tag{{{label}}}" if label else "")
             out.append(f"$${body}$$")
         return out
