@@ -97,13 +97,13 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 标题取步骤顺序中第一个非 null 的 manifest.title。
 - transcript.json:`{"language": str|null, "segments": [{"start_ms": int, "end_ms": int, "text": str}]}`。
 - sections.json 的 text 是未转义的原文;写进 Markdown 的一方(video-frames 的 transcript.md、translate 的双语版)统一用 `pipeline::escape_markdown` 转义。Section 类型、取前序文件(`pipeline::step_file`)与节时间格式(`pipeline::clock`)只在 src/pipeline.rs 定义一次。
-- translate 的 meta 总有 language 与 translated(bool);language 取 zh、ja、ko、en(拉丁等字母为主,不细分语种)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long),too_long 时另有 chunks(int)。
+- translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、other(拉丁等其它字母为主,不细分语种)或 unknown。是否跳过只看判定值。跳过时另有 skipped_reason(chinese、unknown、too_long),too_long 时另有 chunks(int)。
 
 - arxiv-fetch:官方 HTML 偶尔返回 200 但内容被截断,必须检查完整闭合;ar5iv 对没有 HTML 的论文返回 200 落地页,必须识别;两者都不可用时退出 20,不回退 PDF。
 - translate:
   - 判定:去掉公式、代码、URL、时间戳后,汉字/(汉字+字母) ≥ 0.3 且几乎没有假名和谚文 → 中文,跳过;可比较的字母不足 200 个 → unknown,跳过。判定函数只在 Rust 里实现一次。
-  - arXiv:按空行切块,每块约 12k 字符;`$$…$$`、代码、表格、图片行、References 原样保留;行内公式、代码、URL、引用号换成占位符,译完还原;不校验数字。
-  - 视频:按 sections.json 的节翻译,每节写成"关键帧 + 中文 + 折叠的原文"(`> [!quote]- 原文`)。
+  - arXiv:按空行切块,每块约 12k 字符;`$$…$$`、代码、表格、图片行、References 原样保留(文末的脚注定义 `[^n]:` 不算 References,照常翻译);行内公式、代码、URL、引用号与脚注标记 `[^n]` 换成占位符,译完还原;原文里字面的 `⟦` 也作为占位符保护;不校验数字。
+  - 视频:按 sections.json 的节翻译,转写不做占位符(只保护字面 `⟦`),每节写成"关键帧 + 中文 + 折叠的原文"(`> [!quote]- 原文`),译文与原文每行用 `pipeline::escape_markdown` 转义。
   - 串行;每块结果按 sha256(prompt‖model‖payload) 缓存,手动重试只补未缓存的块;校验失败时带反馈再问 1 次,仍失败退出 10。
   - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。
 - note 与 translate 失败时 publish 不执行,可手动 retry。
@@ -132,7 +132,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 ```
 
 - 日期取 job.json 的 created(+08:00),retry 不会换文件夹。arXiv 的 source_id 去掉版本号,`/` 换成 `_`,如 `hep-th_9711200`。
-- 主笔记用标题命名。标题清洗:NFC,去掉 `\/:*?"<>|#^[]` 与控制字符,压缩空白,去掉首尾的点(点开头在 Obsidian 里是隐藏文件),不超过 100 UTF-8 字节,截断不切开字符。
+- 主笔记用标题命名。标题清洗:NFC,去掉 `\/:*?"<>|#^[]` 与控制字符,压缩空白,去掉首尾的点(点开头在 Obsidian 里是隐藏文件),不超过 100 UTF-8 字节,截断不切开字符。清洗结果为空时用 source id;与 transcript、original、translation、assets 忽略大小写相同时,文件名为 `<结果> 笔记.md`。
 - 发布:删除残留的 publish.tmp 后重新组装;`mkdir -p` 父目录后 rename 到最终路径。目标已存在且主笔记 frontmatter 的 job_url 指向本 job → 视为上次已发布,补写 manifest 后退出 0;其它"已存在"退出 20。同一文件系统内 rename 是原子的。
 - 文件夹名建好后不能改,因为 Remotely Save 把改名当成删除加新增。服务端从不修改或删除 vault 里已有的内容。
 - 视频文件不进 vault,留在 jobs/<id>/,网页详情页可播放。
