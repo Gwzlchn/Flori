@@ -154,7 +154,9 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     let mut video = ytdlp();
     // h264 first: it plays in every browser and ffmpeg decodes it fast.
     video
-        .args(["-f", "bv*+ba/b", "-S", "vcodec:h264,res:1080,acodec:m4a"])
+        // 720p is enough for keyframes and playback, and the YouTube path goes through a
+        // proxy that can drop to ~100KB/s; 1080p then runs into the 30m step timeout.
+        .args(["-f", "bv*+ba/b", "-S", "vcodec:h264,res:720,acodec:m4a"])
         .args(["--merge-output-format", "mp4", "--remux-video", "mp4"])
         .arg("--print-to-file")
         .arg("after_move:%(.{title,playlist_title,uploader,duration,upload_date})j")
