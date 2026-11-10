@@ -39,9 +39,9 @@ class FakeModel:
         return segments(), info
 
 
-def run(mode: str, model: FakeModel) -> dict:
+def run(mode: str, model: FakeModel, **kwargs) -> dict:
     with contextlib.redirect_stdout(io.StringIO()):
-        return whisper.MODES[mode](model, "audio.wav")
+        return whisper.MODES[mode](model, "audio.wav", **kwargs)
 
 
 class WhisperTest(unittest.TestCase):
@@ -50,7 +50,7 @@ class WhisperTest(unittest.TestCase):
         self.assertEqual(run("detect", model), {"language": "zh", "language_probability": 0.97})
         self.assertFalse(model.decoded)
         transcribed = FakeModel("zh", [])
-        run("transcribe", transcribed)
+        run("transcribe", transcribed, t2s=str)
         self.assertEqual(model.calls, transcribed.calls[:1])
 
     def test_transcribe_keeps_timed_non_empty_segments(self) -> None:
@@ -67,6 +67,21 @@ class WhisperTest(unittest.TestCase):
             },
         )
         self.assertFalse(model.calls[0]["condition_on_previous_text"])
+        self.assertEqual(len(model.calls), 1, "no hint outside Chinese")
+
+    def test_chinese_gets_the_hint_in_every_window_and_simplified_text(self) -> None:
+        model = FakeModel("zh", ["一隻股票的流動性", "  ", "變得從無到有。"])
+        t2s = str.maketrans("隻動變從無", "只动变从无")
+        output = run("transcribe", model, t2s=lambda text: text.translate(t2s))
+        self.assertEqual(
+            [s["text"] for s in output["segments"]], ["一只股票的流动性", "变得从无到有。"]
+        )
+        # The detected language and its confidence, not the forced second run's.
+        self.assertEqual((output["language"], output["language_probability"]), ("zh", 0.97))
+        detect, decode = model.calls
+        self.assertNotIn("hotwords", detect)
+        self.assertEqual(decode, {**whisper.OPTIONS, "language": "zh", "hotwords": whisper.ZH_HINT})
+        self.assertFalse(decode["condition_on_previous_text"])
 
 
 if __name__ == "__main__":

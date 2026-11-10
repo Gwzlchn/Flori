@@ -3,7 +3,7 @@
 Usage: python3 -I whisper.py detect|transcribe <audio> <out_json>
 The model directory comes from FLORI_WHISPER_MODEL. detect writes {language,
 language_probability}; transcribe writes transcript.json plus language_probability, which
-video-transcribe moves into the step meta.
+video-transcribe moves into the step meta. Chinese comes out in simplified characters.
 """
 
 import json
@@ -14,6 +14,11 @@ PERMANENT = 20
 REPORT_EVERY_S = 300.0
 # Without previous-text conditioning whisper does not fall into repetition loops.
 OPTIONS = {"beam_size": 5, "vad_filter": True, "condition_on_previous_text": False}
+# Unprompted, whisper writes Mandarin mostly without punctuation and drifts into traditional
+# characters after the first windows. Without previous-text conditioning initial_prompt only
+# reaches the first window; hotwords go into the prompt of every window. Only for zh: in another
+# language a Chinese prompt would pull the text towards Chinese.
+ZH_HINT = "以下是普通话的句子，使用简体中文和标点符号。"
 
 
 def load_model():
@@ -35,12 +40,25 @@ def detect(model, audio) -> dict:
     return {"language": info.language, "language_probability": info.language_probability}
 
 
-def transcribe(model, audio) -> dict:
+def transcribe(model, audio, t2s=None) -> dict:
+    """t2s converts traditional to simplified Chinese; OpenCC's when not given."""
     segments, info = model.transcribe(audio, **OPTIONS)
     print(f"whisper: language {info.language} p={info.language_probability:.2f}", flush=True)
+    chinese = info.language == "zh"
+    if chinese:
+        # The first call only detected the language; its segments were never decoded.
+        segments, _ = model.transcribe(audio, language="zh", hotwords=ZH_HINT, **OPTIONS)
+        if t2s is None:
+            import opencc
+
+            t2s = opencc.OpenCC("t2s").convert
     result, next_report = [], REPORT_EVERY_S
     for segment in segments:
-        if text := segment.text.strip():
+        text = segment.text.strip()
+        if chinese:
+            # The hint makes simplified output likely; OpenCC makes it certain.
+            text = t2s(text)
+        if text:
             start_ms, end_ms = round(segment.start * 1000), round(segment.end * 1000)
             result.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
         if segment.end >= next_report:

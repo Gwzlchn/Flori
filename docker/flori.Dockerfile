@@ -7,6 +7,8 @@
 FROM debian:bookworm-slim AS tools
 ARG YT_DLP_VERSION=2026.10.21
 ARG FASTER_WHISPER_VERSION=1.2.1
+# whisper.py converts Chinese output to simplified with OpenCC t2s.
+ARG OPENCC_VERSION=1.4.2
 ARG DENO_VERSION=2.9.8
 ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
 # claude stays on the host CLI version; upgrade both on purpose with `just image`.
@@ -26,6 +28,7 @@ RUN python3 -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir --disable-pip-version-check \
       -r /tmp/requirements.txt \
       "faster-whisper==${FASTER_WHISPER_VERSION}" \
+      "opencc==${OPENCC_VERSION}" \
       "yt-dlp[default]==${YT_DLP_VERSION}" && \
     rm /tmp/requirements.txt
 
@@ -58,7 +61,10 @@ RUN ffmpeg -version | head -1 | grep -F 'ffmpeg version 5.1' && \
     deno --version | head -1 | grep -F "deno ${DENO_VERSION}" && \
     claude --version | grep -F "${CLAUDE_VERSION}" && \
     test "$(codex --version)" = "codex-cli ${CODEX_VERSION}" && \
-    python3 -I -c "import bs4, lxml, faster_whisper; assert faster_whisper.__version__ == '${FASTER_WHISPER_VERSION}'"
+    python3 -I -c "import importlib.metadata as m, bs4, lxml, faster_whisper, opencc; \
+      assert faster_whisper.__version__ == '${FASTER_WHISPER_VERSION}'; \
+      assert m.version('opencc') == '${OPENCC_VERSION}'; \
+      assert opencc.OpenCC('t2s').convert('漢語') == '汉语'"
 
 FROM tools AS app
 COPY target/release/flori /usr/local/bin/flori

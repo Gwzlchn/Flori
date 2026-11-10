@@ -106,6 +106,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
   - `--sub-langs`:原声是 zh、en 以外的已知语言时为 `<原声>.*,zh.*`(英文轨用不上,而任一语言下载失败会中止整次字幕下载);其余情况为 `zh.*,en.*`。B站另按同样的语言加 `ai-<lang>`,即 `zh.*,en.*,ai-zh,ai-en`。
   - B站 AI 字幕 `ai-<lang>`:只对登录的 SESSDATA 列出,没有 SESSDATA 时照旧只有人工字幕。<lang> 是原声时它是语音识别,否则是机器翻译,B站不标明是哪种。没有 subtitle.srt 时才保留为 ai_subtitle_<lang>.srt,有人工字幕时删除;从不作 subtitle.srt 或 subtitle_zh.srt。
 - video-transcribe 的来源:有 subtitle 时直接用,subtitle_kind=manual,language_probability 为 1。否则有 ai_subtitle_<lang> 时先用 `whisper.py detect` 判定音频语言(与 whisper 转写时的判定相同,不解码文字):有该语言的 AI 字幕就原样用它,subtitle_kind=ai,language 与 language_probability 取判定值;没有则 whisper 转写。
+  - whisper 判定为 zh 时,每个窗口都带一句简体、带标点的中文提示(hotwords),输出再经 OpenCC t2s 转成简体;其它语言不带提示,不转换。
 - arxiv-fetch:官方 HTML 偶尔返回 200 但内容被截断,必须检查完整闭合;ar5iv 对没有 HTML 的论文返回 200 落地页,必须识别;两者都不可用时退出 20,不回退 PDF。
 - translate:
   - 判定:去掉公式、代码、URL、时间戳后,汉字/(汉字+字母) ≥ 0.3 且几乎没有假名和谚文 → 中文,跳过;可比较的字母不足 200 个 → unknown,跳过。判定函数只在 Rust 里实现一次。
