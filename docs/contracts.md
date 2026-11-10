@@ -166,11 +166,18 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url;obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB;单行超过上限时按字符边界切开)与 next_offset;offset 超出文件末尾 400 invalid_request;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
-| GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range;所有响应带 `Content-Security-Policy: sandbox` 与 `X-Content-Type-Options: nosniff`,外部 HTML 不能以本站身份运行脚本 |
+| GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range;所有响应只带一个 `Content-Security-Policy: sandbox; frame-ancestors 'none'` 与 `X-Content-Type-Options: nosniff`,外部 HTML 不能以本站身份运行脚本 |
 | GET /api/health | {version};唯一不要求认证的端点 |
 
 - 认证:Basic Auth,用户名 FLORI_WEB_USER,口令 FLORI_WEB_PASSWORD,服务端常量时间比较,不存哈希。静态页面和 /api 都要认证。
-- 跨站写入:浏览器会对跨站表单自动带 Basic Auth,所以 GET/HEAD 以外的请求在 `Sec-Fetch-Site` 不是 same-origin 或 none、或 `Origin` 与 `Host` 不符时返回 403。401 与 403 不在错误码集合里,也不写进 OpenAPI。
+- 跨站与嵌入:浏览器给跨站请求和框架里的页面也带上缓存的 Basic Auth,所以服务端在认证之前对下列请求返回 403:
+  - `Sec-Fetch-Dest` 为 iframe、frame、embed 或 object,不论方法与路径。
+  - `/api` 下 `Sec-Fetch-Site` 为 cross-site 或 same-site,不论方法。
+  - 其它路径下 `Sec-Fetch-Site` 为 cross-site 或 same-site,且不是顶层导航(`Sec-Fetch-Mode: navigate` 与 `Sec-Fetch-Dest: document`)。笔记里的 job_url 因此仍能打开。
+  - GET/HEAD 以外的方法,`Sec-Fetch-Site` 不是 same-origin 或 none,或 `Origin` 与 `Host` 不符。
+  - 不带 `Sec-Fetch-*` 的请求(curl、局域网 http)只受最后一条约束。
+- 所有响应(含 401、403 与 /api/health)带 `X-Frame-Options: DENY`;响应自己没有 CSP 时另带 `Content-Security-Policy: frame-ancestors 'none'`。
+- 401 与 403 不在错误码集合里,也不写进 OpenAPI。
 - 错误体 `{code, message, job_id?}`。code 是封闭集合:invalid_url、invalid_name、invalid_request(400),not_found(404),conflict(409),upstream(502)。job_id 只在重复投递的 conflict 里出现。
 - 请求体不允许未知字段。
 - 去重:`jobs_source_once` 唯一索引 (domain_id, ifnull(collection_id, 0), platform, source_id)。arXiv 的 v1、v2 链接归为同一 source_id。同一链接可以分别投到不同领域或集合。

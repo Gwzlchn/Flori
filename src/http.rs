@@ -11,7 +11,7 @@ use axum::{
         HeaderValue, StatusCode,
         header::{
             AUTHORIZATION, CONTENT_SECURITY_POLICY, HOST, ORIGIN, WWW_AUTHENTICATE,
-            X_CONTENT_TYPE_OPTIONS,
+            X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
         },
         request::Parts,
     },
@@ -27,6 +27,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     process::Command,
     sync::Mutex,
+    time::Instant,
 };
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -46,6 +47,12 @@ use crate::{
 };
 
 const FEED_TIMEOUT: Duration = Duration::from_secs(60);
+/// Least time between the end of one feed refresh and the start of the next, so a page that
+/// keeps requesting the feed cannot hammer Bilibili with the user's SESSDATA.
+#[cfg(not(test))]
+const FEED_INTERVAL: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const FEED_INTERVAL: Duration = Duration::from_millis(300);
 const LOG_CHUNK: u64 = 256 * 1024;
 
 #[derive(Clone)]
@@ -55,9 +62,10 @@ pub struct AppState {
     pub config: Arc<Config>,
 }
 
-/// Held while feed.py runs; a second refresh gets 409 instead of queueing behind it.
+/// Held while feed.py runs, with the time the last refresh ended. A refresh while another runs or
+/// within `FEED_INTERVAL` of the last one gets 409 instead of queueing.
 #[derive(Clone, Default)]
-pub struct FeedRefresh(Arc<Mutex<()>>);
+pub struct FeedRefresh(Arc<Mutex<Option<Instant>>>);
 
 pub fn router(state: AppState) -> Router {
     let credentials = format!("{}:{}", state.config.web_user, state.config.web_password);
@@ -92,7 +100,45 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(expected, basic_auth))
         // Added after the auth layer, so it is the one route without it.
         .route("/api/health", get(health))
+        // Outermost, so 401, 403 and health responses carry its headers too.
+        .layer(middleware::from_fn(guard))
         .with_state(state)
+}
+
+/// Refuses requests a browser makes on behalf of another site or inside a frame, and forbids
+/// framing every response. Browsers attach cached Basic credentials to those requests, and a
+/// framed page can be clicked through by its parent. LAN http and curl send no `Sec-Fetch-*`
+/// headers; for them the response headers and the Origin check on writes remain.
+async fn guard(req: Request, next: Next) -> Response {
+    let mut res = if foreign(&req) {
+        (StatusCode::FORBIDDEN, "cross-site request refused").into_response()
+    } else {
+        next.run(req).await
+    };
+    let headers = res.headers_mut();
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    // The files route sets its own sandbox policy, which already forbids framing.
+    let no_frames = HeaderValue::from_static("frame-ancestors 'none'");
+    headers.entry(CONTENT_SECURITY_POLICY).or_insert(no_frames);
+    res
+}
+
+fn foreign(req: &Request) -> bool {
+    let header = |name: &str| req.headers().get(name).and_then(|v| v.to_str().ok());
+    let site = header("sec-fetch-site");
+    let other_site = matches!(site, Some("cross-site" | "same-site"));
+    let dest = header("sec-fetch-dest");
+    let framed = matches!(dest, Some("iframe" | "frame" | "embed" | "object"));
+    // Only a top-level navigation may come from elsewhere, so job_url links in notes open.
+    let navigation = header("sec-fetch-mode") == Some("navigate") && dest == Some("document");
+    let path = req.uri().path();
+    let api = path == "/api" || path.starts_with("/api/");
+    let write = !req.method().is_safe();
+    let write_site = site.is_some_and(|site| site != "same-origin" && site != "none");
+    let write_origin = header(ORIGIN.as_str()).is_some_and(|origin| {
+        origin.split_once("://").map(|(_, host)| host) != header(HOST.as_str())
+    });
+    framed || (other_site && (api || !navigation)) || (write && (write_site || write_origin))
 }
 
 /// Compares digests of the whole `user:password`, so neither length nor prefix leaks.
@@ -115,27 +161,14 @@ async fn basic_auth(State(expected): State<[u8; 32]>, req: Request, next: Next) 
         let challenge = [(WWW_AUTHENTICATE, "Basic realm=\"flori\", charset=\"UTF-8\"")];
         return (StatusCode::UNAUTHORIZED, challenge).into_response();
     }
-    if cross_site(&req) {
-        return (StatusCode::FORBIDDEN, "cross-site request refused").into_response();
-    }
     next.run(req).await
-}
-
-/// Browsers attach cached Basic credentials to a cross-site form post, so a write must come from
-/// this origin. Clients that send neither header, like curl, are not browsers and pass.
-fn cross_site(req: &Request) -> bool {
-    let header = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
-    let site = header("sec-fetch-site").is_some_and(|site| site != "same-origin" && site != "none");
-    let origin = header(ORIGIN.as_str()).is_some_and(|origin| {
-        origin.split_once("://").map(|(_, host)| host) != header(HOST.as_str())
-    });
-    !req.method().is_safe() && (site || origin)
 }
 
 /// Job files include fetched HTML; it must not run as this origin with the user's credentials.
 async fn sandbox(mut res: Response) -> Response {
     let headers = res.headers_mut();
-    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    let policy = HeaderValue::from_static("sandbox; frame-ancestors 'none'");
+    headers.insert(CONTENT_SECURITY_POLICY, policy);
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     res
 }
@@ -343,10 +376,16 @@ pub async fn list_feed(
     let feed = collection
         .feed
         .ok_or_else(|| invalid("collection has no feed"))?;
-    let Ok(_running) = refresh.0.try_lock() else {
+    let Ok(mut last) = refresh.0.try_lock() else {
         return Err(conflict("a feed refresh is already running").into());
     };
-    let mut list = run_feed(&s.config, feed.kind, &feed.url, limit).await?;
+    if last.is_some_and(|ended| ended.elapsed() < FEED_INTERVAL) {
+        let wait = FEED_INTERVAL.as_secs_f32();
+        return Err(conflict(&format!("feed was just refreshed; try again in {wait}s")).into());
+    }
+    let listed = run_feed(&s.config, feed.kind, &feed.url, limit).await;
+    *last = Some(Instant::now());
+    let mut list = listed?;
     // Every job is read; a personal library is small enough for that.
     let jobs = db::list_jobs(&s.db, u32::MAX).await?;
     for item in &mut list.items {

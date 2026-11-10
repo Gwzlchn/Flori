@@ -380,8 +380,13 @@ async fn files_stay_inside_the_job_and_support_range() {
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(headers[header::CONTENT_RANGE], "bytes 100-199/1000");
     assert_eq!(body, video[100..200]);
+    // One policy value: a second CSP header would be enforced as well, not merged.
     let sandboxed = |headers: &axum::http::HeaderMap| {
-        headers[header::CONTENT_SECURITY_POLICY] == "sandbox"
+        let policies: Vec<_> = headers
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .collect();
+        policies == ["sandbox; frame-ancestors 'none'"]
             && headers[header::X_CONTENT_TYPE_OPTIONS] == "nosniff"
     };
     assert!(sandboxed(&headers), "range response");
@@ -789,12 +794,14 @@ async fn feeds_bind_list_and_submit_in_batches() {
     );
     assert_eq!(job["job"]["translate"], "off");
 
+    after_interval().await;
     let (_, list) = app.get(&format!("{feed}?limit=3")).await;
     assert_eq!(list["items"][0]["job"]["id"], *created[0]);
     assert_eq!(list["items"][2]["job"], Value::Null);
 
     let (status, body) = put(json!("https://www.youtube.com/@failing")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    after_interval().await;
     let (status, body) = app.get(&feed).await;
     assert_eq!((status, code(&body)), (StatusCode::BAD_GATEWAY, "upstream"));
     assert_eq!(body["message"], "upstream refused the request");
@@ -823,8 +830,46 @@ async fn only_one_feed_refresh_runs_at_a_time() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (status, body) = app.get(&feed).await;
     assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "conflict"));
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("already running")
+    );
     assert_eq!(first.await.unwrap(), StatusCode::OK);
+    after_interval().await;
     assert_eq!(app.get(&format!("{feed}?limit=1")).await.0, StatusCode::OK);
+}
+
+async fn after_interval() {
+    tokio::time::sleep(FEED_INTERVAL + Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn feed_refreshes_wait_out_the_interval() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    let coll = app.collection(ml, "feed").await;
+    let feed = format!("/api/collections/{coll}/feed");
+    let put = |url: &str| app.call("PUT", &feed, Some(json!({"url": url})));
+    assert_eq!(put("https://www.youtube.com/@demo").await.0, StatusCode::OK);
+    assert_eq!(app.get(&feed).await.0, StatusCode::OK);
+    let (status, body) = app.get(&feed).await;
+    assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "conflict"));
+    assert!(
+        body["message"].as_str().unwrap().contains("try again"),
+        "{body}"
+    );
+    after_interval().await;
+    // A failed refresh starts the interval as well.
+    assert_eq!(
+        put("https://www.youtube.com/@failing").await.0,
+        StatusCode::OK
+    );
+    assert_eq!(app.get(&feed).await.0, StatusCode::BAD_GATEWAY);
+    assert_eq!(app.get(&feed).await.0, StatusCode::CONFLICT);
+    after_interval().await;
+    assert_eq!(app.get(&feed).await.0, StatusCode::BAD_GATEWAY);
 }
 
 /// The fake feed.py accepts only the contract's normal forms, so this catches a parser that
@@ -844,6 +889,7 @@ async fn every_feed_kind_binds_to_a_form_feed_py_accepts() {
         "https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw/featured",
         "https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab",
     ] {
+        after_interval().await;
         let (status, body) = app.call("PUT", &feed, Some(json!({"url": input}))).await;
         assert_eq!(status, StatusCode::OK, "{input}: {body}");
         let (status, list) = app.get(&format!("{feed}?limit=1")).await;
@@ -876,17 +922,8 @@ async fn writes_from_other_sites_are_refused() {
         let (status, _, _) = app.send(cancel(headers)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{headers:?}");
     }
-    let (status, _, body) = app
-        .send(
-            HttpRequest::builder()
-                .uri("/api/jobs/1")
-                .header(AUTHORIZATION, auth())
-                .header("sec-fetch-site", "cross-site")
-                .body(AxumBody::empty())
-                .unwrap(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "reads stay allowed");
+    let (status, _, body) = app.send(browser("GET", "/api/jobs/1", &[])).await;
+    assert_eq!(status, StatusCode::OK);
     let detail: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         detail["job"]["status"], "running",
@@ -899,4 +936,179 @@ async fn writes_from_other_sites_are_refused() {
     ];
     let (status, _, _) = app.send(cancel(&same)).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// An authenticated request with the given headers.
+fn browser(method: &str, uri: &str, headers: &[(&str, &str)]) -> HttpRequest<AxumBody> {
+    let mut req = HttpRequest::builder()
+        .method(method)
+        .uri(uri)
+        .header(AUTHORIZATION, auth())
+        .header(header::CONTENT_TYPE, "application/json");
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let body = if method == "POST" {
+        AxumBody::from(r#"{"name":"x"}"#)
+    } else {
+        AxumBody::empty()
+    };
+    req.body(body).unwrap()
+}
+
+#[tokio::test]
+async fn every_response_forbids_framing() {
+    let app = app().await;
+    let anonymous = HttpRequest::builder()
+        .uri("/api/jobs")
+        .body(AxumBody::empty())
+        .unwrap();
+    let health = HttpRequest::builder()
+        .uri("/api/health")
+        .body(AxumBody::empty())
+        .unwrap();
+    let cross_post = browser("POST", "/api/domains", &[("sec-fetch-site", "cross-site")]);
+    for (what, req, expected) in [
+        ("page", browser("GET", "/", &[]), StatusCode::OK),
+        ("api", browser("GET", "/api/jobs", &[]), StatusCode::OK),
+        ("401", anonymous, StatusCode::UNAUTHORIZED),
+        ("403", cross_post, StatusCode::FORBIDDEN),
+        ("health", health, StatusCode::OK),
+    ] {
+        let (status, headers, _) = app.send(req).await;
+        assert_eq!(status, expected, "{what}");
+        assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY", "{what}");
+        let policies: Vec<_> = headers
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .collect();
+        assert_eq!(policies, ["frame-ancestors 'none'"], "{what}");
+    }
+}
+
+#[tokio::test]
+async fn other_sites_and_frames_reach_only_top_level_pages() {
+    let app = app().await;
+    let refused = [
+        (
+            "GET",
+            "/api/collections/999/feed",
+            vec![("sec-fetch-site", "cross-site")],
+        ),
+        (
+            "GET",
+            "/api/collections/999/feed",
+            vec![("sec-fetch-site", "same-site")],
+        ),
+        (
+            "GET",
+            "/api/jobs",
+            vec![
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "document"),
+            ],
+        ),
+        (
+            "GET",
+            "/api/jobs/1/files/x",
+            vec![
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-dest", "image"),
+            ],
+        ),
+        (
+            "GET",
+            "/",
+            vec![
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-dest", "image"),
+            ],
+        ),
+        (
+            "GET",
+            "/jobs/1",
+            vec![
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "no-cors"),
+                ("sec-fetch-dest", "document"),
+            ],
+        ),
+        (
+            "GET",
+            "/",
+            vec![
+                ("sec-fetch-site", "same-origin"),
+                ("sec-fetch-dest", "iframe"),
+            ],
+        ),
+        (
+            "GET",
+            "/",
+            vec![
+                ("sec-fetch-site", "same-origin"),
+                ("sec-fetch-dest", "frame"),
+            ],
+        ),
+        ("GET", "/", vec![("sec-fetch-dest", "embed")]),
+        ("GET", "/", vec![("sec-fetch-dest", "object")]),
+        (
+            "POST",
+            "/api/domains",
+            vec![
+                ("sec-fetch-site", "same-origin"),
+                ("sec-fetch-dest", "iframe"),
+            ],
+        ),
+    ];
+    for (method, uri, headers) in refused {
+        let (status, _, _) = app.send(browser(method, uri, &headers)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri} {headers:?}");
+    }
+    let navigate = [
+        ("sec-fetch-site", "cross-site"),
+        ("sec-fetch-mode", "navigate"),
+        ("sec-fetch-dest", "document"),
+    ];
+    let (status, _, body) = app.send(browser("GET", "/jobs/1", &navigate)).await;
+    assert_eq!(status, StatusCode::OK, "a job_url link from a note opens");
+    assert!(String::from_utf8(body).unwrap().contains("index"));
+    let allowed = [
+        (
+            "GET",
+            "/",
+            vec![
+                ("sec-fetch-site", "none"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "document"),
+            ],
+        ),
+        (
+            "GET",
+            "/api/jobs",
+            vec![
+                ("sec-fetch-site", "same-origin"),
+                ("sec-fetch-dest", "empty"),
+            ],
+        ),
+        ("GET", "/api/domains", vec![("sec-fetch-site", "none")]),
+        (
+            "GET",
+            "/app.js",
+            vec![
+                ("sec-fetch-site", "same-origin"),
+                ("sec-fetch-dest", "script"),
+            ],
+        ),
+    ];
+    for (method, uri, headers) in allowed {
+        let (status, _, _) = app.send(browser(method, uri, &headers)).await;
+        assert_eq!(status, StatusCode::OK, "{method} {uri} {headers:?}");
+    }
+    let same = [
+        ("sec-fetch-site", "same-origin"),
+        ("sec-fetch-dest", "empty"),
+    ];
+    let (status, _, _) = app.send(browser("POST", "/api/domains", &same)).await;
+    assert_eq!(status, StatusCode::CREATED);
 }
