@@ -362,6 +362,19 @@ export interface components {
         Pipeline: "video" | "arxiv";
         /** @enum {string} */
         Platform: "bilibili" | "youtube" | "arxiv";
+        /** @description From translate's `meta.punctuated`, `meta.sections` and `meta.kept_original`. */
+        Punctuation: {
+            /**
+             * Format: int32
+             * @description Sections whose reply changed more than punctuation; they keep the transcribed text.
+             */
+            kept_original: number;
+            /**
+             * Format: int32
+             * @description Sections with text sent to the AI.
+             */
+            sections: number;
+        };
         /** @description `url: null` unbinds the feed. */
         SetFeed: {
             url?: string | null;
@@ -378,6 +391,7 @@ export interface components {
             exit_code?: number | null;
             finished?: string | null;
             name: components["schemas"]["StepName"];
+            punctuation?: null | components["schemas"]["Punctuation"];
             /** Format: int32 */
             seq: number;
             /** @description `meta.skipped_reason` from the step manifest. */

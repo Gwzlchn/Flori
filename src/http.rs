@@ -42,7 +42,7 @@ use crate::{
     api::{
         ApiError, Collection, Domain, ErrorCode, FeedList, FeedPicked, FeedQuery, FeedSubmit,
         FeedSubmitResult, Health, JobDetail, JobFile, JobRef, JobSummary, JobsQuery, LogChunk,
-        LogQuery, NewCollection, NewDomain, SetFeed, StepStatus, SubmitJob,
+        LogQuery, NewCollection, NewDomain, Punctuation, SetFeed, StepStatus, SubmitJob,
     },
     db::{self, conflict, job_dir, not_found},
     exec::{self, ExecHandle, Stop},
@@ -694,6 +694,16 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
             _ => None,
         };
         step.skipped_reason = text("skipped_reason");
+        let count = |key| match manifest.meta.get(key) {
+            Some(MetaValue::Int(n)) => u32::try_from(*n).unwrap_or(0),
+            _ => 0,
+        };
+        if manifest.meta.get("punctuated") == Some(&MetaValue::Bool(true)) {
+            step.punctuation = Some(Punctuation {
+                sections: count("sections"),
+                kept_original: count("kept_original"),
+            });
+        }
         if step.name == StepName::Publish {
             note_file = text("note_file");
         }

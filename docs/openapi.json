@@ -1342,6 +1342,28 @@
           "arxiv"
         ]
       },
+      "Punctuation": {
+        "type": "object",
+        "description": "From translate's `meta.punctuated`, `meta.sections` and `meta.kept_original`.",
+        "required": [
+          "sections",
+          "kept_original"
+        ],
+        "properties": {
+          "kept_original": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Sections whose reply changed more than punctuation; they keep the transcribed text.",
+            "minimum": 0
+          },
+          "sections": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Sections with text sent to the AI.",
+            "minimum": 0
+          }
+        }
+      },
       "SetFeed": {
         "type": "object",
         "description": "`url: null` unbinds the feed.",
@@ -1392,6 +1414,17 @@
           },
           "name": {
             "$ref": "#/components/schemas/StepName"
+          },
+          "punctuation": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Punctuation",
+                "description": "translate on a Chinese video, which gets punctuation instead of a translation."
+              }
+            ]
           },
           "seq": {
             "type": "integer",

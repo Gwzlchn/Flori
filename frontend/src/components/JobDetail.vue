@@ -14,6 +14,11 @@ const fileText: Record<string, string> = {
 };
 const skipText: Record<string, string> = { chinese: "原文是中文,不需要翻译", unknown: "无法判断语言,未翻译", too_long: "篇幅过长,未翻译" };
 
+function punctuationText({ sections, kept_original: kept }: Schemas["Punctuation"]): string {
+  const note = kept > 0 ? `;${kept}/${sections} 节的回复改动了文字,保留原转写` : "";
+  return `原文是中文,不翻译,由 AI 加了标点${note}`;
+}
+
 const detail = ref<Schemas["JobDetail"]>();
 const missing = ref(false);
 const log = ref("");
@@ -171,6 +176,7 @@ onBeforeUnmount(() => {
               </div>
               <p v-if="step.error" class="error">{{ step.error }}</p>
               <p v-if="step.skipped_reason" class="meta">{{ skipText[step.skipped_reason] ?? `已跳过:${step.skipped_reason}` }}</p>
+              <p v-if="step.punctuation" class="meta">{{ punctuationText(step.punctuation) }}</p>
             </li>
           </ol>
         </section>

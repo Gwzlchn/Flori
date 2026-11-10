@@ -297,8 +297,20 @@ pub struct StepInfo {
     /// `meta.skipped_reason` from the step manifest.
     #[sqlx(skip)]
     pub skipped_reason: Option<String>,
+    /// translate on a Chinese video, which gets punctuation instead of a translation.
+    #[sqlx(skip)]
+    pub punctuation: Option<Punctuation>,
     pub started: Option<String>,
     pub finished: Option<String>,
+}
+
+/// From translate's `meta.punctuated`, `meta.sections` and `meta.kept_original`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Punctuation {
+    /// Sections with text sent to the AI.
+    pub sections: u32,
+    /// Sections whose reply changed more than punctuation; they keep the transcribed text.
+    pub kept_original: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
