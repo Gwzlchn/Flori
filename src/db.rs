@@ -6,7 +6,7 @@
 use std::{fs, io, path::Path, time::Duration};
 
 use sqlx::{
-    Row, SqlitePool,
+    Row, SqliteExecutor, SqlitePool,
     sqlite::{
         SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
     },
@@ -56,7 +56,7 @@ fn conflict(message: &str) -> ApiError {
     ApiError::new(ErrorCode::Conflict, message)
 }
 
-async fn exists(db: &SqlitePool, table: &str, id: i64) -> sqlx::Result<bool> {
+async fn exists(db: impl SqliteExecutor<'_>, table: &str, id: i64) -> sqlx::Result<bool> {
     let sql = format!("SELECT EXISTS (SELECT 1 FROM {table} WHERE id = ?)");
     sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(id)
@@ -416,7 +416,7 @@ pub async fn retry_job(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSumma
     .execute(&mut *tx)
     .await?;
     if moved.rows_affected() == 0 {
-        return Ok(Err(refused(db, id).await?));
+        return Ok(Err(refused(&mut *tx, id).await?));
     }
     sqlx::query(
         "UPDATE steps SET status = 'pending', exit_code = NULL, error = NULL, started = NULL, \
@@ -441,7 +441,7 @@ pub async fn cancel_job(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSumm
     .execute(&mut *tx)
     .await?;
     if moved.rows_affected() == 0 {
-        return Ok(Err(refused(db, id).await?));
+        return Ok(Err(refused(&mut *tx, id).await?));
     }
     sqlx::query("UPDATE steps SET status = 'canceled', finished = ? WHERE job_id = ? AND status = 'running'")
         .bind(&now)
@@ -452,7 +452,9 @@ pub async fn cancel_job(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSumm
     job_summary(db, id).await
 }
 
-async fn refused(db: &SqlitePool, id: i64) -> sqlx::Result<ApiError> {
+/// Runs on the transaction's own connection: the write lock is held, so asking the pool for
+/// another connection could wait on the very writers that wait on us.
+async fn refused(db: impl SqliteExecutor<'_>, id: i64) -> sqlx::Result<ApiError> {
     Ok(if exists(db, "jobs", id).await? {
         conflict("job is not in a state that allows this")
     } else {
@@ -550,23 +552,42 @@ pub async fn fail_job(db: &SqlitePool, id: i64, error: &str) -> sqlx::Result<()>
     end_job(db, id, JobStatus::Failed).await
 }
 
-/// Keeps the first title and sets `vault_path` once publish has one.
-pub async fn set_job_output(
+/// running -> succeeded, together with the job's first title and publish's `vault_path`, in one
+/// transaction so a crash cannot keep a finished step without its output. False when the HTTP
+/// layer already moved the step.
+pub async fn step_succeeded(
     db: &SqlitePool,
-    id: i64,
+    job_id: i64,
+    seq: u32,
     title: Option<&str>,
     vault_path: Option<&str>,
-) -> sqlx::Result<()> {
+) -> sqlx::Result<bool> {
+    let now = now();
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let done = sqlx::query(
+        "UPDATE steps SET status = 'succeeded', exit_code = 0, error = NULL, finished = ? \
+         WHERE job_id = ? AND seq = ? AND status = 'running'",
+    )
+    .bind(&now)
+    .bind(job_id)
+    .bind(seq)
+    .execute(&mut *tx)
+    .await?;
+    if done.rows_affected() == 0 {
+        return Ok(false);
+    }
     sqlx::query(
-        "UPDATE jobs SET title = ifnull(title, ?), vault_path = ifnull(?, vault_path), updated = ? WHERE id = ?",
+        "UPDATE jobs SET title = ifnull(title, ?), vault_path = ifnull(?, vault_path), \
+         updated = ? WHERE id = ?",
     )
     .bind(title)
     .bind(vault_path)
-    .bind(now())
-    .bind(id)
-    .execute(db)
+    .bind(&now)
+    .bind(job_id)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// After a crash nothing is running: running jobs go back to the queue and running steps to

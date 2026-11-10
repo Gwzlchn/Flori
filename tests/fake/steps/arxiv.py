@@ -1,4 +1,4 @@
-"""Fake arxiv.py for executor tests; same action file rules as tests/fake/step."""
+"""Fake arxiv.py for executor tests; same action file and env dump rules as tests/fake/step."""
 
 import json
 import os
@@ -12,10 +12,13 @@ def main(argv: list[str]) -> int:
     name = f"arxiv-{sub}"
     attempt = int(os.environ.get("FLORI_ATTEMPT", "1"))
     action = "0"
-    plan = job_dir / "fake" / name
+    fake = job_dir / "fake"
+    plan = fake / name
     if plan.exists():
         actions = plan.read_text().split()
         action = actions[attempt - 1] if len(actions) >= attempt else actions[-1]
+    if fake.is_dir():
+        (fake / f"{name}.env").write_text("".join(f"{k}={v}\n" for k, v in os.environ.items()))
     print(f"fake {name} attempt {attempt} action {action}", flush=True)
     if action == "hang":
         time.sleep(300)

@@ -133,6 +133,7 @@ impl World {
 }
 
 const YT: &str = "https://youtu.be/dQw4w9WgXcQ";
+const BV: &str = "https://www.bilibili.com/video/BV1GJ411x7h7";
 
 #[tokio::test]
 async fn exit_10_is_retried_and_the_log_only_grows() {
@@ -175,19 +176,19 @@ async fn exit_10_is_retried_and_the_log_only_grows() {
 }
 
 #[tokio::test]
-async fn exit_20_and_30_fail_without_retry() {
+async fn permanent_exits_are_not_retried_and_retryable_ones_run_out() {
     let w = world().await;
     let permanent = w.job(YT, TranslateMode::Auto).await;
-    let auth = w
-        .job(
-            "https://www.bilibili.com/video/BV1GJ411x7h7",
-            TranslateMode::Auto,
-        )
+    let auth = w.job(BV, TranslateMode::Auto).await;
+    let no_manifest = w.job("2401.12345", TranslateMode::Off).await;
+    let exhausted = w
+        .job("https://youtu.be/aaaaaaaaaaa", TranslateMode::Off)
         .await;
-    let no_manifest = w.job("2401.12345", TranslateMode::Auto).await;
+    // All on steps with more than one attempt, so a retry would show in `attempts`.
     fake(&w.config, permanent, "video-transcribe", "20 0");
-    fake(&w.config, auth, "note", "30");
-    fake(&w.config, no_manifest, "note", "nomanifest");
+    fake(&w.config, auth, "video-fetch", "30 0");
+    fake(&w.config, no_manifest, "publish", "nomanifest 0");
+    fake(&w.config, exhausted, "video-fetch", "10");
     let _exec = w.start().await;
 
     let job = wait_status(&w.db, permanent, JobStatus::Failed).await;
@@ -206,16 +207,53 @@ async fn exit_20_and_30_fail_without_retry() {
     );
 
     wait_status(&w.db, auth, JobStatus::Failed).await;
-    let step = w.step(auth, 4).await;
+    let step = w.step(auth, 1).await;
     assert_eq!(
-        (step.name, step.exit_code, step.attempts),
-        (StepName::Note, Some(30), 1)
+        (step.status, step.attempts, step.exit_code),
+        (StepStatus::Failed, 1, Some(30))
     );
 
     wait_status(&w.db, no_manifest, JobStatus::Failed).await;
-    let step = w.step(no_manifest, 3).await;
-    assert_eq!((step.name, step.exit_code), (StepName::Note, Some(20)));
+    let step = w.step(no_manifest, 4).await;
+    assert_eq!(
+        (step.name, step.attempts, step.exit_code),
+        (StepName::Publish, 1, Some(20))
+    );
     assert!(step.error.unwrap().contains("manifest.json"));
+
+    wait_status(&w.db, exhausted, JobStatus::Failed).await;
+    let step = w.step(exhausted, 1).await;
+    assert_eq!(
+        (step.status, step.attempts, step.exit_code),
+        (StepStatus::Failed, 3, Some(10))
+    );
+    assert_eq!(
+        w.log(exhausted)
+            .matches("== 01-video-fetch attempt")
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn timeouts_record_no_exit_code_and_retry_continues() {
+    let w = world().await;
+    let id = w.job("2401.12345", TranslateMode::Off).await;
+    fake(&w.config, id, "publish", "hang");
+    let exec = w.start().await;
+    wait_status(&w.db, id, JobStatus::Failed).await;
+    let step = w.step(id, 4).await;
+    assert_eq!(
+        (step.status, step.attempts, step.exit_code),
+        (StepStatus::Failed, 2, None)
+    );
+    assert_eq!(step.error.as_deref(), Some("timed out after 2s"));
+
+    fake(&w.config, id, "publish", "hang hang 0");
+    db::retry_job(&w.db, id).await.unwrap().unwrap();
+    exec.wake();
+    wait_status(&w.db, id, JobStatus::Succeeded).await;
+    assert_eq!(w.step(id, 4).await.attempts, 3);
 }
 
 #[tokio::test]
@@ -402,4 +440,284 @@ async fn cli_version_is_probed_or_unknown() {
         "unknown"
     );
     assert_eq!(probe_version(Command::new("false")).await, "unknown");
+}
+
+fn env_names(path: PathBuf) -> BTreeSet<String> {
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    text.lines()
+        .filter_map(|l| l.split_once('=').map(|(k, _)| k.to_owned()))
+        .collect()
+}
+
+#[tokio::test]
+async fn ai_credentials_reach_only_ai_steps() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db::open(&dir.path().join("t.sqlite")).await.unwrap();
+    let mut codex = config(dir.path());
+    codex.claude_oauth_token = Some("fake-token".into());
+    codex.codex_home = Some(dir.path().join("codex"));
+    codex.ai_tool = AiTool::Codex;
+    let claude = Config {
+        ai_tool: AiTool::Claude,
+        ..codex.clone()
+    };
+    let domain = db::create_domain(&db, "ml").await.unwrap().unwrap().id;
+    let mut ids = Vec::new();
+    // job.json fixes the tool, so one executor runs a codex job and a claude job.
+    for (config, link) in [(&codex, YT), (&claude, "2401.12345")] {
+        let source = parse_source(link).unwrap();
+        let created = db::create_jobs(
+            &db,
+            config,
+            "1.0",
+            domain,
+            None,
+            TranslateMode::Auto,
+            &[source],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let id = created[0].clone().unwrap().id;
+        fs::create_dir_all(job_dir(config, id).join("fake")).unwrap();
+        ids.push(id);
+    }
+    let _exec = launch(db.clone(), Arc::new(codex.clone()), "1.0".into())
+        .await
+        .unwrap();
+    for id in &ids {
+        wait_status(&db, *id, JobStatus::Succeeded).await;
+    }
+    let env = |id: i64, step: &str| env_names(job_dir(&codex, id).join(format!("fake/{step}.env")));
+    let (video, paper) = (ids[0], ids[1]);
+    for step in ["note", "translate"] {
+        let names = env(video, step);
+        assert!(
+            names.contains("CLAUDE_CODE_OAUTH_TOKEN") && names.contains("CODEX_HOME"),
+            "{step}"
+        );
+        let names = env(paper, step);
+        assert!(
+            names.contains("CLAUDE_CODE_OAUTH_TOKEN") && !names.contains("CODEX_HOME"),
+            "claude {step}"
+        );
+    }
+    for (id, step) in [
+        (video, "video-fetch"),
+        (video, "video-transcribe"),
+        (video, "video-frames"),
+        (video, "publish"),
+        (paper, "arxiv-fetch"),
+        (paper, "arxiv-convert"),
+        (paper, "publish"),
+    ] {
+        let names = env(id, step);
+        assert!(
+            !names.contains("CLAUDE_CODE_OAUTH_TOKEN") && !names.contains("CODEX_HOME"),
+            "{step}"
+        );
+    }
+}
+
+/// Hanging fake steps whose child is still alive, read from the pid files tests/fake/step
+/// writes. Unlike the steps table this leaves out a step waiting between attempts.
+fn live(config: &Config, jobs: &[i64]) -> Vec<(i64, String)> {
+    let mut steps = Vec::new();
+    for &id in jobs {
+        let Ok(entries) = fs::read_dir(job_dir(config, id).join("fake")) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            let Some(step) = path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .strip_suffix(".pid")
+            else {
+                continue;
+            };
+            let pid = fs::read_to_string(&path)
+                .unwrap_or_default()
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            if pid > 0 && !gone(pid) {
+                steps.push((id, step.to_owned()));
+            }
+        }
+    }
+    steps
+}
+
+fn count(steps: &[(i64, String)], name: &str) -> usize {
+    steps.iter().filter(|(_, step)| step == name).count()
+}
+
+/// Marks the steps before `name` succeeded, as a retry from that step would find them.
+async fn skip_to(db: &SqlitePool, id: i64, name: StepName) {
+    sqlx::query(
+        "UPDATE steps SET status = 'succeeded' WHERE job_id = ?1 \
+         AND seq < (SELECT seq FROM steps WHERE job_id = ?1 AND name = ?2)",
+    )
+    .bind(id)
+    .bind(name)
+    .execute(db)
+    .await
+    .unwrap();
+}
+
+/// Checks `limit` on the live steps until `settled` holds and for 300ms after.
+async fn sample(
+    w: &World,
+    jobs: &[i64],
+    settled: impl Fn(&[(i64, String)]) -> bool,
+    limit: impl Fn(&[(i64, String)]) -> bool,
+) {
+    let start = StdInstant::now();
+    let mut after = None;
+    while after.is_none_or(|n| n < 30) {
+        let steps = live(&w.config, jobs);
+        assert!(limit(&steps), "limit broken: {steps:?}");
+        after = after.map(|n| n + 1).or(settled(&steps).then_some(0));
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "never settled: {steps:?}"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn cancel_all(w: &World, exec: &ExecHandle, ids: &[i64]) {
+    for id in ids {
+        let _ = db::cancel_job(&w.db, *id).await.unwrap();
+        exec.cancel(*id);
+    }
+}
+
+#[tokio::test]
+async fn two_steps_run_at_once_and_the_queue_waits_beyond_the_window() {
+    let w = world().await;
+    let mut ids = Vec::new();
+    for link in [
+        YT,
+        "https://youtu.be/aaaaaaaaaaa",
+        "https://youtu.be/bbbbbbbbbbb",
+        BV,
+    ] {
+        let id = w.job(link, TranslateMode::Off).await;
+        fake(&w.config, id, "video-fetch", "hang");
+        ids.push(id);
+    }
+    let exec = w.start().await;
+    sample(&w, &ids, |s| s.len() == 2, |s| s.len() <= 2).await;
+    let jobs = db::list_jobs(&w.db, 10).await.unwrap();
+    let status = |status| jobs.iter().filter(|j| j.status == status).count();
+    assert_eq!(
+        (status(JobStatus::Running), status(JobStatus::Queued)),
+        (JOB_WINDOW, 1)
+    );
+    assert_eq!(
+        db::get_job(&w.db, ids[3]).await.unwrap().unwrap().0.status,
+        JobStatus::Queued
+    );
+    cancel_all(&w, &exec, &ids).await;
+}
+
+#[tokio::test]
+async fn ai_steps_run_one_at_a_time_and_waiting_holds_no_global_slot() {
+    let w = world().await;
+    let mut ids = Vec::new();
+    for link in [YT, "2401.12345"] {
+        let id = w.job(link, TranslateMode::Off).await;
+        skip_to(&w.db, id, StepName::Note).await;
+        fake(&w.config, id, "note", "hang");
+        ids.push(id);
+    }
+    let exec = w.start().await;
+    sample(
+        &w,
+        &ids,
+        |s| count(s, "note") == 1,
+        |s| count(s, "note") <= 1,
+    )
+    .await;
+    // The second note now waits for the ai lock. A fetch arriving after it must still run,
+    // which it cannot if that wait sits on a global slot.
+    let fetcher = w.job(BV, TranslateMode::Off).await;
+    fake(&w.config, fetcher, "video-fetch", "hang");
+    ids.push(fetcher);
+    exec.wake();
+    sample(
+        &w,
+        &ids,
+        |s| count(s, "video-fetch") == 1,
+        |s| count(s, "note") <= 1,
+    )
+    .await;
+    cancel_all(&w, &exec, &ids).await;
+}
+
+#[tokio::test]
+async fn local_publish_runs_while_both_global_slots_are_taken() {
+    let w = world().await;
+    let mut ids = Vec::new();
+    for link in [YT, "https://youtu.be/aaaaaaaaaaa"] {
+        let id = w.job(link, TranslateMode::Off).await;
+        fake(&w.config, id, "video-fetch", "hang");
+        ids.push(id);
+    }
+    let exec = w.start().await;
+    sample(&w, &ids, |s| count(s, "video-fetch") == 2, |s| s.len() <= 2).await;
+    let publisher = w.job("2401.12345", TranslateMode::Off).await;
+    skip_to(&w.db, publisher, StepName::Publish).await;
+    fake(&w.config, publisher, "publish", "hang");
+    ids.push(publisher);
+    exec.wake();
+    let all = |s: &[(i64, String)]| count(s, "video-fetch") == 2 && count(s, "publish") == 1;
+    sample(&w, &ids, all, |s| count(s, "video-fetch") <= 2).await;
+    cancel_all(&w, &exec, &ids).await;
+}
+
+#[tokio::test]
+async fn a_failed_step_left_by_a_crash_fails_the_job() {
+    let w = world().await;
+    let id = w.job(YT, TranslateMode::Off).await;
+    db::claim_job(&w.db, id).await.unwrap();
+    db::start_attempt(&w.db, id, 1).await.unwrap();
+    let failed = StepStatus::Failed;
+    db::end_attempt(&w.db, id, 1, failed, Some(20), Some("x"))
+        .await
+        .unwrap();
+    // Killed here, before the job was marked failed.
+    let _exec = w.start().await;
+    wait_status(&w.db, id, JobStatus::Failed).await;
+    assert_eq!(w.step(id, 1).await.attempts, 1);
+}
+
+#[tokio::test]
+async fn database_write_failures_do_not_spin() {
+    let w = world().await;
+    let id = w.job(YT, TranslateMode::Off).await;
+    // RAISE(FAIL) keeps the INSERT, so `claims` counts every attempt to claim the job.
+    sqlx::raw_sql(
+        "CREATE TABLE claims (n INTEGER); \
+         CREATE TRIGGER disk_full BEFORE UPDATE ON jobs WHEN NEW.status = 'running' BEGIN \
+         INSERT INTO claims VALUES (1); SELECT RAISE(FAIL, 'database or disk is full'); END;",
+    )
+    .execute(&w.db)
+    .await
+    .unwrap();
+    let _exec = w.start().await;
+    sleep(Duration::from_secs(1)).await;
+    let claims: i64 = sqlx::query_scalar("SELECT count(*) FROM claims")
+        .fetch_one(&w.db)
+        .await
+        .unwrap();
+    assert!((1..10).contains(&claims), "{claims} claims in 1s");
+    assert_eq!(
+        db::get_job(&w.db, id).await.unwrap().unwrap().0.status,
+        JobStatus::Queued
+    );
 }

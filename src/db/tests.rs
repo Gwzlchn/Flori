@@ -256,3 +256,115 @@ async fn job_rows_carry_the_current_step_exit_code() {
         Some(StepName::ArxivConvert)
     );
 }
+
+async fn queued_job(db: &SqlitePool, dir: &Path) -> i64 {
+    let config = config(dir);
+    let domain = create_domain(db, "ml").await.unwrap().unwrap();
+    let source = parse_source("2401.12345").unwrap();
+    create_jobs(
+        db,
+        &config,
+        "x",
+        domain.id,
+        None,
+        TranslateMode::Off,
+        &[source],
+    )
+    .await
+    .unwrap()
+    .unwrap()[0]
+        .clone()
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn step_success_and_job_output_commit_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = pool(dir.path()).await;
+    let id = queued_job(&db, dir.path()).await;
+    claim_job(&db, id).await.unwrap();
+    start_attempt(&db, id, 1).await.unwrap();
+    sqlx::raw_sql(
+        "CREATE TRIGGER no_title BEFORE UPDATE OF title ON jobs \
+         BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    assert!(
+        step_succeeded(&db, id, 1, Some("Paper"), None)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        steps(&db, id).await.unwrap()[0].status,
+        StepStatus::Running,
+        "rolled back"
+    );
+
+    sqlx::raw_sql("DROP TRIGGER no_title")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        step_succeeded(&db, id, 1, Some("Paper"), None)
+            .await
+            .unwrap()
+    );
+    start_attempt(&db, id, 4).await.unwrap();
+    assert!(
+        step_succeeded(&db, id, 4, Some("Later"), Some("flori/ml/x/"))
+            .await
+            .unwrap()
+    );
+    let (job, vault_path) = get_job(&db, id).await.unwrap().unwrap();
+    assert_eq!(
+        (job.title.as_deref(), vault_path.as_deref()),
+        (Some("Paper"), Some("flori/ml/x/"))
+    );
+    assert!(
+        !step_succeeded(&db, id, 4, None, None).await.unwrap(),
+        "not running any more"
+    );
+}
+
+/// With one connection, a refusal that asked the pool for a second connection while holding
+/// the transaction would wait for the acquire timeout.
+#[tokio::test]
+async fn refusals_answer_on_the_held_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = SqliteConnectOptions::new()
+        .filename(dir.path().join("one.sqlite"))
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let db = SqlitePoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!("./migrations").run(&db).await.unwrap();
+    let id = queued_job(&db, dir.path()).await;
+    sqlx::query("UPDATE jobs SET status = 'succeeded' WHERE id = ?")
+        .bind(id)
+        .execute(&db)
+        .await
+        .unwrap();
+    let quick = Duration::from_secs(3);
+    let cancel = tokio::time::timeout(quick, cancel_job(&db, id)).await;
+    assert_eq!(
+        cancel.unwrap().unwrap().unwrap_err().code,
+        ErrorCode::Conflict
+    );
+    let retry = tokio::time::timeout(quick, retry_job(&db, id)).await;
+    assert_eq!(
+        retry.unwrap().unwrap().unwrap_err().code,
+        ErrorCode::Conflict
+    );
+    let missing = tokio::time::timeout(quick, cancel_job(&db, id + 1)).await;
+    assert_eq!(
+        missing.unwrap().unwrap().unwrap_err().code,
+        ErrorCode::NotFound
+    );
+}

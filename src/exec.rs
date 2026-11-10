@@ -40,8 +40,19 @@ const RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(50), Duration::from_m
 const KILL_GRACE: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const KILL_GRACE: Duration = Duration::from_millis(300);
-/// Fallback scan for queued jobs; `wake` normally triggers the scan.
+/// Fallback scan for queued jobs; `wake` normally triggers the scan. A job task that failed on
+/// the database waits for this scan instead of waking the scheduler, so a full or read-only
+/// disk does not spin.
 const POLL: Duration = Duration::from_secs(5);
+/// Jobs taken from the queue at once. Steps of the first jobs then finish before later jobs
+/// start, and `running` means a job is in this window. One more than the global limit, so a job
+/// can take a freed slot or run its local publish while two steps run.
+const JOB_WINDOW: usize = 3;
+/// Tests shrink step timeouts, so a hanging fake publish times out after 2s.
+#[cfg(not(test))]
+const TIMEOUT_DIVISOR: u32 = 1;
+#[cfg(test)]
+const TIMEOUT_DIVISOR: u32 = 150;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -271,8 +282,12 @@ async fn schedule(inner: Arc<Inner>) {
         match db::queued_jobs(&inner.db).await {
             Ok(ids) => {
                 for id in ids {
-                    let (tx, rx) = watch::channel(false);
-                    if let Entry::Vacant(slot) = inner.running().entry(id) {
+                    let mut running = inner.running();
+                    if running.len() >= JOB_WINDOW {
+                        break;
+                    }
+                    if let Entry::Vacant(slot) = running.entry(id) {
+                        let (tx, rx) = watch::channel(false);
                         slot.insert(tx);
                         tokio::spawn(run_job(inner.clone(), id, rx));
                     }
@@ -288,15 +303,18 @@ async fn schedule(inner: Arc<Inner>) {
 }
 
 async fn run_job(inner: Arc<Inner>, id: i64, mut cancel: watch::Receiver<bool>) {
-    if let Err(err) = drive(&inner, id, &mut cancel).await {
+    let result = drive(&inner, id, &mut cancel).await;
+    if let Err(err) = &result {
         eprintln!("flori: job {id}: {err}");
         if let Err(err) = db::fail_job(&inner.db, id, &err.to_string()).await {
             eprintln!("flori: job {id}: mark failed: {err}");
         }
     }
     inner.running().remove(&id);
-    // A retry committed while this task was still stopping is picked up now.
-    inner.wake.notify_one();
+    if result.is_ok() {
+        // Fills the freed window slot, and picks up a retry committed while this task stopped.
+        inner.wake.notify_one();
+    }
 }
 
 async fn drive(inner: &Inner, id: i64, cancel: &mut watch::Receiver<bool>) -> Fallible<()> {
@@ -306,8 +324,11 @@ async fn drive(inner: &Inner, id: i64, cancel: &mut watch::Receiver<bool>) -> Fa
     let job_dir = inner.jobs_dir.join(id.to_string());
     let job = read_job(&job_dir)?;
     for (seq, name, status) in db::job_steps(&inner.db, id).await? {
-        if status == StepStatus::Succeeded {
-            continue;
+        match status {
+            StepStatus::Succeeded => continue,
+            // A crash between failing the step and failing the job leaves this behind.
+            StepStatus::Failed => return Ok(db::end_job(&inner.db, id, JobStatus::Failed).await?),
+            StepStatus::Pending | StepStatus::Running | StepStatus::Canceled => {}
         }
         match run_step(inner, &job, &job_dir, seq, name.spec(), cancel).await? {
             End::Succeeded => {}
@@ -339,6 +360,7 @@ async fn run_step(
     // Output of an attempt whose result never reached the database.
     remove_dir(&dir)?;
     let job_id = job.job_id;
+    let timeout = spec.timeout / TIMEOUT_DIVISOR;
     for try_no in 0..spec.attempts as usize {
         let permits = tokio::select! {
             permits = inner.permits(spec.resource) => permits,
@@ -356,7 +378,7 @@ async fn run_step(
         writeln!(log, "== {name} attempt {attempt} ==")?;
         let mut last_err = None;
         let cmd = inner.command(job, job_dir, &tmp, spec.name, attempt)?;
-        let stop = run_child(cmd, spec.timeout, Some(cancel), |stderr, line| {
+        let stop = run_child(cmd, timeout, Some(cancel), |stderr, line| {
             let _ = log.write_all(line).and_then(|()| log.write_all(b"\n"));
             if stderr && !line.trim_ascii().is_empty() {
                 last_err = Some(String::from_utf8_lossy(line).into_owned());
@@ -373,23 +395,20 @@ async fn run_step(
             }
             Stop::TimedOut => (
                 None,
-                format!("timed out after {}s", spec.timeout.as_secs()),
+                format!("timed out after {}s", timeout.as_secs()),
                 true,
             ),
             Stop::Exited(Some(0)) => match read_manifest(&tmp) {
                 Ok(manifest) => {
                     fs::rename(&tmp, &dir)?;
-                    let status = StepStatus::Succeeded;
-                    if db::end_attempt(&inner.db, job_id, seq, status, Some(0), None).await? {
-                        let vault_path = match manifest.meta.get("vault_path") {
-                            Some(MetaValue::Text(path)) if spec.name == StepName::Publish => {
-                                Some(path.as_str())
-                            }
-                            _ => None,
-                        };
-                        let title = manifest.title.as_deref();
-                        db::set_job_output(&inner.db, job_id, title, vault_path).await?;
-                    }
+                    let vault_path = match manifest.meta.get("vault_path") {
+                        Some(MetaValue::Text(path)) if spec.name == StepName::Publish => {
+                            Some(path.as_str())
+                        }
+                        _ => None,
+                    };
+                    let title = manifest.title.as_deref();
+                    db::step_succeeded(&inner.db, job_id, seq, title, vault_path).await?;
                     return Ok(End::Succeeded);
                 }
                 // Contract 1: exit 0 without a usable manifest counts as exit 20.
