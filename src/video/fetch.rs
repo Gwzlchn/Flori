@@ -18,7 +18,7 @@ use tokio::{
     signal::unix::{SignalKind, signal},
 };
 
-use super::{env_value, transcribe::parse_srt};
+use super::{env_value, exit_failure, transcribe::parse_srt};
 use crate::pipeline::{
     self, Manifest, MetaValue, Platform, StepFailure, StepResult, read_json, write_manifest,
 };
@@ -90,15 +90,21 @@ impl FetchEnv {
     }
 }
 
-/// On SIGTERM (cancel or step timeout) the download future is dropped: tools spawned with
-/// `kill_on_drop` die and [`CookieFile`] removes the cookie before the step exits 10.
+/// SIGTERM (cancel or step timeout) goes to the whole process group. If it lands while a tool
+/// runs, the step exits 10 without a manifest and with the cookie removed. `biased` polls the
+/// signal first, so once tokio reports it the download future is dropped: tools spawned with
+/// `kill_on_drop` die and [`CookieFile`] removes the cookie. tokio can report the signal a
+/// wakeup after the death of a tool killed by the same SIGTERM, so the download may see that
+/// death first. [`run_ytdlp`] and [`check_login`] retry it, so the step still exits 10 and the
+/// cookie goes when `fetch_with` returns.
 pub async fn fetch(job_dir: &Path, out_dir: &Path) -> StepResult {
     let mut term = signal(SignalKind::terminate())
         .map_err(|e| StepFailure::retry(format!("install SIGTERM handler: {e}")))?;
     let env = FetchEnv::inherited();
     tokio::select! {
-        result = fetch_with(job_dir, out_dir, &env) => result,
+        biased;
         _ = term.recv() => Err(StepFailure::retry("stopped by SIGTERM")),
+        result = fetch_with(job_dir, out_dir, &env) => result,
     }
 }
 
@@ -296,7 +302,9 @@ pub(super) fn login_state(body: &[u8]) -> StepResult {
 }
 
 /// Runs yt-dlp with stdout inherited and stderr echoed line by line into the job log. Returns its
-/// ERROR lines for classification.
+/// ERROR lines for classification. A yt-dlp killed by a signal is retried before any
+/// classification: it is usually the executor's SIGTERM, and a subtitle run that died of it must
+/// not pass for "no subtitles" and let the step exit 0.
 async fn run_ytdlp(mut cmd: Command) -> Result<(ExitStatus, Vec<String>), StepFailure> {
     let mut child = cmd
         .stdin(Stdio::null())
@@ -320,7 +328,11 @@ async fn run_ytdlp(mut cmd: Command) -> Result<(ExitStatus, Vec<String>), StepFa
         }
         line.clear();
     }
-    Ok((child.wait().await?, errors))
+    let status = child.wait().await?;
+    if status.code().is_none() {
+        return Err(exit_failure("yt-dlp", status));
+    }
+    Ok((status, errors))
 }
 
 /// `None` means the download is usable. The last ERROR line decides: throttling first, then

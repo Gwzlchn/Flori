@@ -613,6 +613,16 @@ async fn expired_sessdata_exits_30_before_downloading() {
     assert_eq!(names(run.tmp.path()), Vec::<String>::new());
 }
 
+/// The executor's SIGTERM kills yt-dlp too, and the step can see that before the signal.
+#[tokio::test]
+async fn a_subtitle_run_killed_by_a_signal_is_retried() {
+    let run = FetchRun::new("bilibili", "BVsubs-killed", Some("good-cookie"));
+    let failure = run.run().await.unwrap_err();
+    assert_eq!(failure.exit, StepExit::Retry, "{}", failure.message);
+    assert_eq!(names(&run.out()), ["video.mp4"]);
+    assert_eq!(names(run.tmp.path()), Vec::<String>::new());
+}
+
 /// What SIGTERM does in `fetch`: the download future is dropped mid-run.
 #[tokio::test]
 async fn dropping_a_running_download_removes_the_cookie() {
