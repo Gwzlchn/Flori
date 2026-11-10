@@ -52,6 +52,14 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Every unauthenticated request costs a bcrypt check of tens of milliseconds, and all public
+    # clients arrive from the one ECS address, so nothing can throttle them by source. One CPU
+    # caps that load: under attack the public site slows down, the pipeline and the rest of the
+    # NAS do not. Caddy is one Go process of a few dozen MiB and threads; the memory and pid
+    # limits only stop a runaway.
+    cpus: "1"
+    mem_limit: 256m
+    pids_limit: 256
     restart: unless-stopped
     ports:
       - "8790:8790"
