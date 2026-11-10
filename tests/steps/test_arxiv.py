@@ -288,6 +288,8 @@ class ConvertMarkupTest(unittest.TestCase):
             job = make_job(pathlib.Path(tmp), "2401.00001")
             fetched = job / "steps/01-arxiv-fetch"
             (fetched / "page.html").write_text(f'<html><body><article class="ltx_document">{body}</article></body></html>')
+            (fetched / "res").mkdir()
+            (fetched / "res/x.png").write_bytes(b"png")
             arxiv.write_manifest(fetched, "T", {"page": "page.html"}, [], {})
             self.assertEqual(arxiv.convert(job, job / "steps/02-arxiv-convert"), 0)
             return (job / "steps/02-arxiv-convert/original.md").read_text()
@@ -358,6 +360,50 @@ class ConvertMarkupTest(unittest.TestCase):
         self.assertIn("**Steps:**\n\n- one\n", md)
         self.assertIn("**Table:**\n\n| a | b |\n", md)
         self.assertIn("- Prompt:\n  \n  ````\n  ```html\n  <img", md)
+
+    def test_prose_starting_like_a_block_stays_prose(self) -> None:
+        starts = ["# of samples is 10k.", "> 0 always.", "- 1 is negative.", "+ 1 more.", "2010. The first release.",
+                  "3) third.", "~~~ waves", "| a | b"]
+        literal = ["\\# of samples is 10k.", "\\> 0 always.", "\\- 1 is negative.", "\\+ 1 more.",
+                   "2010\\. The first release.", "3\\) third.", "\\~~~ waves", "\\| a | b"]
+        paragraphs = "".join(f'<div class="ltx_para"><p class="ltx_p">{text}</p></div>' for text in starts)
+        md = self.convert(
+            '<section class="ltx_section"><h2 class="ltx_title">1 Intro</h2>' + paragraphs + "</section>"
+            '<dl class="ltx_description"><dt class="ltx_item"><span class="ltx_tag ltx_tag_item">Data:</span></dt>'
+            '<dd class="ltx_item"><div class="ltx_para"><p class="ltx_p"># of samples is 10k.</p></div></dd></dl>'
+            '<ul class="ltx_itemize">'
+            '<li class="ltx_item"><span class="ltx_tag ltx_tag_item">Q:</span><div class="ltx_para"><p class="ltx_p">2010. A year.</p></div></li>'
+            '<li class="ltx_item"><span class="ltx_tag ltx_tag_item">+</span><div class="ltx_para"><p class="ltx_p">Fast.</p></div></li>'
+            '<li class="ltx_item"><span class="ltx_tag ltx_tag_item">•</span><div class="ltx_para"><p class="ltx_p">&gt; plain</p></div></li></ul>'
+            '<div class="ltx_listing"><div class="ltx_listingline">- update <math alttext="x"></math></div></div>'
+            '<table class="ltx_tabular"><tr class="ltx_tr"><td class="ltx_td">- a</td><td class="ltx_td">b</td></tr></table>'
+        )
+        rows = md.split("\n")
+        for line in literal:
+            self.assertIn(line, rows)
+        self.assertIn("## 1 Intro", rows)
+        self.assertIn("**Data:** \\# of samples is 10k.", rows)
+        self.assertIn("- Q: 2010\\. A year.", rows)
+        self.assertIn("- \\+ Fast.", rows)
+        self.assertIn("- \\> plain", rows)
+        self.assertIn("\\- update $x$", rows)
+        self.assertIn("| - a | b |", rows)
+
+    def test_terms_stand_alone_before_math_images_headings_and_quotes(self) -> None:
+        def item(term: str, first: str) -> str:
+            return (f'<dt class="ltx_item"><span class="ltx_tag ltx_tag_item">{term}</span></dt>'
+                    f'<dd class="ltx_item">{first}<div class="ltx_para"><p class="ltx_p">Tail.</p></div></dd>')
+
+        md = self.convert(
+            '<dl class="ltx_description">'
+            + item("Eq:", '<table class="ltx_equation"><tr><td><math alttext="E=mc^2" display="block"></math></td></tr></table>')
+            + item("Fig:", '<figure class="ltx_figure"><img src="res/x.png"/></figure>')
+            + item("Sub:", '<section class="ltx_subsection"><h3 class="ltx_title">Inner</h3></section>')
+            + item("Quote:", '<blockquote class="ltx_quote"><p class="ltx_p">Said.</p></blockquote>')
+            + "</dl>"
+        )
+        for block in ("**Eq:**\n\n$$E=mc^2$$", "**Fig:**\n\n![](assets/x.png)", "**Sub:**\n\n### Inner", "**Quote:**\n\n> Said."):
+            self.assertIn(block, md)
 
     def test_footnote_type_prefixes_and_bare_marks_are_dropped(self) -> None:
         md = self.convert(

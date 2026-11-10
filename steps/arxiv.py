@@ -207,11 +207,23 @@ OBSIDIAN_SPECIAL = re.compile(r"#(?=\S)|\[{2,}|%{2,}|={2,}")
 PLAIN_LABEL = re.compile(r"[•·∙◦▪‣⋅∗–—*-]|\d+\.")
 # Blocks that must start their own line: code, tables, lists, quotes, display math, images, headings.
 NOT_PROSE = re.compile(r"```|~~~|\||- |\d+\. |>|\$\$|!\[|#")
+# How a line of text would open a block (heading, quote, list item, fence, table row) instead of a paragraph.
+BLOCK_START = re.compile(r"[#>+|-]|~~~|([0-9]{1,9})([.)])(?=\s|$)")
 
 
 def escape(text: str) -> str:
     text = MD_SPECIAL.sub(r"\\\1", text)
     return OBSIDIAN_SPECIAL.sub(lambda m: "".join("\\" + c for c in m.group()), text)
+
+
+def literal_start(line: str) -> str:
+    """Escapes a block marker at the start of a prose line so it stays paragraph text."""
+    start = BLOCK_START.match(line)
+    if start is None:
+        return line
+    if start.group(1):
+        return f"{start.group(1)}\\{start.group(2)}{line[start.end():]}"
+    return "\\" + line
 
 
 def fence(code: str) -> str:
@@ -272,7 +284,7 @@ class Converter:
         def flush() -> None:
             text = " ".join("".join(pending).split())
             if text:
-                out.append(text)
+                out.append(literal_start(text))
             pending.clear()
 
         for child in node.children:
@@ -362,6 +374,7 @@ class Converter:
             tag = li.find(class_="ltx_tag_item", recursive=False)
             label = self.plain_text(tag) if tag else ""
             custom = label and not PLAIN_LABEL.fullmatch(label)
+            label = literal_start(label)
             marker = f"{n}. " if node.name == "ol" and not custom else "- "
             parts = self.blocks(li)
             if custom:
@@ -396,7 +409,7 @@ class Converter:
         lines = node.select(".ltx_listingline") or [node]
         if node.find("math") is None:
             return [fence("\n".join(line.get_text().strip("\n") for line in lines))]
-        texts = [" ".join(self.inline(line).split()) for line in lines]
+        texts = [literal_start(" ".join(self.inline(line).split())) for line in lines]
         return ["  \n".join(t for t in texts if t)]
 
     def inline(self, node) -> str:
