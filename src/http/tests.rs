@@ -149,8 +149,15 @@ async fn auth_guards_everything_but_health() {
         assert_eq!(status, StatusCode::OK, "{uri}");
         assert!(String::from_utf8(body).unwrap().contains(content), "{uri}");
     }
-    let (status, body) = app.get("/api/nope").await;
-    assert_eq!((status, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
+    // The page would run there under the API's weaker CSP and keep it through in-app links.
+    for uri in ["/api", "/api/", "/api/nope"] {
+        let (status, body) = app.get(uri).await;
+        assert_eq!(
+            (status, code(&body)),
+            (StatusCode::NOT_FOUND, "not_found"),
+            "{uri}"
+        );
+    }
     let (status, body) = app.get("/api/jobs/abc").await;
     assert_eq!((status, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
 }

@@ -115,6 +115,10 @@ pub fn router(state: AppState) -> Router {
             "/api/jobs/{id}/files/{*path}",
             get(get_file).layer(middleware::map_response(sandbox)),
         )
+        // The wildcard needs a non-empty rest. Without the two exact routes the fallback would
+        // serve the page at /api and /api/, under the API's CSP instead of PAGE_POLICY.
+        .route("/api", any(no_route))
+        .route("/api/", any(no_route))
         .route("/api/{*rest}", any(no_route))
         .fallback_service(web)
         .layer(Extension(FeedRefresh::default()))
