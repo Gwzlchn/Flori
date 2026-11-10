@@ -244,7 +244,7 @@ async fn at_most_ten_figures_spread_over_the_paper() {
     paper(&fx, &original, &assets);
     let (out, result) = run_note(&fx, "03-note").await;
     result.unwrap();
-    assert_eq!(sent_images(&fx).len(), MAX_IMAGES);
+    assert_eq!(sent_images(&fx).len(), MAX_FIGURES);
     let note = read_note(&out);
     let listed: Vec<&str> = note
         .lines()
@@ -285,14 +285,14 @@ fn video_job(fx: &Fixture, frames_per_section: u64, sections: u64) {
 }
 
 #[tokio::test]
-async fn a_video_sends_ten_frames_spread_over_time() {
+async fn a_video_sends_sixteen_frames_spread_over_time() {
     let fx = Fixture::new(Pipeline::Video, AiTool::Claude);
-    // Twelve frames at 0s, 10s, ... 110s.
-    video_job(&fx, 3, 4);
+    // Eighteen frames at 0s, 10s, ... 170s.
+    video_job(&fx, 3, 6);
     let (out, result) = run_note(&fx, "04-note").await;
     result.unwrap();
     let images = sent_images(&fx);
-    assert_eq!(images.len(), MAX_IMAGES);
+    assert_eq!(images.len(), MAX_FRAMES);
     assert!(images.iter().all(|i| i["media_type"] == "image/jpeg"));
     let note = read_note(&out);
     let times: Vec<&str> = note
@@ -301,12 +301,12 @@ async fn a_video_sends_ten_frames_spread_over_time() {
         .filter(|(n, _)| n.bytes().all(|b| b.is_ascii_digit()))
         .map(|(_, rest)| rest.split(' ').next().unwrap())
         .collect();
-    // Targets every 12.2s pick the nearest frame; 00:30 and 01:20 are the two left out.
+    // Targets every 11.3s pick the nearest frame; 00:40 and 02:10 are the two left out.
     assert_eq!(
         times,
         [
-            "00:00", "00:10", "00:20", "00:40", "00:50", "01:00", "01:10", "01:30", "01:40",
-            "01:50"
+            "00:00", "00:10", "00:20", "00:30", "00:50", "01:00", "01:10", "01:20", "01:30",
+            "01:40", "01:50", "02:00", "02:20", "02:30", "02:40", "02:50"
         ]
     );
     assert!(note.contains("[1] 00:00 Section 0 explains step 0 of the demo in some detail.\n"));

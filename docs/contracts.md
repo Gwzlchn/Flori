@@ -72,7 +72,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节)、由它渲染的 transcript.md | 1h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv);官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
 | arxiv-convert | cpu | original.md、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$` | 10m | 2 |
-| note | ai | note.md(读原文与至多 10 张图,中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
+| note | ai | note.md(读原文与至多 16 张关键帧或 10 张论文图,中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json 写双语 transcript.md;每块调用超时 600s | 3h | 1 |
 | publish | local | meta: vault_path(相对 FLORI_VAULT_DIR,含 vault 名), note_file(主笔记文件名) | 5m | 2 |
 
@@ -115,7 +115,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
   - 串行;每块结果按 sha256(prompt‖model‖payload) 缓存,手动重试只补未缓存的块;校验失败时带反馈再问 1 次,仍失败退出 10。
   - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。有 subtitle_zh 的视频不受此限。
 - note:
-  - 一次调用同时发原文与至多 10 张图,图按序号 [N] 列出,序号即附图顺序。视频取 sections 里的关键帧,按时间均匀取,每张写时间与该节文字前 150 字。论文取 original.md 里有图注的图,按出现位置均匀取:
+  - 一次调用同时发原文与图(视频至多 16 张关键帧,论文至多 10 张图),图按序号 [N] 列出,序号即附图顺序。视频取 sections 里的关键帧,按时间均匀取,每张写时间与该节文字前 150 字;笔记每个要点只要有能说明它的画面就配一张。论文取 original.md 里有图注的图,按出现位置均匀取:
     - 对象是一串相邻的图片段(中间可夹 "(a) …"、"b) …" 这类子图注段),或一个 Markdown 表格;arxiv-convert 把多面板图的每个面板写成单独一段。
     - 图注段以 "Figure"、"Fig."、"Table"、"图"、"表" 开头。图注归紧挨在它前面的对象(图注在下);前面没有对象或已被别的图注占用时,归紧挨在它后面的对象(图注在上,表格常见)。对象里每张图都用这条图注;正文段把对象隔开。
   - 只发内容确实是 jpeg、png、gif、webp 的图,media_type 按文件头判断,不看扩展名;SVG、扩展名是图片但内容不是的文件跳过。

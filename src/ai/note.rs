@@ -1,4 +1,5 @@
-//! The note step: the source text and up to 10 images in one AI call. The model places images
+//! The note step: the source text and up to 16 video frames or 10 paper figures in one AI call.
+//! The model places images
 //! with `![描述](img:N)`; the note on disk links `assets/<basename>` instead, which publish
 //! resolves because it merges every step's assets.
 
@@ -22,7 +23,9 @@ const NOTE_ARXIV: &str = include_str!("../../prompts/note-arxiv.md");
 const NOTE_VIDEO: &str = include_str!("../../prompts/note-video.md");
 /// Appended only when images go along.
 const NOTE_IMAGES: &str = include_str!("../../prompts/note-images.md");
-const MAX_IMAGES: usize = 10;
+/// Videos get a frame per key point, so they send more pictures than papers do.
+const MAX_FRAMES: usize = 16;
+const MAX_FIGURES: usize = 10;
 /// How much of a frame's section text, or of a figure caption, the image list shows.
 const FRAME_TEXT_CHARS: usize = 150;
 const CAPTION_CHARS: usize = 300;
@@ -133,7 +136,7 @@ fn video_frames(sections: &[Section], dir: &Path) -> Vec<Picture> {
             }
         }
     }
-    spread(frames, MAX_IMAGES)
+    spread(frames, MAX_FRAMES)
 }
 
 /// What a paragraph of original.md is when matching captions to images.
@@ -198,7 +201,7 @@ fn paper_figures(original: &str, dir: &Path) -> Vec<Picture> {
         }
         owned.push(object);
     }
-    spread(figures, MAX_IMAGES)
+    spread(figures, MAX_FIGURES)
 }
 
 fn part(paragraph: &str) -> Part {
