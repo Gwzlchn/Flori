@@ -223,8 +223,10 @@ def escape(text: str) -> str:
 
 def link_target(href: str) -> str:
     """The URL with everything but plain URL characters percent-encoded. Spaces, parentheses,
-    brackets and backslashes would end the link early or split it into text plus a second link."""
-    return urllib.parse.quote(href, safe=":/?#&=+,;@%")
+    brackets and backslashes would end the link early or split it into text plus a second link.
+    Existing escapes stay; a % that starts none is encoded too, so %% (an Obsidian comment) never
+    appears."""
+    return re.sub(r"%(?![0-9A-Fa-f]{2})", "%25", urllib.parse.quote(href, safe=":/?#&=+,;@%"))
 
 
 def literal_start(line: str) -> str:

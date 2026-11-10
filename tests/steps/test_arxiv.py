@@ -496,9 +496,12 @@ class ConvertMarkupTest(unittest.TestCase):
             '<a href="https://en.wikipedia.org/wiki/Foo_(bar) baz?q=a b#s">Foo</a> then '
             '<a href="https://a/x)[t](obsidian://y">trap</a> then '
             '<a href="https://a/b (c)">https://a/b (c)</a> end.</p></div>'
+            '<div class="ltx_para"><p class="ltx_p"><a href="https://a/50%%off?q=%41%2">sale</a> and '
+            '<a href="https://a/%">https://a/%</a>%</p></div>'
         )
         self.assertIn("[Foo](https://en.wikipedia.org/wiki/Foo_%28bar%29%20baz?q=a%20b#s) then "
                       "[trap](https://a/x%29%5Bt%5D%28obsidian://y) then https://a/b%20%28c%29 end.", md)
+        self.assertIn("[sale](https://a/50%25%25off?q=%41%252) and https://a/%25%", md)
 
 
 class CliTest(unittest.TestCase):
