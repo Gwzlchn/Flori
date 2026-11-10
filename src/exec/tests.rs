@@ -661,6 +661,31 @@ async fn ai_steps_run_one_at_a_time_and_waiting_holds_no_global_slot() {
 }
 
 #[tokio::test]
+async fn whisper_steps_run_one_at_a_time_and_apart_from_the_ai_lock() {
+    let w = world().await;
+    let mut ids = Vec::new();
+    for link in [YT, BV] {
+        let id = w.job(link, TranslateMode::Off).await;
+        skip_to(&w.db, id, StepName::VideoTranscribe).await;
+        fake(&w.config, id, "video-transcribe", "hang");
+        ids.push(id);
+    }
+    let exec = w.start().await;
+    let transcribes = |s: &[(i64, String)]| count(s, "video-transcribe");
+    sample(&w, &ids, |s| transcribes(s) == 1, |s| transcribes(s) <= 1).await;
+    // The second transcribe now waits for the whisper lock. A note arriving after it must run
+    // beside the first, which it cannot if whisper and ai share a lock.
+    let noter = w.job("2401.12345", TranslateMode::Off).await;
+    skip_to(&w.db, noter, StepName::Note).await;
+    fake(&w.config, noter, "note", "hang");
+    ids.push(noter);
+    exec.wake();
+    let both = |s: &[(i64, String)]| count(s, "note") == 1 && transcribes(s) == 1;
+    sample(&w, &ids, both, |s| transcribes(s) <= 1).await;
+    cancel_all(&w, &exec, &ids).await;
+}
+
+#[tokio::test]
 async fn local_publish_runs_while_both_global_slots_are_taken() {
     let w = world().await;
     let mut ids = Vec::new();
