@@ -1,7 +1,13 @@
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use super::{fetch::*, frames::*, transcribe::*, *};
-use crate::pipeline::{Manifest, MetaValue, StepExit, write_manifest};
+use crate::pipeline::{
+    self, Manifest, MetaValue, Section, StepExit, StepName, StepResult, read_json, write_manifest,
+};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -56,6 +62,24 @@ fn srt_parser_tolerates_real_world_noise() {
 }
 
 #[test]
+fn subtitle_markup_is_stripped_but_spoken_brackets_stay() {
+    let text = "1\n00:00:00,000 --> 00:00:01,000\n<i>use</i> Vec<String> here\n\n\
+        2\n00:00:01,000 --> 00:00:02,000\n{\\an8}if a < b and c > d\n\n\
+        3\n00:00:02,000 --> 00:00:03,000\n<c.colorE5E5E5>{key: value}</c> <b>bold</b>\n\n\
+        4\n00:00:03,000 --> 00:00:04,000\n<font color=\"red\">fn main() { run() }</font>\n";
+    let texts: Vec<String> = parse_srt(text).into_iter().map(|s| s.text).collect();
+    assert_eq!(
+        texts,
+        [
+            "use Vec<String> here",
+            "if a < b and c > d",
+            "{key: value} bold",
+            "fn main() { run() }",
+        ]
+    );
+}
+
+#[test]
 fn srt_time_rejects_garbage() {
     assert_eq!(parse_srt_time("01:02:03,004"), Some(3_723_004));
     assert_eq!(parse_srt_time(" 1:02:03.4 "), Some(3_723_400));
@@ -74,6 +98,10 @@ fn text_join_spaces_only_between_latin_words() {
     push_text(&mut out, "Rust");
     push_text(&mut out, "");
     assert_eq!(out, "Hello world你好世界。Rust");
+    // Korean separates words with spaces.
+    let mut korean = String::from("안녕하세요");
+    push_text(&mut korean, "여러분");
+    assert_eq!(korean, "안녕하세요 여러분");
 }
 
 #[test]
@@ -95,16 +123,13 @@ fn best_usable_subtitle_is_kept_and_the_rest_deleted() {
     fs::write(dir.path().join("subtitle.en.srt"), cue).unwrap();
     fs::write(dir.path().join("subtitle.de.srt"), cue).unwrap();
     fs::write(dir.path().join("video.mp4"), "x").unwrap();
+    // Left by a subtitle run that failed before converting.
+    fs::write(dir.path().join("video.en.vtt"), "partial").unwrap();
     assert_eq!(
         keep_best_subtitle(dir.path()).unwrap().as_deref(),
         Some("en")
     );
-    let mut names: Vec<_> = fs::read_dir(dir.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    names.sort();
-    assert_eq!(names, ["subtitle.srt", "video.mp4"]);
+    assert_eq!(names(dir.path()), ["subtitle.srt", "video.mp4"]);
     assert_eq!(
         fs::read_to_string(dir.path().join("subtitle.srt")).unwrap(),
         cue
@@ -123,6 +148,7 @@ fn ytdlp_errors_are_classified() {
         "ERROR: [youtube] x: Sign in to confirm your age. This video may be inappropriate for some users.",
         "ERROR: [BiliBili] BV1x: This video is for premium members only. Use --cookies-from-browser or --cookies for the authentication.",
         "ERROR: [youtube] x: The uploader has not made this video available in your country",
+        "ERROR: [BiliBili] BV1x: This video is only available for registered users. Use --cookies-from-browser or --cookies for the authentication.",
     ];
     for line in permanent {
         assert_eq!(
@@ -136,6 +162,8 @@ fn ytdlp_errors_are_classified() {
         "ERROR: [youtube] x: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.",
         "ERROR: [BiliBili] BV1x: Unable to download webpage: HTTP Error 412: Precondition Failed",
         "ERROR: unable to download video data: HTTP Error 429: Too Many Requests",
+        // Throttling worded as "Video unavailable" must not become permanent.
+        "ERROR: [youtube] x: Video unavailable. This content isn't available, try again later. The current session has been rate-limited by YouTube for up to an hour. It is recommended to use `-t sleep` to add a delay between video requests to avoid exceeding the rate limit.",
     ];
     for line in retry {
         assert_eq!(
@@ -177,8 +205,26 @@ fn bilibili_nav_reply_decides_the_login_state() {
 
 #[test]
 fn malformed_sessdata_is_rejected_before_any_file_is_written() {
-    let failure = write_cookies(1, "abc\ndef").unwrap_err();
+    let tmp = tempfile::tempdir().unwrap();
+    let failure = CookieFile::write(tmp.path(), 1, "abc\ndef").err().unwrap();
     assert_eq!(failure.exit, StepExit::Auth);
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn cookie_file_is_private_replaces_leftovers_and_goes_away_on_drop() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("flori-bili-7.cookies");
+    fs::write(&path, "stale").unwrap();
+    let cookie = CookieFile::write(tmp.path(), 7, "abc%2C123").unwrap();
+    assert_eq!(cookie.0, path);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.ends_with(".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\tabc%2C123\n"));
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    drop(cookie);
+    assert!(!path.exists());
 }
 
 #[test]
@@ -246,17 +292,58 @@ fn similarity_separates_equal_and_different_frames() {
 fn keyframes_skip_flat_bursts_and_duplicates() {
     let (slide_a, slide_b) = (slide(0), slide(1));
     let black = vec![0; THUMB_SIDE * THUMB_SIDE];
+    let white = vec![255; THUMB_SIDE * THUMB_SIDE];
     let candidates = vec![
-        (0, black.clone()),        // flat
-        (2_000, slide_a.clone()),  // kept
-        (3_000, slide_b.clone()),  // within 2s of the previous candidate
+        (0, black.clone()),        // flat, and opens no gap window
+        (1_000, slide_a.clone()),  // kept
+        (2_000, slide_b.clone()),  // within 2s of the last kept frame
         (15_000, noisy(&slide_a)), // duplicate of slide_a
         (30_000, slide_b.clone()), // kept
         (45_000, slide_a.clone()), // a returning slide is still a duplicate
-        (60_000, black),           // flat
-        (75_000, slide(2)),        // kept
+        (60_000, white),           // flash
+        (61_000, slide(2)),        // kept right after the flash
     ];
-    assert_eq!(pick_keyframes(&candidates), [2_000, 30_000, 75_000]);
+    assert_eq!(pick_keyframes(&candidates), [1_000, 30_000, 61_000]);
+}
+
+/// `base` with a rectangle shifted by `amp` and a ±`checker` checkerboard on top, clamped.
+fn edited(base: &[u8], rect: (usize, usize, usize, usize), amp: i32, checker: i32) -> Vec<u8> {
+    let (x0, y0, w, h) = rect;
+    base.iter()
+        .enumerate()
+        .map(|(i, &p)| {
+            let (x, y) = (i % THUMB_SIDE, i / THUMB_SIDE);
+            let mut v = i32::from(p);
+            if (x0..x0 + w).contains(&x) && (y0..y0 + h).contains(&y) {
+                v += amp;
+            }
+            v += if (x + y) % 2 == 1 { checker } else { -checker };
+            v.clamp(0, 255) as u8
+        })
+        .collect()
+}
+
+#[test]
+fn moderately_close_hashes_are_decided_by_ssim() {
+    let base = slide(0);
+    let distance =
+        |b: &[u8]| (perceptual_hash(&base).unwrap() ^ perceptual_hash(b).unwrap()).count_ones();
+    // A dark band along the bottom edge: the hash moves into the middle band, the picture
+    // stays the same, so SSIM calls it a duplicate.
+    let shaded = edited(&base, (18, 27, 14, 14), -104, 0);
+    // A bright block plus heavy texture: same hash band, a different picture.
+    let changed = edited(&base, (22, 16, 8, 10), 92, 58);
+    for frame in [&shaded, &changed] {
+        assert!(
+            (PHASH_DUPLICATE + 1..=PHASH_SIMILAR).contains(&distance(frame)),
+            "distance {}",
+            distance(frame)
+        );
+    }
+    assert!(ssim(&base, &shaded) >= SSIM_DUPLICATE);
+    assert!(ssim(&base, &changed) < SSIM_DUPLICATE);
+    assert_eq!(pick_keyframes(&[(0, base.clone()), (5_000, shaded)]), [0]);
+    assert_eq!(pick_keyframes(&[(0, base), (5_000, changed)]), [0, 5_000]);
 }
 
 #[test]
@@ -306,6 +393,12 @@ fn transcript_markdown_has_timestamps_frames_and_escaped_text() {
             text: "It costs $5 and $10, see [1] or #rust *now*.".into(),
         },
         Section {
+            start_ms: 60_000,
+            frames: vec![],
+            // A tilde fence would swallow every later heading; %% hides text in Obsidian.
+            text: "~~~ 音乐 ~~~ 你好 100%% sure".into(),
+        },
+        Section {
             start_ms: 3_630_000,
             frames: vec![],
             text: "- not a list".into(),
@@ -317,6 +410,8 @@ fn transcript_markdown_has_timestamps_frames_and_escaped_text() {
          ![](assets/frame-0.jpg)\n\n\
          ![](assets/frame-12000.jpg)\n\n\
          It costs \\$5 and \\$10, see \\[1\\] or \\#rust \\*now\\*.\n\n\
+         ## 01:00\n\n\
+         \\~~~ 音乐 ~~~ 你好 100\\%\\% sure\n\n\
          ## 1:00:30\n\n\
          \\- not a list\n"
     );
@@ -340,15 +435,199 @@ fn transcript_json_matches_the_contract_shape() {
     assert_eq!(whisper.segments, transcript.segments);
 }
 
+fn job_json(platform: &str, id: &str) -> String {
+    serde_json::json!({
+        "job_id": 7,
+        "pipeline": "video",
+        "source": {"platform": platform, "id": id, "url": "https://example.invalid/"},
+        "domain": "ml",
+        "collection": null,
+        "translate": "auto",
+        "ai": {"tool": "claude", "model_note": "m", "model_translate": "m", "cli_version": "1"},
+        "created": "2026-11-08T10:00:00+08:00",
+        "public_url": "http://nas.lan:8780",
+        "vault_name": "flori",
+    })
+    .to_string()
+}
+
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// A video-fetch run against tests/fixtures/video/fake/{yt-dlp,curl}. The fake yt-dlp acts on
+/// words in the video id and logs its arguments to `steps/fake-yt-dlp.log`.
+struct FetchRun {
+    job: tempfile::TempDir,
+    tmp: tempfile::TempDir,
+    env: FetchEnv,
+}
+
+impl FetchRun {
+    fn new(platform: &str, id: &str, sessdata: Option<&str>) -> FetchRun {
+        let job = tempfile::tempdir().unwrap();
+        fs::write(job.path().join("job.json"), job_json(platform, id)).unwrap();
+        fs::create_dir_all(job.path().join("steps/01-video-fetch.tmp")).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let env = FetchEnv {
+            proxy: None,
+            sessdata: sessdata.map(Into::into),
+            tmp_dir: tmp.path().into(),
+            ytdlp: fixture("fake/yt-dlp").into(),
+            curl: fixture("fake/curl").into(),
+        };
+        FetchRun { job, tmp, env }
+    }
+
+    fn out(&self) -> PathBuf {
+        self.job.path().join("steps/01-video-fetch.tmp")
+    }
+
+    async fn run(&self) -> StepResult {
+        fetch_with(self.job.path(), &self.out(), &self.env).await
+    }
+
+    fn log(&self) -> String {
+        fs::read_to_string(self.job.path().join("steps/fake-yt-dlp.log")).unwrap_or_default()
+    }
+
+    fn manifest(&self) -> Manifest {
+        pipeline::read_manifest(&self.out()).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn failed_subtitles_do_not_cost_the_video() {
+    for id in ["video-subs-429", "video-subs-404"] {
+        let run = FetchRun::new("youtube", id, None);
+        run.run().await.unwrap();
+        assert_eq!(names(&run.out()), ["manifest.json", "video.mp4"], "{id}");
+        let manifest = run.manifest();
+        assert_eq!(manifest.title.as_deref(), Some("Title"));
+        assert_eq!(manifest.files.keys().collect::<Vec<_>>(), ["video"]);
+        let meta = &manifest.meta;
+        assert_eq!(meta["title"], MetaValue::Text("Title".into()));
+        assert_eq!(meta["uploader"], MetaValue::Text("U".into()));
+        assert_eq!(meta["duration_ms"], MetaValue::Int(12_500));
+        assert_eq!(meta["published"], MetaValue::Text("2024-01-02".into()));
+        assert!(!meta.contains_key("subtitle_language"));
+    }
+}
+
+#[tokio::test]
+async fn subtitle_is_kept_and_both_runs_skip_live_streams() {
+    let run = FetchRun::new("youtube", "video-subs-ok", None);
+    run.run().await.unwrap();
+    assert_eq!(
+        names(&run.out()),
+        ["manifest.json", "subtitle.srt", "video.mp4"]
+    );
+    let manifest = run.manifest();
+    assert_eq!(manifest.files["subtitle"], "subtitle.srt");
+    assert_eq!(
+        manifest.meta["subtitle_language"],
+        MetaValue::Text("en".into())
+    );
+    let log = run.log();
+    assert_eq!(log.lines().count(), 2);
+    for line in log.lines() {
+        assert!(line.contains(" --match-filter !is_live "), "{line}");
+        assert!(line.contains("--playlist-items 1 "), "{line}");
+        assert!(
+            line.ends_with("-- https://www.youtube.com/watch?v=video-subs-ok"),
+            "{line}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn running_live_stream_is_a_readable_permanent_failure() {
+    let run = FetchRun::new("youtube", "live", None);
+    let failure = run.run().await.unwrap_err();
+    assert_eq!(failure.exit, StepExit::Permanent);
+    assert!(
+        failure.message.contains("live stream"),
+        "{}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn multi_part_title_is_the_video_title_and_the_cookie_goes_away() {
+    let run = FetchRun::new("bilibili", "BVmulti", Some("good-cookie"));
+    run.run().await.unwrap();
+    let manifest = run.manifest();
+    assert_eq!(manifest.title.as_deref(), Some("Course"));
+    assert_eq!(manifest.meta["title"], MetaValue::Text("Course".into()));
+    let log = run.log();
+    assert!(log.contains("--cookies "), "{log}");
+    assert!(
+        log.contains(" -- https://www.bilibili.com/video/BVmulti\n"),
+        "{log}"
+    );
+    assert_eq!(names(run.tmp.path()), Vec::<String>::new());
+}
+
+/// Every file under `dir`, recursively.
+fn all_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(all_files(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+#[tokio::test]
+async fn cookie_never_reaches_the_job_dir_and_is_removed_after_a_failure() {
+    let run = FetchRun::new("bilibili", "BVgone", Some("secret-cookie"));
+    let failure = run.run().await.unwrap_err();
+    assert_eq!(failure.exit, StepExit::Permanent);
+    assert!(run.log().contains("--cookies "));
+    assert_eq!(names(run.tmp.path()), Vec::<String>::new());
+    for file in all_files(run.job.path()) {
+        let bytes = fs::read(&file).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("secret-cookie"),
+            "{}",
+            file.display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn expired_sessdata_exits_30_before_downloading() {
+    let run = FetchRun::new("bilibili", "BVany", Some("expired"));
+    let failure = run.run().await.unwrap_err();
+    assert_eq!(failure.exit, StepExit::Auth);
+    assert_eq!(run.log(), "");
+    assert_eq!(names(run.tmp.path()), Vec::<String>::new());
+}
+
+/// What SIGTERM does in `fetch`: the download future is dropped mid-run.
+#[tokio::test]
+async fn dropping_a_running_download_removes_the_cookie() {
+    let run = FetchRun::new("bilibili", "BVhang", Some("good-cookie"));
+    let stopped = tokio::time::timeout(Duration::from_secs(2), run.run()).await;
+    assert!(stopped.is_err(), "the fake yt-dlp should still be running");
+    assert!(run.log().contains("--cookies "));
+    assert_eq!(names(run.tmp.path()), Vec::<String>::new());
+}
+
 /// Job dir with job.json and a finished video-fetch step holding the fixture video and,
 /// optionally, its subtitle.
 fn fixture_job(with_subtitle: bool) -> tempfile::TempDir {
     let job = tempfile::tempdir().unwrap();
-    fs::write(
-        job.path().join("job.json"),
-        r#"{"job_id":7,"pipeline":"video","source":{"platform":"youtube","id":"jNQXAC9IVRw","url":"https://www.youtube.com/watch?v=jNQXAC9IVRw"},"domain":"ml","collection":null,"translate":"auto","ai":{"tool":"claude","model_note":"m","model_translate":"m","cli_version":"1"},"created":"2026-11-08T10:00:00+08:00","public_url":"http://nas.lan:8780","vault_name":"flori"}"#,
-    )
-    .unwrap();
+    fs::write(job.path().join("job.json"), job_json("youtube", "local")).unwrap();
     let fetch = job.path().join("steps/01-video-fetch");
     fs::create_dir_all(&fetch).unwrap();
     fs::copy(fixture("local-video.mp4"), fetch.join(VIDEO_FILE)).unwrap();
@@ -427,13 +706,8 @@ async fn fixture_runs_transcribe_and_frames() {
         "## 00:00\n\n![](assets/{})\n\n",
         manifest.assets[0]
     )));
-    let mut left: Vec<_> = fs::read_dir(&framed)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    left.sort();
     assert_eq!(
-        left,
+        names(&framed),
         ["assets", "manifest.json", "sections.json", "transcript.md"]
     );
 }
@@ -454,10 +728,5 @@ async fn fixture_runs_whisper_without_subtitle() {
         Some(MetaValue::Float(p)) if (0.0..=1.0).contains(p)
     ));
     let _: Transcript = read_json(&transcribed.join(TRANSCRIPT_JSON)).unwrap();
-    let mut left: Vec<_> = fs::read_dir(&transcribed)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    left.sort();
-    assert_eq!(left, ["manifest.json", "transcript.json"]);
+    assert_eq!(names(&transcribed), ["manifest.json", "transcript.json"]);
 }

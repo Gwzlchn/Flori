@@ -4,11 +4,11 @@ use std::{collections::BTreeMap, fs, path::Path, process::Stdio};
 
 use tokio::process::Command;
 
-use super::{
-    Section, Segment, Transcript, exit_failure, logical_file, prior_step, push_text, read_json,
-    run_checked, write_json,
+use super::{Segment, Transcript, exit_failure, push_text, run_checked};
+use crate::pipeline::{
+    Manifest, Section, StepFailure, StepName, StepResult, clock, escape_markdown, read_json,
+    step_file, write_json, write_manifest,
 };
-use crate::pipeline::{Manifest, StepFailure, StepName, StepResult, write_manifest};
 
 const SECTION_MS: u64 = 30_000;
 pub(super) const THUMB_SIDE: usize = 32;
@@ -19,7 +19,7 @@ const SCAN_FILTER: &str = concat!(
     "select='isnan(prev_selected_t)+gt(scene,0.3)+gte(t-prev_selected_t,15)',",
     "showinfo,scale=32:32,format=gray",
 );
-/// Bursts of cuts (fades, flashes) keep only their first frame.
+/// Bursts of cuts (fades, flashes) keep only their first usable frame.
 const MIN_GAP_MS: u64 = 2_000;
 pub(super) const MAX_FRAMES: usize = 60;
 /// Near-uniform frames (black, white, fades) carry nothing.
@@ -29,10 +29,8 @@ pub(super) const PHASH_SIMILAR: u32 = 10;
 pub(super) const SSIM_DUPLICATE: f64 = 0.92;
 
 pub async fn frames(job_dir: &Path, out_dir: &Path) -> StepResult {
-    let (fetch_dir, fetched) = prior_step(job_dir, StepName::VideoFetch)?;
-    let video = logical_file(&fetch_dir, &fetched, "video")?;
-    let (transcribe_dir, transcribed) = prior_step(job_dir, StepName::VideoTranscribe)?;
-    let transcript_json = logical_file(&transcribe_dir, &transcribed, "transcript_json")?;
+    let video = step_file(job_dir, StepName::VideoFetch, "video")?;
+    let transcript_json = step_file(job_dir, StepName::VideoTranscribe, "transcript_json")?;
     let transcript: Transcript = read_json(&transcript_json)?;
 
     let candidates = scan(&video).await?;
@@ -120,17 +118,20 @@ pub(super) fn showinfo_times(stderr: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Gap filter, flat filter, then dedup against every kept frame: a close perceptual hash is a
-/// duplicate outright, a moderately close one only when SSIM agrees.
+/// Flat filter, gap to the last kept frame, then dedup against every kept frame: a close
+/// perceptual hash is a duplicate outright, a moderately close one only when SSIM agrees.
+/// Dropped candidates do not open a gap window, so a black first frame cannot hide the title
+/// card a second later.
 pub(super) fn pick_keyframes(candidates: &[(u64, Vec<u8>)]) -> Vec<u64> {
     let mut kept: Vec<(u64, u64, &[u8])> = Vec::new();
-    let mut last_ms: Option<u64> = None;
     for (ms, pixels) in candidates {
-        if last_ms.is_some_and(|last| ms.saturating_sub(last) < MIN_GAP_MS) {
+        if variance(pixels) < FLAT_VARIANCE {
             continue;
         }
-        last_ms = Some(*ms);
-        if variance(pixels) < FLAT_VARIANCE {
+        if kept
+            .last()
+            .is_some_and(|(last, _, _)| ms.saturating_sub(*last) < MIN_GAP_MS)
+        {
             continue;
         }
         let Some(hash) = perceptual_hash(pixels) else {
@@ -258,26 +259,4 @@ pub(super) fn render_transcript(sections: &[Section]) -> String {
     md.truncate(md.trim_end().len());
     md.push('\n');
     md
-}
-
-/// Spoken text must not turn into math (`$`), tags (`#`), links, emphasis or HTML in Obsidian.
-fn escape_markdown(text: &str) -> String {
-    const SPECIAL: &[char] = &['\\', '`', '*', '_', '[', ']', '<', '>', '$', '#'];
-    let mut out = String::with_capacity(text.len());
-    for (i, c) in text.chars().enumerate() {
-        if SPECIAL.contains(&c) || (i == 0 && matches!(c, '-' | '+')) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn clock(ms: u64) -> String {
-    let s = ms / 1000;
-    if s >= 3600 {
-        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-    } else {
-        format!("{:02}:{:02}", s / 60, s % 60)
-    }
 }

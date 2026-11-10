@@ -1,0 +1,12 @@
+#!/bin/sh
+# Fake curl for the Bilibili login check: SESSDATA "expired" is logged out, anything else is in.
+cookies=
+while [ $# -gt 0 ]; do
+    case $1 in -b) cookies=$2; shift ;; esac
+    shift
+done
+if grep -q 'SESSDATA	expired' "$cookies"; then
+    echo '{"code":-101,"message":"not logged in","ttl":1,"data":{"isLogin":false}}'
+else
+    echo '{"code":0,"data":{"isLogin":true}}'
+fi

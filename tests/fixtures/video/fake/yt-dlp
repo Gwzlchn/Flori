@@ -1,0 +1,44 @@
+#!/bin/sh
+# Fake yt-dlp for the video-fetch tests. Words in the video id pick the behavior; every call
+# appends its arguments to fake-yt-dlp.log next to the step's out_dir.
+args="$*"
+out= subs= meta= skip= url=
+while [ $# -gt 0 ]; do
+    case $1 in
+        -o) case $2 in subtitle:*) subs=${2#subtitle:} ;; *) out=$2 ;; esac; shift ;;
+        --print-to-file) meta=$3; shift 2 ;;
+        --skip-download) skip=1 ;;
+        --) url=$2; shift ;;
+    esac
+    shift
+done
+[ -n "$out" ] && [ -n "$url" ] || { echo "ERROR: fake yt-dlp needs -o and -- <url>" >&2; exit 2; }
+dir=$(dirname "$out")
+printf '%s\n' "$args" >> "$dir/../fake-yt-dlp.log"
+
+if [ -n "$skip" ]; then
+    case $url in
+        *subs-ok*) printf '1\n00:00:00,000 --> 00:00:01,000\nhello\n' > "$dir/subtitle.en.srt" ;;
+        *subs-404*)
+            printf 'partial' > "$dir/video.en.vtt"
+            echo "ERROR: Unable to download video subtitles for 'en': HTTP Error 404: Not Found" >&2
+            exit 1 ;;
+        *)
+            echo "ERROR: Unable to download video subtitles for 'en': HTTP Error 429: Too Many Requests" >&2
+            exit 1 ;;
+    esac
+    exit 0
+fi
+
+case $url in
+    *live*) echo "[download] live does not pass filter (!is_live), skipping .."; exit 0 ;;
+    *hang*) exec sleep 30 ;;
+    *gone*)
+        echo "ERROR: [youtube] gone: Video unavailable. This video has been removed by the uploader" >&2
+        exit 1 ;;
+esac
+printf 'fake video' > "$dir/video.mp4"
+case $url in
+    *multi*) printf '{"title": "Course p01 lec01.mp4", "playlist_title": "Course", "uploader": "U", "duration": 12.5, "upload_date": "20240102"}' > "$meta" ;;
+    *) printf '{"title": "Title", "uploader": "U", "duration": 12.5, "upload_date": "20240102"}' > "$meta" ;;
+esac

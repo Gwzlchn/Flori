@@ -5,11 +5,11 @@ use std::{collections::BTreeMap, fs, path::Path};
 use serde::Deserialize;
 use tokio::process::Command;
 
-use super::{
-    Segment, Transcript, env_value, logical_file, prior_step, push_text, read_json, run_checked,
-    write_json,
+use super::{Segment, Transcript, env_value, push_text, run_checked};
+use crate::pipeline::{
+    Manifest, MetaValue, StepFailure, StepName, StepResult, prior_step, read_json, step_file,
+    write_json, write_manifest,
 };
-use crate::pipeline::{Manifest, MetaValue, StepFailure, StepName, StepResult, write_manifest};
 
 pub(super) const TRANSCRIPT_JSON: &str = "transcript.json";
 
@@ -37,7 +37,7 @@ pub async fn transcribe(job_dir: &Path, out_dir: &Path) -> StepResult {
             (Transcript { language, segments }, "subtitle", 1.0)
         }
         None => {
-            let video = logical_file(&fetch_dir, &fetched, "video")?;
+            let video = step_file(job_dir, StepName::VideoFetch, "video")?;
             let whisper = run_whisper(&video, out_dir).await?;
             let transcript = Transcript {
                 language: Some(whisper.language),
@@ -142,22 +142,43 @@ pub(super) fn parse_srt_time(value: &str) -> Option<u64> {
     seconds.checked_mul(1000)?.checked_add(millis)
 }
 
-/// Drops `<i>`-style tags and `{\an8}`-style overrides.
+/// Drops the subtitle markup yt-dlp and ffmpeg leave in SRT: `<i>`, `<b>`, `<u>`, `<s>`,
+/// `<font ...>`, WebVTT `<c.class>` and ASS `{\an8}`. Other angle brackets and braces are
+/// spoken text, such as `Vec<String>` or `a < b`, and stay.
 fn strip_markup(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(open) = rest.find(['<', '{']) {
-        let close = if rest.as_bytes()[open] == b'<' {
-            '>'
-        } else {
-            '}'
-        };
-        let Some(len) = rest[open..].find(close) else {
-            break;
-        };
         out.push_str(&rest[..open]);
-        rest = &rest[open + len + 1..];
+        rest = &rest[open..];
+        // `<` and `{` are one byte, so slicing past them stays on a char boundary.
+        let skip = match markup_len(rest) {
+            Some(len) => len,
+            None => {
+                out.push_str(&rest[..1]);
+                1
+            }
+        };
+        rest = &rest[skip..];
     }
     out.push_str(rest);
     out
+}
+
+/// Byte length of the markup `text` starts with, if it is one.
+fn markup_len(text: &str) -> Option<usize> {
+    if text.starts_with("{\\") {
+        return text.find('}').map(|end| end + 1);
+    }
+    let tag = text.strip_prefix('<')?;
+    let tag = tag.strip_prefix('/').unwrap_or(tag);
+    let name_len = tag
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(tag.len());
+    let (name, after) = tag.split_at(name_len);
+    let known = ["i", "b", "u", "s", "c", "font"].contains(&name.to_ascii_lowercase().as_str());
+    if !known || !after.starts_with(['>', ' ', '.']) {
+        return None;
+    }
+    text.find('>').map(|end| end + 1)
 }

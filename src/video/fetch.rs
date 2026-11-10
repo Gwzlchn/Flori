@@ -2,7 +2,9 @@
 
 use std::{
     collections::BTreeMap,
-    env, fs, io,
+    env,
+    ffi::OsString,
+    fs, io,
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -13,11 +15,12 @@ use serde::Deserialize;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
+    signal::unix::{SignalKind, signal},
 };
 
-use super::{env_value, read_json, transcribe::parse_srt};
+use super::{env_value, transcribe::parse_srt};
 use crate::pipeline::{
-    self, Manifest, MetaValue, Platform, StepFailure, StepResult, write_manifest,
+    self, Manifest, MetaValue, Platform, StepFailure, StepResult, read_json, write_manifest,
 };
 
 pub(super) const VIDEO_FILE: &str = "video.mp4";
@@ -28,13 +31,25 @@ pub(super) const SUBTITLE_FILE: &str = "subtitle.srt";
 #[derive(Debug, Deserialize)]
 struct FetchedMeta {
     title: Option<String>,
+    /// Set for a multi-part Bilibili video, whose `title` carries a ` pNN <part>` suffix.
+    playlist_title: Option<String>,
     uploader: Option<String>,
     duration: Option<f64>,
     upload_date: Option<String>,
 }
 
-/// yt-dlp errors that will not change on retry. Everything else, including 412/429, bot checks
-/// and network errors, is retried.
+/// Throttling that yt-dlp words like a permanent error, e.g. YouTube's "Video unavailable. This
+/// content isn't available, try again later". Checked before [`PERMANENT_ERRORS`].
+const RETRY_ERRORS: &[&str] = &[
+    "try again later",
+    "rate-limit",
+    "rate limit",
+    "not a bot",
+    "http error 429",
+    "http error 412",
+];
+
+/// yt-dlp errors that will not change on retry. Anything in neither list is retried.
 const PERMANENT_ERRORS: &[&str] = &[
     "video unavailable",
     "this video is unavailable",
@@ -46,6 +61,7 @@ const PERMANENT_ERRORS: &[&str] = &[
     "been terminated",
     "members-only",
     "premium members only",
+    "only available for registered users",
     "confirm your age",
     "unsupported url",
     "http error 404",
@@ -53,61 +69,126 @@ const PERMANENT_ERRORS: &[&str] = &[
     "live event will begin",
 ];
 
+/// What video-fetch takes from its environment. Tests point the tools at fakes.
+pub(super) struct FetchEnv {
+    pub(super) proxy: Option<String>,
+    pub(super) sessdata: Option<String>,
+    pub(super) tmp_dir: PathBuf,
+    pub(super) ytdlp: OsString,
+    pub(super) curl: OsString,
+}
+
+impl FetchEnv {
+    fn inherited() -> FetchEnv {
+        FetchEnv {
+            proxy: env_value("HTTPS_PROXY").or_else(|| env_value("HTTP_PROXY")),
+            sessdata: env_value("FLORI_BILI_SESSDATA"),
+            tmp_dir: env::temp_dir(),
+            ytdlp: "yt-dlp".into(),
+            curl: "curl".into(),
+        }
+    }
+}
+
+/// On SIGTERM (cancel or step timeout) the download future is dropped: tools spawned with
+/// `kill_on_drop` die and [`CookieFile`] removes the cookie before the step exits 10.
 pub async fn fetch(job_dir: &Path, out_dir: &Path) -> StepResult {
+    let mut term = signal(SignalKind::terminate())
+        .map_err(|e| StepFailure::retry(format!("install SIGTERM handler: {e}")))?;
+    let env = FetchEnv::inherited();
+    tokio::select! {
+        result = fetch_with(job_dir, out_dir, &env) => result,
+        _ = term.recv() => Err(StepFailure::retry("stopped by SIGTERM")),
+    }
+}
+
+pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -> StepResult {
     let job = pipeline::read_job(job_dir)?;
     let id = &job.source.id;
+    // A multi-part Bilibili video is a playlist; `--playlist-items 1` keeps its first part.
     let (url, proxy, sessdata) = match job.source.platform {
         Platform::Youtube => (
             format!("https://www.youtube.com/watch?v={id}"),
-            env_value("HTTPS_PROXY").or_else(|| env_value("HTTP_PROXY")),
+            env.proxy.as_deref(),
             None,
         ),
-        // `?p=1` keeps multi-part videos to their first part. Bilibili never goes via the proxy.
+        // Bilibili never goes via the proxy.
         Platform::Bilibili => (
-            format!("https://www.bilibili.com/video/{id}?p=1"),
+            format!("https://www.bilibili.com/video/{id}"),
             None,
-            env_value("FLORI_BILI_SESSDATA"),
+            env.sessdata.as_deref(),
         ),
         Platform::Arxiv => return Err(StepFailure::permanent("video-fetch got an arxiv job")),
     };
-    let meta_file = out_dir.join("fetched.json");
-    let mut cmd = Command::new("yt-dlp");
-    cmd.args(["--ignore-config", "--no-plugin-dirs", "--no-playlist"])
-        .args(["--no-progress", "--no-colors", "--proxy"])
-        .arg(proxy.unwrap_or_default())
-        // h264 first: it plays in every browser and ffmpeg decodes it fast.
-        .args(["-f", "bv*+ba/b", "-S", "vcodec:h264,res:1080,acodec:m4a"])
-        .args(["--merge-output-format", "mp4", "--remux-video", "mp4"])
-        // Manual subtitles only. Auto captions are worse than whisper.
-        .args(["--write-subs", "--sub-langs", "zh.*,en.*"])
-        .args(["--convert-subs", "srt"])
-        .arg("-o")
-        .arg(out_dir.join("video.%(ext)s"))
-        .arg("-o")
-        .arg(format!("subtitle:{}/subtitle.%(ext)s", out_dir.display()))
-        .arg("--print-to-file")
-        .arg("after_move:%(.{title,uploader,duration,upload_date})j")
-        .arg(&meta_file);
-    let cookies = match &sessdata {
-        Some(value) => Some(write_cookies(job.job_id, value)?),
+    let cookies = match sessdata {
+        Some(value) => Some(CookieFile::write(&env.tmp_dir, job.job_id, value)?),
         None => None,
     };
-    let downloaded = download(cmd, &url, cookies.as_deref()).await;
-    if let Some(path) = &cookies {
-        let _ = fs::remove_file(path);
+    let cookie_path = cookies.as_ref().map(|c| c.0.as_path());
+    if let Some(path) = cookie_path {
+        check_login(env, path).await?;
     }
-    downloaded?;
+    // Both runs share the output template, so yt-dlp's intermediate files land in out_dir.
+    let ytdlp = || {
+        let mut cmd = Command::new(&env.ytdlp);
+        cmd.args(["--ignore-config", "--no-plugin-dirs"])
+            .args(["--playlist-items", "1", "--no-progress", "--no-colors"])
+            .arg("--proxy")
+            .arg(proxy.unwrap_or_default())
+            // A running live stream would be recorded until the step times out.
+            .args(["--match-filter", "!is_live", "-o"])
+            .arg(out_dir.join("video.%(ext)s"));
+        if let Some(path) = cookie_path {
+            cmd.arg("--cookies").arg(path);
+        }
+        cmd
+    };
+
+    let meta_file = out_dir.join("fetched.json");
+    let mut video = ytdlp();
+    // h264 first: it plays in every browser and ffmpeg decodes it fast.
+    video
+        .args(["-f", "bv*+ba/b", "-S", "vcodec:h264,res:1080,acodec:m4a"])
+        .args(["--merge-output-format", "mp4", "--remux-video", "mp4"])
+        .arg("--print-to-file")
+        .arg("after_move:%(.{title,playlist_title,uploader,duration,upload_date})j")
+        .arg(&meta_file)
+        .arg("--")
+        .arg(&url);
+    let (status, errors) = run_ytdlp(video).await?;
+    if let Some(failure) = classify_ytdlp(status.success(), &errors) {
+        return Err(failure);
+    }
     if !out_dir.join(VIDEO_FILE).is_file() {
-        return Err(StepFailure::permanent("yt-dlp finished without video.mp4"));
+        return Err(StepFailure::permanent(
+            "yt-dlp exited 0 without video.mp4; a live stream still running is skipped",
+        ));
     }
     let fetched: FetchedMeta = read_json(&meta_file)?;
     fs::remove_file(&meta_file)?;
+
+    // Subtitles are best effort in a second run: a failed subtitle request (429 from YouTube's
+    // timedtext, Bilibili's subtitle JSON) must not cost the video; whisper covers it.
+    // Manual subtitles only. Auto captions are worse than whisper.
+    let mut subtitles = ytdlp();
+    subtitles
+        .args(["--skip-download", "--write-subs"])
+        .args(["--sub-langs", "zh.*,en.*", "--convert-subs", "srt", "-o"])
+        .arg(format!("subtitle:{}/subtitle.%(ext)s", out_dir.display()))
+        .arg("--")
+        .arg(&url);
+    let (status, _) = run_ytdlp(subtitles).await?;
+    if !status.success() {
+        eprintln!("video-fetch: subtitle download failed, video-transcribe will use whisper");
+    }
+    drop(cookies);
 
     let subtitle_language = keep_best_subtitle(out_dir)?;
     let mut files = BTreeMap::from([("video".into(), VIDEO_FILE.into())]);
     if subtitle_language.is_some() {
         files.insert("subtitle".into(), SUBTITLE_FILE.into());
     }
+    let title = fetched.playlist_title.or(fetched.title);
     let text = |key: &str, value: Option<String>| Some((key.to_owned(), MetaValue::Text(value?)));
     let duration_ms = |s: f64| {
         (
@@ -116,7 +197,7 @@ pub async fn fetch(job_dir: &Path, out_dir: &Path) -> StepResult {
         )
     };
     let meta = [
-        text("title", fetched.title.clone()),
+        text("title", title.clone()),
         text("uploader", fetched.uploader),
         fetched.duration.map(duration_ms),
         text(
@@ -126,7 +207,7 @@ pub async fn fetch(job_dir: &Path, out_dir: &Path) -> StepResult {
         text("subtitle_language", subtitle_language),
     ];
     let manifest = Manifest {
-        title: fetched.title,
+        title,
         files,
         assets: Vec::new(),
         meta: meta.into_iter().flatten().collect(),
@@ -135,46 +216,53 @@ pub async fn fetch(job_dir: &Path, out_dir: &Path) -> StepResult {
     Ok(())
 }
 
-/// Netscape cookie file for curl and yt-dlp in TMPDIR, never in the job directory. A Cookie
-/// header would be scoped to www.bilibili.com only and would sit in the process arguments.
-pub(super) fn write_cookies(job_id: i64, sessdata: &str) -> Result<PathBuf, StepFailure> {
-    if sessdata.contains(|c: char| c.is_whitespace() || c.is_control()) {
-        return Err(StepFailure::auth("FLORI_BILI_SESSDATA is malformed"));
+/// Netscape cookie file for curl and yt-dlp in TMPDIR, never in the job directory, removed on
+/// drop. A Cookie header would be scoped to www.bilibili.com only and sit in the process
+/// arguments.
+pub(super) struct CookieFile(pub(super) PathBuf);
+
+impl CookieFile {
+    pub(super) fn write(tmp_dir: &Path, job_id: i64, sessdata: &str) -> Result<Self, StepFailure> {
+        if sessdata.contains(|c: char| c.is_whitespace() || c.is_control()) {
+            return Err(StepFailure::auth("FLORI_BILI_SESSDATA is malformed"));
+        }
+        let path = tmp_dir.join(format!("flori-bili-{job_id}.cookies"));
+        // A leftover from a killed attempt, or a planted symlink, goes first; create_new then
+        // refuses anything that reappears in between.
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        let cookie = CookieFile(path);
+        writeln!(file, "# Netscape HTTP Cookie File")?;
+        writeln!(
+            file,
+            ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\t{sessdata}"
+        )?;
+        Ok(cookie)
     }
-    let path = env::temp_dir().join(format!("flori-bili-{job_id}.cookies"));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)?;
-    writeln!(file, "# Netscape HTTP Cookie File")?;
-    writeln!(
-        file,
-        ".bilibili.com\tTRUE\t/\tTRUE\t0\tSESSDATA\t{sessdata}"
-    )?;
-    Ok(path)
 }
 
-/// Split out of `fetch` so the cookie file is removed on every path.
-async fn download(mut cmd: Command, url: &str, cookies: Option<&Path>) -> StepResult {
-    if let Some(path) = cookies {
-        check_login(path).await?;
-        cmd.arg("--cookies").arg(path);
+impl Drop for CookieFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
     }
-    cmd.arg("--").arg(url);
-    let (status, errors) = run_ytdlp(cmd).await?;
-    classify_ytdlp(status.success(), &errors).map_or(Ok(()), Err)
 }
 
 /// An expired SESSDATA does not fail yt-dlp: it silently drops to preview quality and loses
 /// subtitles. Bilibili's nav API is the one explicit answer, so ask it before downloading.
-async fn check_login(cookies: &Path) -> StepResult {
-    let output = Command::new("curl")
+async fn check_login(env: &FetchEnv, cookies: &Path) -> StepResult {
+    let output = Command::new(&env.curl)
         .args(["-sS", "--max-time", "20", "--noproxy", "*", "-b"])
         .arg(cookies)
         .arg("https://api.bilibili.com/x/web-interface/nav")
         .stdin(Stdio::null())
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|e| StepFailure::permanent(format!("curl: {e}")))?;
@@ -213,6 +301,7 @@ async fn run_ytdlp(mut cmd: Command) -> Result<(ExitStatus, Vec<String>), StepFa
     let mut child = cmd
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| StepFailure::permanent(format!("yt-dlp: {e}")))?;
     let stderr = child
@@ -234,7 +323,8 @@ async fn run_ytdlp(mut cmd: Command) -> Result<(ExitStatus, Vec<String>), StepFa
     Ok((child.wait().await?, errors))
 }
 
-/// `None` means the download is usable. The last ERROR line decides.
+/// `None` means the download is usable. The last ERROR line decides: throttling first, then
+/// known permanent causes, anything else is retried.
 pub(super) fn classify_ytdlp(success: bool, errors: &[String]) -> Option<StepFailure> {
     if success {
         return None;
@@ -243,7 +333,8 @@ pub(super) fn classify_ytdlp(success: bool, errors: &[String]) -> Option<StepFai
         return Some(StepFailure::retry("yt-dlp failed without an ERROR line"));
     };
     let lower = error.to_lowercase();
-    Some(if PERMANENT_ERRORS.iter().any(|p| lower.contains(p)) {
+    let matches = |patterns: &[&str]| patterns.iter().any(|p| lower.contains(p));
+    Some(if !matches(RETRY_ERRORS) && matches(PERMANENT_ERRORS) {
         StepFailure::permanent(error.clone())
     } else {
         StepFailure::retry(error.clone())
@@ -256,17 +347,23 @@ pub(super) fn published_date(value: &str) -> Option<String> {
         .then(|| format!("{}-{}-{}", &value[..4], &value[4..6], &value[6..]))
 }
 
-/// Keeps the best usable `subtitle.<lang>.srt` as `subtitle.srt`, deletes the rest and returns
-/// its primary language subtag.
+/// Keeps the best usable `subtitle.<lang>.srt` as `subtitle.srt` and returns its primary
+/// language subtag. Everything else except video.mp4, such as the other languages or an
+/// unconverted `.vtt` left by a failed subtitle run, is deleted.
 pub(super) fn keep_best_subtitle(out_dir: &Path) -> io::Result<Option<String>> {
     let mut found = Vec::new();
     for entry in fs::read_dir(out_dir)? {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if let Some(lang) = name
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if name == VIDEO_FILE {
+            continue;
+        }
+        match name
             .strip_prefix("subtitle.")
             .and_then(|rest| rest.strip_suffix(".srt"))
         {
-            found.push((subtitle_rank(lang), lang.to_owned(), out_dir.join(&name)));
+            Some(lang) => found.push((subtitle_rank(lang), lang.to_owned(), path.clone())),
+            None => fs::remove_file(&path)?,
         }
     }
     found.sort();
