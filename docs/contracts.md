@@ -22,7 +22,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 取消时执行器给步骤进程组发 SIGTERM。AI 步骤收到 SIGTERM 后立即 SIGKILL 自己的 CLI 进程组并退出 10;job 与步骤状态以 HTTP 层写入的 canceled 为准。
 - 按步骤名找前序产物:`steps/*-<name>/manifest.json`(`pipeline::find_step`)。
 - translate=off 时不排入 translate。auto 时总是排入;跳过时(见下文 translate 规则)照常建目录,manifest 不带 files,只在 meta 里写 skipped_reason。
-- 正文图片一律放 `assets/<basename>`,Markdown 里写 `![](assets/<basename>)`。publish 按步骤顺序合并 manifest.files,同名时后面的步骤覆盖前面的,只允许 translate 覆盖 transcript;assets 重名按 20 处理;translate 不输出 assets,只引用 video-frames 的 assets。
+- 正文图片一律放 `assets/<basename>`,Markdown 里写 `![](assets/<basename>)`。publish 按步骤顺序合并 manifest.files,同名时后面的步骤覆盖前面的,只允许 translate 覆盖 transcript;assets 重名按 20 处理;note 与 translate 不输出 assets,只引用 video-frames 或 arxiv-convert 的 assets。
 - B站多 P 只取 P1。
 
 ### job.json
@@ -72,7 +72,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节)、由它渲染的 transcript.md | 1h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv);官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
 | arxiv-convert | cpu | original.md、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$` | 10m | 2 |
-| note | ai | note.md(读原文,中文输出,只有正文);单次调用超时 1800s | 35m | 1 |
+| note | ai | note.md(读原文与至多 10 张图,中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json 写双语 transcript.md;每块调用超时 600s | 3h | 1 |
 | publish | local | meta: vault_path(相对 FLORI_VAULT_DIR,含 vault 名), note_file(主笔记文件名) | 5m | 2 |
 
@@ -89,7 +89,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-frames | transcript、sections | frame-<ms>.jpg |
 | arxiv-fetch | page | 无;资源原件只作为普通文件留在步骤目录 |
 | arxiv-convert | original | 正文图片 |
-| note | note | 无 |
+| note | note | 无;正文引用 video-frames 或 arxiv-convert 的 assets |
 | translate | arXiv:translation;视频:transcript(覆盖 video-frames 的) | 无 |
 | publish | 无 | 无 |
 
@@ -114,19 +114,24 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
     - 没有 subtitle_zh 时由 AI 逐块翻译,转写不做占位符(只保护字面 `⟦`)。
   - 串行;每块结果按 sha256(prompt‖model‖payload) 缓存,手动重试只补未缓存的块;校验失败时带反馈再问 1 次,仍失败退出 10。
   - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。有 subtitle_zh 的视频不受此限。
+- note:
+  - 一次调用同时发原文与至多 10 张图,图按序号 [N] 列出。视频取 sections 里的关键帧,按时间均匀取,每张写时间与该节文字前 150 字;论文取 original.md 里 `![](assets/…)` 图片段之后紧跟图注段("Figure"、"Fig."、"Table"、"图"、"表" 开头)的图,同一图注下的子图共用图注,按出现位置均匀取。只发 jpeg、png、gif、webp,SVG 等跳过。
+  - 大于 1 MiB 或长边超过 1568px 的图用 ffmpeg 缩到 1568px 以内只送模型(PNG 仍为 PNG,其余转 JPEG),笔记里仍引用原图;缩不了的图不发。
+  - 模型用 `![描述](img:N)` 插图,落盘时换成 `![描述](assets/<basename>)`;N 不在清单里时整条图片标记删除。描述去掉 `[`、`]`、`\`,`|` 换成 `/`。
 - note 与 translate 失败时 publish 不执行,可手动 retry。
 
 ### AI CLI 固定调用
 
 ```text
-claude -p --model <必填> --output-format json --tools "" --max-turns 1 --no-session-persistence
-       --strict-mcp-config --setting-sources project
+claude -p --model <必填> --tools "" --input-format stream-json --output-format stream-json --verbose
+       --max-turns 1 --no-session-persistence --strict-mcp-config --setting-sources project
 ```
 
-- prompt 走 stdin,cwd 为每次调用新建的空目录。不能用 `--bare`,它不读 OAuth。
-- 成功判据:退出码 0、is_error=false、subtype=success、result 非空。退出码非 0 时也解析 stdout 的 result 再分类。
+- stdin 是一行 stream-json 的 user 消息:先是 prompt 文本块,每张图前再加一个 `[N]` 文本块,图为 base64 image 块,media_type 按扩展名取 image/jpeg、image/png、image/gif 或 image/webp。没有图时也走这一条路径。工具全关,不开 Read。不能用 `--bare`,它不读 OAuth。
+- cwd:claude 是每次调用前清空重建的 `$HOME/ai-cwd`(固定目录,宿主 `~/.claude/projects` 下只多一项);codex 是每次新建的空目录。
+- 成功判据:stdout 的 stream-json 事件里 type=result 的那一条 is_error=false、subtype=success、result 非空,且退出码 0。退出码非 0 时也解析这条事件再分类;没有 result 事件时按 stdout 与 stderr 的原文分类。
 - 失败分类:凭据失效 → 30;限流和超时 → 10;其它 → 20。
-- codex:`--ask-for-approval never exec --strict-config --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox read-only --ephemeral --color never --json --model M -c history.persistence="none" -c web_search="disabled" -C <空目录> --output-last-message <file> -`。
+- codex:`--ask-for-approval never exec --strict-config --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox read-only --ephemeral --color never --json [--image <file>]… --model M -c history.persistence="none" -c web_search="disabled" -C <空目录> --output-last-message <file> -`。`--image` 每张图一次,放在 `--model` 之前,因为它会吞掉后面的多个值。
 
 ## 契约 2:vault 布局与 frontmatter
 

@@ -1,0 +1,400 @@
+use std::{fs, path::Path};
+
+use super::*;
+use crate::{
+    ai::tests::{Fixture, image_bytes},
+    pipeline::{AiTool, StepExit},
+};
+
+fn sent_images(fx: &Fixture) -> Vec<serde_json::Value> {
+    let calls = fx.calls();
+    assert_eq!(calls.len(), 1);
+    calls[0]["images"].as_array().cloned().unwrap_or_default()
+}
+
+fn ffmpeg_calls(fx: &Fixture) -> Vec<String> {
+    let log = fs::read_to_string(fx.home.path().join("fake-ffmpeg.log")).unwrap_or_default();
+    log.lines().map(str::to_owned).collect()
+}
+
+async fn run_note(fx: &Fixture, seq: &str) -> (std::path::PathBuf, StepResult) {
+    let out = fx.out_dir(seq);
+    let result = note_with(fx.job_dir(), &out, &fx.env()).await;
+    (out, result)
+}
+
+fn read_note(out: &Path) -> String {
+    fs::read_to_string(out.join("note.md")).unwrap()
+}
+
+#[tokio::test]
+async fn a_paper_without_figures_sends_no_images() {
+    for tool in [AiTool::Claude, AiTool::Codex] {
+        let fx = Fixture::new(Pipeline::Arxiv, tool);
+        fx.step(
+            1,
+            StepName::ArxivFetch,
+            Some("Mixtral of Experts"),
+            &[],
+            &[],
+            &[],
+        );
+        let original = "# Mixtral\n\nWe introduce Mixtral 8x7B.\n";
+        let files = [("original", "original.md", original)];
+        fx.step(2, StepName::ArxivConvert, None, &files, &[], &[]);
+        let (out, result) = run_note(&fx, "03-note").await;
+        result.unwrap();
+        assert_eq!(
+            read_note(&out),
+            format!("标题:Mixtral of Experts\n\n{original}")
+        );
+        let manifest = pipeline::read_manifest(&out).unwrap();
+        assert_eq!(manifest.title, None);
+        assert_eq!(manifest.files["note"], "note.md");
+        assert!(manifest.assets.is_empty());
+        assert!(sent_images(&fx).is_empty(), "{tool:?}");
+        assert_eq!(fx.calls()[0]["model"], "model-note");
+        if tool == AiTool::Claude {
+            // The image instructions only go along with images.
+            let prompt = fx.calls()[0]["prompt"].as_str().unwrap().to_owned();
+            assert!(!prompt.contains("img:N"), "{prompt}");
+        }
+    }
+}
+
+/// A paper whose figures exercise every rule: captions, a subfigure pair, SVG, an image without
+/// a caption, and one too large to send as is.
+fn figure_paper(fx: &Fixture, extra: &str) {
+    fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
+    let original = format!(
+        "# Paper\n\n![](assets/fig1.png)\n\nFigure 1: Overview of the model.\n\n\
+         ![](assets/fig2.svg)\n\nFigure 2: A vector drawing.\n\n\
+         ![](assets/fig3a.png) ![](assets/fig3b.jpg)\n\n**Figure 3**: Ablations.\n\n\
+         ![](assets/logo.png)\n\nOur method works.\n\n\
+         ![](assets/big.png)\n\nTable 1: Results.\n\n{extra}\n"
+    );
+    let assets = [
+        "fig1.png",
+        "fig2.svg",
+        "fig3a.png",
+        "fig3b.jpg",
+        "logo.png",
+        "big.png",
+    ];
+    let dir = fx.step(
+        2,
+        StepName::ArxivConvert,
+        None,
+        &[("original", "original.md", original.as_str())],
+        &assets,
+        &[],
+    );
+    for (name, kind) in [
+        ("fig1.png", "png"),
+        ("fig3a.png", "png"),
+        ("fig3b.jpg", "jpg"),
+    ] {
+        fs::write(dir.join("assets").join(name), image_bytes(kind, 800, 600)).unwrap();
+    }
+    fs::write(dir.join("assets/big.png"), image_bytes("png", 3000, 2000)).unwrap();
+}
+
+#[tokio::test]
+async fn a_paper_sends_its_captioned_figures_and_links_them() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    // The fake echoes its input, so references written here come back as the model's.
+    figure_paper(
+        &fx,
+        "See ![总览 | 箭头指向 [路由器] \\ 输出](img:1) and ![](img:4 \"title\") \
+         and ![bad](img:99) and ![none](img:) and ![kept](assets/fig1.png).",
+    );
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    let images = sent_images(&fx);
+    assert!(
+        fx.calls()[0]["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("![中文描述](img:N)")
+    );
+    let types: Vec<&str> = images
+        .iter()
+        .map(|i| i["media_type"].as_str().unwrap())
+        .collect();
+    // fig2.svg cannot be sent and logo.png has no caption.
+    assert_eq!(types, ["image/png", "image/png", "image/jpeg", "image/png"]);
+    // big.png went through ffmpeg; the model got the fake's small PNG.
+    let calls = ffmpeg_calls(&fx);
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].contains("/assets/big.png "), "{}", calls[0]);
+    assert!(
+        calls[0].contains("scale='min(1568,iw)':'min(1568,ih)'"),
+        "{}",
+        calls[0]
+    );
+    // The fake's PNG header says 400x300.
+    let head = images[3]["head"].as_str().unwrap();
+    assert!(head.ends_with("49484452000001900000012c"), "{head}");
+    let note = read_note(&out);
+    assert!(
+        note.contains(
+            "图片(序号与消息末尾附图前的 [N] 一一对应):\n\
+             [1] Figure 1: Overview of the model.\n[2] **Figure 3**: Ablations.\n\
+             [3] **Figure 3**: Ablations.\n[4] Table 1: Results.\n"
+        ),
+        "{note}"
+    );
+    // N=4 links the original big.png, not the shrunk copy; unknown and missing N are dropped.
+    assert!(
+        note.contains(
+            "See ![总览 / 箭头指向 路由器 输出](assets/fig1.png) and ![](assets/big.png) \
+             and  and  and ![kept](assets/fig1.png)."
+        ),
+        "{note}"
+    );
+    assert!(!note.contains("img:"), "{note}");
+}
+
+#[tokio::test]
+async fn codex_gets_the_figures_as_image_files() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Codex);
+    figure_paper(&fx, "");
+    run_note(&fx, "03-note").await.1.unwrap();
+    let images = sent_images(&fx);
+    let names: Vec<String> = images
+        .iter()
+        .map(|i| {
+            let path = Path::new(i["path"].as_str().unwrap());
+            path.file_name().unwrap().to_string_lossy().into_owned()
+        })
+        .collect();
+    assert_eq!(names, ["fig1.png", "fig3a.png", "fig3b.jpg", "image-3.png"]);
+}
+
+#[tokio::test]
+async fn a_figure_ffmpeg_cannot_shrink_is_left_out() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
+    let original = "![](assets/UNDECODABLE.jpg)\n\nFigure 1: Too big.\n\n\
+                    ![](assets/small.png)\n\nFigure 2: Fine.\n";
+    let files = [("original", "original.md", original)];
+    let assets = ["UNDECODABLE.jpg", "small.png"];
+    let dir = fx.step(2, StepName::ArxivConvert, None, &files, &assets, &[]);
+    // Over 1 MiB, whatever its pixel size.
+    let mut big = image_bytes("jpg", 100, 100);
+    big.resize(1_100_000, 0);
+    fs::write(dir.join("assets/UNDECODABLE.jpg"), big).unwrap();
+    fs::write(dir.join("assets/small.png"), image_bytes("png", 100, 100)).unwrap();
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    assert_eq!(ffmpeg_calls(&fx).len(), 1);
+    assert_eq!(sent_images(&fx).len(), 1);
+    assert!(read_note(&out).contains("[1] Figure 2: Fine.\n"));
+}
+
+#[tokio::test]
+async fn at_most_ten_figures_spread_over_the_paper() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
+    let names: Vec<String> = (1..=12).map(|n| format!("f{n}.png")).collect();
+    let original: String = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| format!("![](assets/{name})\n\nFigure {}: Plot.\n\n", i + 1))
+        .collect();
+    let assets: Vec<&str> = names.iter().map(String::as_str).collect();
+    let files = [("original", "original.md", original.as_str())];
+    fx.step(2, StepName::ArxivConvert, None, &files, &assets, &[]);
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    assert_eq!(sent_images(&fx).len(), MAX_IMAGES);
+    let note = read_note(&out);
+    let listed: Vec<&str> = note
+        .lines()
+        .filter(|l| l.starts_with('[') && l.contains("Figure"))
+        .map(|l| l.split_once("] ").unwrap().1)
+        .collect();
+    // Positions 0..11 spread to ten: the first and the last stay, two in between go.
+    assert_eq!(listed.len(), 10);
+    assert_eq!(listed[0], "Figure 1: Plot.");
+    assert_eq!(listed[9], "Figure 12: Plot.");
+}
+
+fn frame_sections(frames_per_section: u64, sections: u64) -> (String, Vec<String>) {
+    let mut names = Vec::new();
+    let json: Vec<serde_json::Value> = (0..sections)
+        .map(|s| {
+            let frames: Vec<String> = (0..frames_per_section)
+                .map(|f| format!("frame-{}.jpg", s * 30_000 + f * 10_000))
+                .collect();
+            names.extend(frames.iter().cloned());
+            let text = format!("Section {s} explains step {s} of the demo in some detail.");
+            serde_json::json!({"start_ms": s * 30_000, "frames": frames, "text": text})
+        })
+        .collect();
+    (serde_json::Value::Array(json).to_string(), names)
+}
+
+fn video_job(fx: &Fixture, frames_per_section: u64, sections: u64) {
+    fx.step(1, StepName::VideoFetch, Some("Talk"), &[], &[], &[]);
+    let (sections, names) = frame_sections(frames_per_section, sections);
+    let files = [
+        ("sections", "sections.json", sections.as_str()),
+        ("transcript", "transcript.md", "x"),
+    ];
+    let assets: Vec<&str> = names.iter().map(String::as_str).collect();
+    fx.step(3, StepName::VideoFrames, None, &files, &assets, &[]);
+}
+
+#[tokio::test]
+async fn a_video_sends_ten_frames_spread_over_time() {
+    let fx = Fixture::new(Pipeline::Video, AiTool::Claude);
+    // Twelve frames at 0s, 10s, ... 110s.
+    video_job(&fx, 3, 4);
+    let (out, result) = run_note(&fx, "04-note").await;
+    result.unwrap();
+    let images = sent_images(&fx);
+    assert_eq!(images.len(), MAX_IMAGES);
+    assert!(images.iter().all(|i| i["media_type"] == "image/jpeg"));
+    let note = read_note(&out);
+    let times: Vec<&str> = note
+        .lines()
+        .filter_map(|l| l.strip_prefix('[')?.split_once("] "))
+        .filter(|(n, _)| n.bytes().all(|b| b.is_ascii_digit()))
+        .map(|(_, rest)| rest.split(' ').next().unwrap())
+        .collect();
+    // Targets every 12.2s pick the nearest frame; 00:30 and 01:20 are the two left out.
+    assert_eq!(
+        times,
+        [
+            "00:00", "00:10", "00:20", "00:40", "00:50", "01:00", "01:10", "01:30", "01:40",
+            "01:50"
+        ]
+    );
+    assert!(note.contains("[1] 00:00 Section 0 explains step 0 of the demo in some detail.\n"));
+    // The transcript itself still follows the list.
+    assert!(note.contains("\n[00:30] Section 1 explains"), "{note}");
+}
+
+#[tokio::test]
+async fn a_frame_label_keeps_150_characters_of_its_section() {
+    let fx = Fixture::new(Pipeline::Video, AiTool::Claude);
+    fx.step(1, StepName::VideoFetch, Some("Talk"), &[], &[], &[]);
+    let long = "长".repeat(400);
+    let sections = serde_json::json!([{"start_ms": 0, "frames": ["frame-5000.jpg"], "text": long}]);
+    let sections = sections.to_string();
+    let files = [("sections", "sections.json", sections.as_str())];
+    fx.step(
+        3,
+        StepName::VideoFrames,
+        None,
+        &files,
+        &["frame-5000.jpg"],
+        &[],
+    );
+    let (out, result) = run_note(&fx, "04-note").await;
+    result.unwrap();
+    let label = format!("[1] 00:05 {}\n", "长".repeat(FRAME_TEXT_CHARS));
+    assert!(read_note(&out).contains(&label));
+}
+
+#[tokio::test]
+async fn a_video_without_frames_still_gets_a_note() {
+    let fx = Fixture::new(Pipeline::Video, AiTool::Claude);
+    fx.step(1, StepName::VideoFetch, Some("Talk"), &[], &[], &[]);
+    let sections = r#"[{"start_ms":0,"frames":[],"text":"Hello there."},
+        {"start_ms":30000,"frames":[],"text":"  "},
+        {"start_ms":3690000,"frames":[],"text":"Bye."}]"#;
+    let files = [("sections", "sections.json", sections)];
+    fx.step(3, StepName::VideoFrames, None, &files, &[], &[]);
+    let (out, result) = run_note(&fx, "04-note").await;
+    result.unwrap();
+    assert_eq!(
+        read_note(&out),
+        "标题:Talk\n\n[00:00] Hello there.\n[1:01:30] Bye.\n"
+    );
+    assert!(sent_images(&fx).is_empty());
+}
+
+#[tokio::test]
+async fn failures_keep_their_class_with_images_attached() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    figure_paper(&fx, "FAKE_AUTH");
+    let (out, result) = run_note(&fx, "03-note").await;
+    assert_eq!(result.unwrap_err().exit, StepExit::Auth);
+    assert!(!out.join(pipeline::MANIFEST_FILE).exists());
+    assert_eq!(sent_images(&fx).len(), 4);
+
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    figure_paper(&fx, "FAKE_RATE_LIMIT");
+    assert_eq!(
+        run_note(&fx, "03-note").await.1.unwrap_err().exit,
+        StepExit::Retry
+    );
+}
+
+#[test]
+fn image_references_are_linked_or_dropped() {
+    let pictures: Vec<Picture> = ["a.png", "b.jpg"]
+        .iter()
+        .map(|name| Picture {
+            basename: (*name).into(),
+            path: Path::new("/tmp").join(name),
+            label: String::new(),
+        })
+        .collect();
+    let cases = [
+        ("x ![图](img:1) y", "x ![图](assets/a.png) y"),
+        ("![](img:2)![](img:1)", "![](assets/b.jpg)![](assets/a.png)"),
+        ("drop ![no](img:3) and ![zero](img:0).", "drop  and ."),
+        ("![a [b] c\\d|e](img:2)", "![a b cd/e](assets/b.jpg)"),
+        // Not image placeholders: left as they are.
+        (
+            "![x](assets/a.png) ![y](https://e.org/i.png) [l](img:1)",
+            "![x](assets/a.png) ![y](https://e.org/i.png) [l](img:1)",
+        ),
+        ("![open](img:1\nnext", "![open](img:1\nnext"),
+        ("![t](img:2 \"title\")", "![t](assets/b.jpg)"),
+    ];
+    for (note, want) in cases {
+        assert_eq!(link_images(note, &pictures), want, "{note}");
+    }
+}
+
+#[test]
+fn image_size_reads_png_gif_and_jpeg_headers() {
+    assert_eq!(
+        image_size(&image_bytes("png", 3000, 2000)),
+        Some((3000, 2000))
+    );
+    assert_eq!(
+        image_size(&image_bytes("jpg", 1280, 720)),
+        Some((1280, 720))
+    );
+    let mut gif = b"GIF89a".to_vec();
+    gif.extend([0x20, 0x03, 0x58, 0x02]);
+    assert_eq!(image_size(&gif), Some((800, 600)));
+    // A fill byte before the start-of-frame marker.
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF];
+    jpeg.extend(&image_bytes("jpg", 10, 20)[8..]);
+    assert_eq!(image_size(&jpeg), Some((10, 20)));
+    assert_eq!(image_size(b"RIFF....WEBP"), None);
+    assert_eq!(image_size(&[0xFF, 0xD8, 0xFF]), None);
+}
+
+#[test]
+fn large_images_are_shrunk_by_size_or_pixels() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, bytes: Vec<u8>| {
+        let path = dir.path().join(name);
+        fs::write(&path, bytes).unwrap();
+        path
+    };
+    assert!(!too_large(&write("ok.png", image_bytes("png", 1568, 1000))).unwrap());
+    assert!(too_large(&write("wide.png", image_bytes("png", 1569, 10))).unwrap());
+    assert!(too_large(&write("tall.jpg", image_bytes("jpg", 10, 2000))).unwrap());
+    let mut heavy = image_bytes("jpg", 100, 100);
+    heavy.resize(MAX_IMAGE_BYTES as usize + 1, 0);
+    assert!(too_large(&write("heavy.jpg", heavy)).unwrap());
+    assert!(!too_large(&write("unknown.webp", vec![0; 100])).unwrap());
+}

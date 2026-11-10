@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Fake `codex exec ... --output-last-message FILE -` for tests. Same markers and log as
 tests/fake/claude, plus FAKE_AUTH_REFRESH with codex's real refresh-token failure text; the reply
-goes to the --output-last-message file."""
+goes to the --output-last-message file. Each `--image FILE` is logged with its size, read while
+the call runs."""
 
 import json
 import os
@@ -12,8 +13,11 @@ args = sys.argv[1:]
 model = args[args.index("--model") + 1] if "--model" in args else None
 out_file = args[args.index("--output-last-message") + 1] if "--output-last-message" in args else None
 prompt = sys.stdin.read()
+images = [{"path": args[i + 1], "bytes": os.path.getsize(args[i + 1])}
+          for i, arg in enumerate(args) if arg == "--image"]
 with open(os.path.join(os.environ.get("HOME", "/tmp"), "fake-ai.log"), "a") as log:
-    log.write(json.dumps({"tool": "codex", "model": model, "args": args, "bytes": len(prompt)}) + "\n")
+    log.write(json.dumps({"tool": "codex", "model": model, "args": args, "bytes": len(prompt),
+                          "images": images}) + "\n")
 
 if out_file is None or model is None:
     print("fake codex: --model and --output-last-message are required", file=sys.stderr)

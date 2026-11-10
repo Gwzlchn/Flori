@@ -8,7 +8,10 @@ use std::{
 use tempfile::TempDir;
 
 use super::*;
-use crate::pipeline::{AiSpec, JobSpec, MetaValue, Platform, Source, StepExit, TranslateMode};
+use crate::pipeline::{
+    self, AiSpec, JobSpec, Manifest, MetaValue, Pipeline, Platform, Source, StepExit, StepName,
+    TranslateMode,
+};
 
 /// HOME for the fake CLIs (they log to `$HOME/fake-ai.log`) plus a job directory.
 pub(crate) struct Fixture {
@@ -173,7 +176,7 @@ fn test_path_reaches_only_the_fakes() {
 
 async fn ask(tool: AiTool, prompt: &str) -> (Fixture, Result<String, StepFailure>) {
     let fx = Fixture::new(Pipeline::Arxiv, tool);
-    let result = complete(&fx.env(), tool, "m-1", prompt, 20 * SECOND).await;
+    let result = complete(&fx.env(), tool, "m-1", prompt, &[], 20 * SECOND).await;
     (fx, result)
 }
 
@@ -193,8 +196,9 @@ async fn claude_gets_the_fixed_arguments_and_stdin() {
         .iter()
         .map(|a| a.as_str().unwrap())
         .collect();
-    let fixed = "-p --model m-1 --tools  --output-format json --max-turns 1 \
-                 --no-session-persistence --strict-mcp-config --setting-sources project";
+    let fixed = "-p --model m-1 --tools  --input-format stream-json --output-format stream-json \
+                 --verbose --max-turns 1 --no-session-persistence --strict-mcp-config \
+                 --setting-sources project";
     assert_eq!(args.join(" "), fixed);
 }
 
@@ -206,7 +210,7 @@ async fn claude_always_runs_in_one_empty_cwd_under_home() {
     fs::write(cwd.join(".claude/settings.json"), "{}").unwrap();
     for _ in 0..2 {
         let prompt = format!("x\n{INPUT_MARKER}\nhi");
-        complete(&fx.env(), AiTool::Claude, "m-1", &prompt, 20 * SECOND)
+        complete(&fx.env(), AiTool::Claude, "m-1", &prompt, &[], 20 * SECOND)
             .await
             .unwrap();
     }
@@ -303,6 +307,102 @@ fn claude_envelope_is_read_even_when_exit_is_nonzero() {
     );
     let garbage = claude_result(failed, "not json", "Not logged in");
     assert_eq!(garbage.unwrap_err().exit, StepExit::Auth);
+    // The result event is found among the other stream-json events.
+    let stream = format!(
+        "{{\"type\":\"system\",\"subtype\":\"init\"}}\n\
+         {{\"type\":\"assistant\",\"message\":{{}}}}\n{}\n",
+        envelope("streamed", false)
+    );
+    assert_eq!(claude_result(ok, &stream, "").unwrap(), "streamed");
+}
+
+#[tokio::test]
+async fn a_stream_without_a_result_event_is_classified_from_stderr() {
+    let (fx, result) = ask(AiTool::Claude, "FAKE_NO_RESULT").await;
+    // The fake prints "API Error: 429 rate limit exceeded" on stderr.
+    assert_eq!(exit(result), StepExit::Retry);
+    assert_eq!(fx.calls().len(), 1);
+}
+
+/// A minimal PNG or JPEG header with the given size; enough for the adapters and the fakes.
+pub(crate) fn image_bytes(kind: &str, width: u16, height: u16) -> Vec<u8> {
+    match kind {
+        "png" => {
+            let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+            bytes.extend(u32::from(width).to_be_bytes());
+            bytes.extend(u32::from(height).to_be_bytes());
+            bytes.extend([8, 6, 0, 0, 0]);
+            bytes
+        }
+        _ => {
+            // SOI, an APP0 segment to step over, then a baseline start-of-frame.
+            let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x4A, 0x46];
+            bytes.extend([0xFF, 0xC0, 0x00, 0x11, 0x08]);
+            bytes.extend(height.to_be_bytes());
+            bytes.extend(width.to_be_bytes());
+            bytes.extend([3; 10]);
+            bytes
+        }
+    }
+}
+
+#[tokio::test]
+async fn images_go_with_the_prompt_to_both_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("fig.png");
+    let jpg = dir.path().join("frame-1000.JPG");
+    fs::write(&png, image_bytes("png", 640, 480)).unwrap();
+    fs::write(&jpg, image_bytes("jpg", 1280, 720)).unwrap();
+    let images = [png.clone(), jpg.clone()];
+    let prompt = format!("x\n{INPUT_MARKER}\nhi");
+
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let env = fx.env();
+    let reply = complete(&env, AiTool::Claude, "m-1", &prompt, &images, 20 * SECOND).await;
+    // The fake joins the text blocks, so the [N] labels behind the prompt come back too.
+    assert_eq!(reply.unwrap(), "hi\n[1]\n[2]");
+    let sent = &fx.calls()[0]["images"];
+    assert_eq!(sent[0]["media_type"], "image/png");
+    assert!(
+        sent[0]["head"]
+            .as_str()
+            .unwrap()
+            .starts_with("89504e470d0a1a0a")
+    );
+    assert_eq!(sent[1]["media_type"], "image/jpeg");
+    assert_eq!(sent[1]["bytes"], image_bytes("jpg", 1280, 720).len());
+
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Codex);
+    let env = fx.env();
+    let reply = complete(&env, AiTool::Codex, "m-1", &prompt, &images, 20 * SECOND).await;
+    assert_eq!(reply.unwrap(), "hi");
+    let call = &fx.calls()[0];
+    let args: Vec<&str> = call["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    // Each --image is followed by another flag, so the final `-` stays the prompt.
+    let png_arg = format!(
+        "--image {} --image {} --model",
+        png.display(),
+        jpg.display()
+    );
+    assert!(args.join(" ").contains(&png_arg), "{args:?}");
+    assert_eq!(args.last(), Some(&"-"));
+    assert_eq!(call["images"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_unsupported_image_is_refused_before_spawning() {
+    let dir = tempfile::tempdir().unwrap();
+    let svg = dir.path().join("fig.svg");
+    fs::write(&svg, "<svg/>").unwrap();
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let result = complete(&fx.env(), AiTool::Claude, "m", "hi", &[svg], SECOND).await;
+    assert_eq!(exit(result), StepExit::Permanent);
+    assert!(fx.calls().is_empty());
 }
 
 #[test]
@@ -331,7 +431,7 @@ fn codex_refresh_failures_and_login_prompts_are_auth() {
 async fn timeout_is_retryable_and_quick() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
     let started = Instant::now();
-    let result = complete(&fx.env(), AiTool::Claude, "m", "FAKE_HANG", SECOND).await;
+    let result = complete(&fx.env(), AiTool::Claude, "m", "FAKE_HANG", &[], SECOND).await;
     assert_eq!(exit(result), StepExit::Retry);
     assert!(started.elapsed() < 8 * SECOND, "{:?}", started.elapsed());
 }
@@ -339,7 +439,7 @@ async fn timeout_is_retryable_and_quick() {
 #[tokio::test]
 async fn missing_model_is_refused_before_spawning() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    let result = complete(&fx.env(), AiTool::Claude, " ", "hi", SECOND).await;
+    let result = complete(&fx.env(), AiTool::Claude, " ", "hi", &[], SECOND).await;
     assert_eq!(exit(result), StepExit::Permanent);
     assert!(fx.calls().is_empty());
 }
@@ -416,81 +516,4 @@ async fn sigterm_to_the_step_kills_the_cli() {
     assert_eq!(result.unwrap_err().exit, StepExit::Retry);
     let pid = fs::read_to_string(&pid_file).unwrap();
     assert!(wait_dead(pid.trim()).await, "CLI child {pid} survived");
-}
-
-#[tokio::test]
-async fn note_reads_the_arxiv_original_and_writes_note_md() {
-    for tool in [AiTool::Claude, AiTool::Codex] {
-        let fx = Fixture::new(Pipeline::Arxiv, tool);
-        fx.step(
-            1,
-            StepName::ArxivFetch,
-            Some("Mixtral of Experts"),
-            &[],
-            &[],
-            &[],
-        );
-        let original = "# Mixtral\n\nWe introduce Mixtral 8x7B.\n";
-        fx.step(
-            2,
-            StepName::ArxivConvert,
-            None,
-            &[("original", "original.md", original)],
-            &[],
-            &[],
-        );
-        let out = fx.out_dir("03-note");
-        note_with(fx.job_dir(), &out, &fx.env()).await.unwrap();
-        let note = fs::read_to_string(out.join("note.md")).unwrap();
-        assert_eq!(note, format!("标题:Mixtral of Experts\n\n{original}"));
-        let manifest = pipeline::read_manifest(&out).unwrap();
-        assert_eq!(manifest.title, None);
-        assert_eq!(manifest.files["note"], "note.md");
-        let calls = fx.calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["model"], "model-note");
-    }
-}
-
-#[tokio::test]
-async fn note_feeds_video_sections_with_times() {
-    let fx = Fixture::new(Pipeline::Video, AiTool::Claude);
-    fx.step(1, StepName::VideoFetch, Some("Talk"), &[], &[], &[]);
-    let sections = r#"[{"start_ms":0,"frames":["frame-0.jpg"],"text":"Hello there."},
-        {"start_ms":30000,"frames":[],"text":"  "},
-        {"start_ms":3690000,"frames":[],"text":"Bye."}]"#;
-    let files = [
-        ("sections", "sections.json", sections),
-        ("transcript", "transcript.md", "x"),
-    ];
-    fx.step(
-        3,
-        StepName::VideoFrames,
-        None,
-        &files,
-        &["frame-0.jpg"],
-        &[],
-    );
-    let out = fx.out_dir("04-note");
-    note_with(fx.job_dir(), &out, &fx.env()).await.unwrap();
-    let note = fs::read_to_string(out.join("note.md")).unwrap();
-    assert_eq!(note, "标题:Talk\n\n[00:00] Hello there.\n[1:01:30] Bye.\n");
-}
-
-#[tokio::test]
-async fn note_failure_leaves_no_manifest() {
-    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    fx.step(1, StepName::ArxivFetch, None, &[], &[], &[]);
-    fx.step(
-        2,
-        StepName::ArxivConvert,
-        None,
-        &[("original", "original.md", "FAKE_AUTH")],
-        &[],
-        &[],
-    );
-    let out = fx.out_dir("03-note");
-    let failure = note_with(fx.job_dir(), &out, &fx.env()).await.unwrap_err();
-    assert_eq!(failure.exit, StepExit::Auth);
-    assert!(!out.join(pipeline::MANIFEST_FILE).exists());
 }

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Fake `claude -p --output-format json` for tests. Markers in the prompt pick the behaviour:
+"""Fake `claude -p --input-format stream-json --output-format stream-json` for tests.
+stdin is one JSON user message per line; the prompt is its text blocks joined by newlines, and
+its image blocks are decoded and logged. Markers in the prompt pick the behaviour:
 FAKE_AUTH, FAKE_RATE_LIMIT, FAKE_FAIL, FAKE_EMPTY, FAKE_HANG, FAKE_INVALID (the reply is not JSON),
-FAKE_INVALID_ONCE (not JSON unless the prompt has a `---FLORI-FEEDBACK---` re-ask section).
+FAKE_INVALID_ONCE (not JSON unless the prompt has a `---FLORI-FEEDBACK---` re-ask section),
+FAKE_NO_RESULT (the stream ends without a result event, exit 1).
 Otherwise the reply echoes the text after the last line `---FLORI-INPUT---`, or a fixed note when
-there is none.
+there is none. stdout is stream-json: a system event, an assistant event and a result event.
 Every call appends one JSON line to $HOME/fake-ai.log so tests can count calls."""
 
+import base64
 import json
 import os
 import sys
@@ -13,22 +17,50 @@ import time
 
 args = sys.argv[1:]
 model = args[args.index("--model") + 1] if "--model" in args else None
-prompt = sys.stdin.read()
+
+
+def flag(name):
+    return args[args.index(name) + 1] if name in args else None
+
+
+texts, images = [], []
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    event = json.loads(line)
+    for block in event["message"]["content"]:
+        if block["type"] == "text":
+            texts.append(block["text"])
+        elif block["type"] == "image":
+            data = base64.b64decode(block["source"]["data"], validate=True)
+            images.append({"media_type": block["source"]["media_type"], "bytes": len(data),
+                           "head": data[:24].hex()})
+prompt = "\n".join(texts)
 with open(os.path.join(os.environ.get("HOME", "/tmp"), "fake-ai.log"), "a") as log:
     log.write(json.dumps({"tool": "claude", "model": model, "args": args, "bytes": len(prompt),
-                         "cwd": os.getcwd(), "cwd_entries": sorted(os.listdir("."))}) + "\n")
+                          "prompt": prompt, "images": images, "cwd": os.getcwd(),
+                          "cwd_entries": sorted(os.listdir("."))}, ensure_ascii=False) + "\n")
+
+
+def emit(event):
+    print(json.dumps(event, ensure_ascii=False), flush=True)
 
 
 def reply(result, is_error=False, subtype="success", code=0):
     usage = {model: {"inputTokens": 1, "outputTokens": 1}} if model else {}
-    out = {"type": "result", "subtype": subtype, "is_error": is_error, "result": result,
-           "modelUsage": usage, "total_cost_usd": 0.0}
-    print(json.dumps(out))
+    emit({"type": "system", "subtype": "init", "model": model, "tools": []})
+    emit({"type": "assistant", "message": {"role": "assistant",
+                                           "content": [{"type": "text", "text": result}]}})
+    emit({"type": "result", "subtype": subtype, "is_error": is_error, "result": result,
+          "modelUsage": usage, "total_cost_usd": 0.0})
     sys.exit(code)
 
 
-if "--model" not in args:
+if model is None:
     print("fake claude: --model is required in tests", file=sys.stderr)
+    sys.exit(2)
+if flag("--input-format") != "stream-json" or flag("--output-format") != "stream-json":
+    print("fake claude: stream-json input and output are required", file=sys.stderr)
     sys.exit(2)
 if "FAKE_HANG" in prompt:
     time.sleep(3600)
@@ -40,6 +72,10 @@ if "FAKE_FAIL" in prompt:
     reply("", is_error=True, subtype="error_max_turns", code=1)
 if "FAKE_EMPTY" in prompt:
     reply("")
+if "FAKE_NO_RESULT" in prompt:
+    emit({"type": "system", "subtype": "init", "model": model, "tools": []})
+    print("API Error: 429 rate limit exceeded", file=sys.stderr)
+    sys.exit(1)
 if "FAKE_INVALID_ONCE" in prompt:
     if "---FLORI-FEEDBACK---" not in prompt:
         reply("not json")

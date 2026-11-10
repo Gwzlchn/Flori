@@ -1,5 +1,8 @@
-//! claude and codex adapters behind one `complete` call, failure classification, and the note step.
-//! The fixed CLI arguments are contract 1 "AI CLI 固定调用" in docs/contracts.md.
+//! claude and codex adapters behind one `complete` call and failure classification. The note
+//! step lives in `note`. The fixed CLI arguments are contract 1 "AI CLI 固定调用" in
+//! docs/contracts.md.
+
+mod note;
 
 use std::{
     ffi::OsString,
@@ -12,29 +15,31 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use rustix::process::{Pid, Signal, kill_process_group};
 use serde::Deserialize;
+use serde_json::json;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
     signal::unix::{SignalKind, signal},
 };
 
-use crate::pipeline::{self, AiTool, Manifest, Pipeline, StepFailure, StepName, StepResult};
+use crate::pipeline::{AiTool, StepFailure, StepResult};
+
+pub use note::note;
 
 /// Separates instructions from untrusted input. tests/fake echoes what follows the last one.
 pub const INPUT_MARKER: &str = "---FLORI-INPUT---";
-/// Fixed flags besides model, paths and the empty tool list.
-const CLAUDE_FLAGS: &str = "--output-format json --max-turns 1 --no-session-persistence \
-    --strict-mcp-config --setting-sources project";
+/// Fixed flags besides model and the empty tool list. stream-json input lets one user message
+/// carry the prompt and the images; stream-json output then needs --verbose.
+const CLAUDE_FLAGS: &str = "--input-format stream-json --output-format stream-json --verbose \
+    --max-turns 1 --no-session-persistence --strict-mcp-config --setting-sources project";
 /// Order matters: `--ask-for-approval` belongs to codex itself, the rest to `exec`.
 const CODEX_FLAGS: &str = "--ask-for-approval never exec --strict-config --ignore-user-config \
     --ignore-rules --skip-git-repo-check --sandbox read-only --ephemeral --color never --json";
-const NOTE_TIMEOUT: Duration = Duration::from_secs(1800);
 /// After SIGTERM on timeout the CLI gets this long before its group is killed.
 const TERM_GRACE: Duration = Duration::from_secs(10);
-const NOTE_ARXIV: &str = include_str!("../prompts/note-arxiv.md");
-const NOTE_VIDEO: &str = include_str!("../prompts/note-video.md");
 
 /// Matched against the lowercased failure text, auth first. Anything unmatched is permanent (20),
 /// including error_max_turns and spend limits.
@@ -73,45 +78,6 @@ pub fn inherited() -> Vec<(OsString, OsString)> {
     std::env::vars_os().collect()
 }
 
-pub async fn note(job_dir: &Path, out_dir: &Path) -> StepResult {
-    until_terminated(note_with(job_dir, out_dir, &inherited())).await
-}
-
-pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepResult {
-    let job = pipeline::read_job(job_dir)?;
-    let (template, fetch, text) = match job.pipeline {
-        Pipeline::Arxiv => {
-            let original = pipeline::step_file(job_dir, StepName::ArxivConvert, "original")?;
-            (
-                NOTE_ARXIV,
-                StepName::ArxivFetch,
-                fs::read_to_string(original)?,
-            )
-        }
-        // Sections carry the transcript without image links, with times the note can cite.
-        Pipeline::Video => {
-            let lines: Vec<String> = pipeline::read_sections(job_dir)?
-                .iter()
-                .filter(|s| s.has_text())
-                .map(|s| format!("[{}] {}", pipeline::clock(s.start_ms), s.text.trim()))
-                .collect();
-            (NOTE_VIDEO, StepName::VideoFetch, lines.join("\n"))
-        }
-    };
-    let title = pipeline::prior_step(job_dir, fetch)?.1.title;
-    let title = title.unwrap_or_else(|| job.source.id.clone());
-    let prompt = format!("{template}\n{INPUT_MARKER}\n标题:{title}\n\n{text}");
-    let mut note = complete(env, job.ai.tool, &job.ai.model_note, &prompt, NOTE_TIMEOUT).await?;
-    if !note.ends_with('\n') {
-        note.push('\n');
-    }
-    fs::write(out_dir.join("note.md"), note)?;
-    let mut manifest = Manifest::default();
-    manifest.files.insert("note".into(), "note.md".into());
-    pipeline::write_manifest(out_dir, &manifest)?;
-    Ok(())
-}
-
 /// Runs an AI step until it finishes or the executor sends SIGTERM (cancel or step timeout).
 /// Dropping the step future drops the running CLI, whose `Group` guard kills its process group;
 /// without this the CLI, in its own group, would outlive the step and keep spending quota.
@@ -124,20 +90,25 @@ pub(crate) async fn until_terminated(step: impl Future<Output = StepResult>) -> 
     }
 }
 
-/// One single-turn completion without tools. The prompt goes to stdin and the CLI runs in a
-/// fresh empty directory. Failures map to step exits: credentials 30, rate limit and timeout 10,
-/// anything else 20.
+/// One single-turn completion without tools, with optional images (see [`media_type`]). The
+/// prompt goes to stdin and the CLI runs in an empty directory. Failures map to step exits:
+/// credentials 30, rate limit and timeout 10, anything else 20.
 pub async fn complete(
     env: &Env,
     tool: AiTool,
     model: &str,
     prompt: &str,
+    images: &[PathBuf],
     timeout: Duration,
 ) -> Result<String, StepFailure> {
     // Without --model the CLI silently uses the host user's default model.
     if model.trim().is_empty() {
         return Err(StepFailure::permanent("AI model is not configured"));
     }
+    let input = match tool {
+        AiTool::Claude => claude_message(prompt, images)?,
+        AiTool::Codex => prompt.to_owned(),
+    };
     let scratch = Scratch::new()?;
     let mut cwd = scratch.0.join("cwd");
     let last_message = scratch.0.join("last-message.md");
@@ -151,8 +122,13 @@ pub async fn complete(
         }
         AiTool::Codex => {
             let mut cmd = Command::new("codex");
-            cmd.args(CODEX_FLAGS.split_whitespace())
-                .args(["--model", model, "-c", "history.persistence=\"none\""])
+            cmd.args(CODEX_FLAGS.split_whitespace());
+            // `--image` takes several values, so each one is followed by another flag, never by
+            // the final `-`.
+            for image in images {
+                cmd.arg("--image").arg(image);
+            }
+            cmd.args(["--model", model, "-c", "history.persistence=\"none\""])
                 .args(["-c", "web_search=\"disabled\"", "-C"])
                 .arg(&cwd)
                 .arg("--output-last-message")
@@ -166,11 +142,12 @@ pub async fn complete(
         .envs(env.iter().map(|(k, v)| (k, v)));
     // One line per call in job.log: the only record of how many AI calls a job made.
     eprintln!(
-        "{name} --model {model}: {} prompt chars",
-        prompt.chars().count()
+        "{name} --model {model}: {} prompt chars, {} images",
+        prompt.chars().count(),
+        images.len()
     );
     let started = Instant::now();
-    let run = run_cli(cmd, prompt, timeout, TERM_GRACE)
+    let run = run_cli(cmd, &input, timeout, TERM_GRACE)
         .await
         .map_err(|e| StepFailure::permanent(format!("{name}: {e}")))?;
     let Some(status) = run.status else {
@@ -203,18 +180,58 @@ pub async fn complete(
     result
 }
 
+/// Media type of an image the AI CLIs accept, by extension; None for anything else, such as SVG.
+pub(crate) fn media_type(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// The single stream-json user message: the prompt, then each image as a base64 block behind a
+/// `[N]` text block, so the numbers the prompt uses sit next to their images.
+fn claude_message(prompt: &str, images: &[PathBuf]) -> Result<String, StepFailure> {
+    let mut content = vec![json!({"type": "text", "text": prompt})];
+    for (i, path) in images.iter().enumerate() {
+        let media_type = media_type(path).ok_or_else(|| {
+            StepFailure::permanent(format!("unsupported image {}", path.display()))
+        })?;
+        let data = BASE64.encode(fs::read(path)?);
+        content.push(json!({"type": "text", "text": format!("[{}]", i + 1)}));
+        content.push(json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        }));
+    }
+    let message = json!({"type": "user", "message": {"role": "user", "content": content}});
+    Ok(format!("{message}\n"))
+}
+
+/// The fields of claude's stream-json events this adapter reads; only `result` events matter.
 #[derive(Deserialize)]
-struct ClaudeEnvelope {
+struct ClaudeEvent {
+    #[serde(rename = "type")]
+    kind: String,
     subtype: Option<String>,
     is_error: Option<bool>,
     result: Option<String>,
 }
 
-/// Success needs exit 0, is_error=false, subtype=success and a non-empty result. A failed run
-/// still prints the envelope, and its result is what tells auth from rate limit.
+/// Success needs exit 0 and a `result` event with is_error=false, subtype=success and a
+/// non-empty result. A failed run still ends with that event, and its result is what tells auth
+/// from rate limit.
 fn claude_result(status: ExitStatus, stdout: &str, stderr: &str) -> Result<String, StepFailure> {
-    let detail = match serde_json::from_str::<ClaudeEnvelope>(stdout.trim()) {
-        Ok(envelope) => {
+    let result_event = stdout
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<ClaudeEvent>(line).ok())
+        .find(|event| event.kind == "result");
+    let detail = match result_event {
+        Some(envelope) => {
             let result = envelope.result.unwrap_or_default();
             let subtype = envelope.subtype.unwrap_or_default();
             if status.success()
@@ -226,7 +243,7 @@ fn claude_result(status: ExitStatus, stdout: &str, stderr: &str) -> Result<Strin
             }
             format!("subtype={subtype} result={result}")
         }
-        Err(_) => stdout.to_owned(),
+        None => stdout.to_owned(),
     };
     Err(classify("claude", status, &format!("{detail} {stderr}")))
 }

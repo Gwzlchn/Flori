@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""Fake `ffmpeg ... -i SRC ... OUT` for the note tests: writes a small image of OUT's type with a
+400x300 header instead of scaling, and logs its arguments to $HOME/fake-ffmpeg.log. UNDECODABLE
+in the source name makes it exit 1."""
+
+import os
+import struct
+import sys
+
+args = sys.argv[1:]
+source, target = args[args.index("-i") + 1], args[-1]
+with open(os.path.join(os.environ.get("HOME", "/tmp"), "fake-ffmpeg.log"), "a") as log:
+    log.write(" ".join(args) + "\n")
+if "UNDECODABLE" in source:
+    print("fake ffmpeg: cannot decode", file=sys.stderr)
+    sys.exit(1)
+if target.endswith(".png"):
+    data = b"\x89PNG\r\n\x1a\n" + struct.pack(">I4sII", 13, b"IHDR", 400, 300) + b"\x08\x06\x00\x00\x00"
+else:
+    data = b"\xff\xd8\xff\xc0\x00\x11\x08" + struct.pack(">HH", 300, 400) + b"\x03" + b"\x00" * 9
+with open(target, "wb") as out:
+    out.write(data)

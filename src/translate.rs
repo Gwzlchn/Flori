@@ -233,7 +233,15 @@ async fn translate_chunk(
         return Ok(texts);
     }
     let ask = |feedback: String| format!("{PROMPT}\n{feedback}{INPUT_MARKER}\n{payload}");
-    let reply = ai::complete(env, job.ai.tool, model, &ask(String::new()), CHUNK_TIMEOUT).await?;
+    let reply = ai::complete(
+        env,
+        job.ai.tool,
+        model,
+        &ask(String::new()),
+        &[],
+        CHUNK_TIMEOUT,
+    )
+    .await?;
     let texts = match check(&reply, part) {
         Ok(texts) => texts,
         Err(problem) => {
@@ -241,7 +249,7 @@ async fn translate_chunk(
                 "{FEEDBACK_MARKER}\n上一次输出没有通过校验:{problem}。请修正后重新输出完整 JSON。\n"
             );
             let reply =
-                ai::complete(env, job.ai.tool, model, &ask(feedback), CHUNK_TIMEOUT).await?;
+                ai::complete(env, job.ai.tool, model, &ask(feedback), &[], CHUNK_TIMEOUT).await?;
             check(&reply, part)
                 .map_err(|p| StepFailure::retry(format!("reply failed validation twice: {p}")))?
         }
