@@ -115,9 +115,10 @@ pub(super) struct Merged {
     pub reverted: usize,
 }
 
-/// The original's units with the reply's punctuation. None when the reply brings back fewer
-/// than half of them in order, so it is no copy of this section, or when its own marks between
-/// kept units would change how a number reads.
+/// The original's units with the reply's punctuation. None when the reply is no copy of this
+/// section: it brings back fewer than half of the original's units in order, or they are fewer
+/// than half of its own, as when the AI moved other sections' text into it. None as well when
+/// the reply's own marks between kept units would change how a number reads.
 ///
 /// Where the two differ, a run of the reply replaces the original's only when both are the same
 /// length and every pair of units is two ideographs that sound the same; any other run goes back
@@ -132,8 +133,10 @@ pub(super) fn merge(original: &str, reply: &str) -> Option<Merged> {
     let (ours, theirs) = (units(original), units(reply));
     let (a, b) = (keys(&ours.units), keys(&theirs.units));
     let (n, m) = (a.len(), b.len());
-    // A script with more than m edits keeps fewer than n / 2 units: edits = n + m - 2 * kept.
-    let hunks = diff::diff(&a, &b, m)?;
+    // edits = n + m - 2 * kept, so a script with more than n.min(m) edits keeps fewer than half
+    // of either side. The bound also caps the diff's memory, which grows with the square of the
+    // edits, however long the reply.
+    let hunks = diff::diff(&a, &b, n.min(m))?;
     // texts[i] renders unit i of the result; want is what its units must be.
     let mut texts: Vec<&str> = ours.units.iter().map(|u| u.text).collect();
     let mut want = a.clone();

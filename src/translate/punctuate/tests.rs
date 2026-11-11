@@ -217,6 +217,16 @@ fn a_reply_that_is_no_copy_of_its_section_is_unusable() {
     // Half of the units back in order is enough, and the rest goes back.
     assert_eq!(merged("股市大跌", "股市上涨。").text, "股市大跌。");
     assert_eq!(merge("股市大跌", "股上涨。"), None);
+    assert_eq!(merge("股市大跌", "股。"), None);
+    // So is a reply at most half of which is other text, as when the AI pulled in the start of
+    // the next section; one with more is no copy, however long, and no slower for it.
+    assert_eq!(merged("股市大跌", "股市大跌，我们走吧").text, "股市大跌，");
+    assert_eq!(merge("股市大跌", "股市大跌，我们走了吧"), None);
+    let section = "今天我们来聊一下股市的情况".repeat(15);
+    assert_eq!(
+        merge(&section, &format!("{section}{}", "的，".repeat(3000))),
+        None
+    );
     // A section of nothing but punctuation takes the reply's.
     assert_eq!(merged("。。", "。").text, "。");
 }
