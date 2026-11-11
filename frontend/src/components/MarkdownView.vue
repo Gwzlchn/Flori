@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /* eslint-disable vue/no-v-html -- markdown-it runs with html disabled, so only its own escaped output is injected. */
+import "katex/dist/katex.min.css";
 import MarkdownIt from "markdown-it";
-import { computed } from "vue";
+import { computed, ref, watchEffect } from "vue";
 
 import { fileUrl } from "../client";
 
@@ -21,9 +22,29 @@ md.renderer.rules.image = (tokens, index, options, env, self) => {
   return image(tokens, index, options, env, self);
 };
 
+// Papers and notes write formulas as $…$ and $$…$$, which Obsidian renders. KaTeX is large and only
+// papers need it, so it loads the first time a source has a dollar sign; until then formulas show
+// as text. KaTeX's default trust is off, so \href, \url and similar in untrusted TeX stay inert,
+// and a formula it cannot parse is shown as its source.
+const math = ref(false);
+let loading: Promise<void> | undefined;
+watchEffect(() => {
+  if (math.value || loading || !props.source.includes("$")) return;
+  loading = import("@vscode/markdown-it-katex")
+    .then(({ default: katex }) => {
+      md.use(katex, { throwOnError: false });
+      math.value = true;
+    })
+    .catch((error: unknown) => {
+      loading = undefined;
+      console.error("KaTeX failed to load", error);
+    });
+});
+
 const parts = computed(() => {
   const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(props.source);
-  return { front: front?.[1] ?? "", html: md.render(front ? props.source.slice(front[0].length) : props.source) };
+  const body = front ? props.source.slice(front[0].length) : props.source;
+  return { front: front?.[1] ?? "", html: md.render(body), math: math.value };
 });
 </script>
 

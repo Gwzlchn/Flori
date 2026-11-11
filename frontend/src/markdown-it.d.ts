@@ -16,5 +16,6 @@ declare module "markdown-it" {
     readonly renderer: Renderer;
     readonly utils: { escapeHtml(text: string): string };
     render(source: string): string;
+    use<T>(plugin: (md: MarkdownIt, options?: T) => unknown, options?: T): this;
   }
 }

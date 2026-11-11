@@ -102,6 +102,7 @@ input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var
 .markdown blockquote { margin: 12px 0; padding: 4px 12px; border-left: 3px solid #a8cef0; color: var(--muted); background: var(--surface-soft); }
 .markdown code { padding: 2px 4px; border-radius: 4px; background: var(--line-soft); font-family: var(--mono); font-size: .88em; }
 .markdown pre { padding: 10px; overflow-x: auto; border-radius: 5px; background: var(--line-soft); }
+.markdown .katex-block { overflow-x: auto; overflow-y: hidden; }
 .markdown pre code { padding: 0; background: transparent; }
 .markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .markdown th, .markdown td { padding: 5px 9px; border: 1px solid var(--line); }
