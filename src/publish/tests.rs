@@ -443,6 +443,41 @@ fn video_uses_translated_transcript_and_collection() {
 }
 
 #[test]
+fn a_title_with_edge_spaces_is_its_only_alias() {
+    // yt-dlp passes the platform's title through as typed, spaces included; when no conversion
+    // changed it, the platform title is the title and adds no second alias.
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let mut job = job_spec(Pipeline::Arxiv, AiTool::Claude);
+    job.translate = TranslateMode::Off;
+    fx.write_job(&job);
+    let meta = [("title", MetaValue::Text(" Talk ".into()))];
+    fx.step(1, StepName::ArxivFetch, Some(" Talk "), &[], &[], &meta);
+    fx.step(
+        2,
+        StepName::ArxivConvert,
+        None,
+        &[("original", "original.md", "x")],
+        &[],
+        &[],
+    );
+    fx.step(
+        3,
+        StepName::Note,
+        None,
+        &[("note", "note.md", "n\n")],
+        &[],
+        &[],
+    );
+    let vault = tempfile::tempdir().unwrap();
+    publish_into(&fx, vault.path()).unwrap();
+    let text = fs::read_to_string(vault.path().join(FOLDER).join("Talk.md")).unwrap();
+    assert!(
+        text.starts_with("---\ntitle: \" Talk \"\naliases: [\" Talk \"]\n"),
+        "{text}"
+    );
+}
+
+#[test]
 fn without_translate_language_is_unknown() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
     let mut job = job_spec(Pipeline::Arxiv, AiTool::Claude);

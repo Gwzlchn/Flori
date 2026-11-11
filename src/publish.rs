@@ -70,7 +70,8 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
         if matches!(step, StepName::VideoFetch | StepName::ArxivFetch)
             && let Some(MetaValue::Text(value)) = manifest.meta.get("title")
         {
-            original_title = Some(value.trim().to_owned()).filter(|t| !t.is_empty());
+            // Untrimmed like the title it is compared with.
+            original_title = Some(value.clone()).filter(|t| !t.trim().is_empty());
         }
     }
     let note = files
