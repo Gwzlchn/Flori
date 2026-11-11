@@ -308,7 +308,7 @@ pub struct Manifest {
 }
 
 /// A manifest meta value: a JSON scalar or an array of strings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(untagged)]
 pub enum MetaValue {
     Bool(bool),

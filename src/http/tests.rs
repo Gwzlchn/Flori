@@ -634,7 +634,7 @@ async fn detail_merges_manifests_and_builds_the_obsidian_link() {
         cfg,
         1,
         "publish.json",
-        &manifest("z", json!({}), json!([]), meta),
+        &manifest("z", json!({}), json!([]), meta.clone()),
     );
     let (_, job) = app
         .post(
@@ -662,6 +662,25 @@ async fn detail_merges_manifests_and_builds_the_obsidian_link() {
     );
     assert_eq!(detail["steps"][4]["skipped_reason"], "chinese");
     assert_eq!(detail["steps"][0]["skipped_reason"], Value::Null);
+    // Each step keeps its own files, so both transcripts stay reachable, and its meta as written.
+    assert_eq!(
+        detail["steps"][2]["files"],
+        json!([
+            {"name": "sections", "path": "steps/03-video-frames/s.json"},
+            {"name": "transcript", "path": "steps/03-video-frames/transcript.md"},
+        ])
+    );
+    assert_eq!(
+        detail["steps"][4]["files"],
+        json!([{"name": "transcript", "path": "steps/05-translate/transcript.md"}])
+    );
+    assert_eq!(
+        detail["steps"][4]["meta"],
+        json!({"skipped_reason": "chinese"})
+    );
+    assert_eq!(detail["steps"][5]["meta"], meta);
+    assert_eq!(detail["steps"][0]["meta"], json!({}));
+    assert_eq!(detail["steps"][3]["files"], json!([]));
     // Only meta.punctuated makes a translate step report punctuation.
     assert_eq!(detail["steps"][4]["punctuation"], Value::Null);
     assert_eq!(detail["preview_base"], "/api/jobs/1/files/");

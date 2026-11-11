@@ -18,6 +18,38 @@ const fileText: Record<string, string> = {
 const LOG_HEADER = /^== (\d{2}-[a-z-]+) attempt \d+ ==$/;
 const skipText: Record<string, string> = { chinese: "原文是中文,不需要翻译", unknown: "无法判断语言,未翻译", too_long: "篇幅过长,未翻译" };
 
+const transcriptSource: Record<string, string> = { manual: "人工字幕", ai: "B站 AI 字幕" };
+const htmlSource: Record<string, string> = { arxiv: "arXiv 官方 HTML", ar5iv: "ar5iv" };
+const translationSource: Record<string, string> = { ai: "AI 翻译", subtitle: "中文人工字幕" };
+
+// A few manifest meta values with Chinese labels; abstract, authors, title and vault_path stay out.
+// skipped_reason and the punctuation counts have their own sentences below the step.
+function metaChips(meta: Schemas["StepInfo"]["meta"]): string[] {
+  const text = (key: string) => { const value = meta[key]; return typeof value === "string" && value ? value : undefined; };
+  const number = (key: string) => { const value = meta[key]; return typeof value === "number" ? value : undefined; };
+  const chips: string[] = [];
+  const ms = number("duration_ms");
+  if (ms !== undefined) chips.push(`时长 ${duration(Math.round(ms / 1000))}`);
+  if (text("uploader")) chips.push(`上传者 ${text("uploader")}`);
+  if (text("published")) chips.push(`发布于 ${text("published")}`);
+  const origin = text("origin");
+  if (origin === "whisper") chips.push("转写来源 whisper");
+  else if (origin === "subtitle") chips.push(`转写来源 ${transcriptSource[text("subtitle_kind") ?? ""] ?? "字幕"}`);
+  const language = text("language");
+  const probability = number("language_probability");
+  if (language) chips.push(`语言 ${language}${probability === undefined ? "" : ` (${(probability * 100).toFixed(1)}%)`}`);
+  if (text("subtitle_language")) chips.push(`字幕语言 ${text("subtitle_language")}`);
+  if (text("version")) chips.push(`arXiv 版本 ${text("version")}`);
+  if (text("primary_category")) chips.push(`分类 ${text("primary_category")}`);
+  const html = text("html_source");
+  if (html) chips.push(`网页来源 ${htmlSource[html] ?? html}`);
+  const translation = text("translation_source");
+  if (translation) chips.push(`译文来源 ${translationSource[translation] ?? translation}`);
+  const chunks = number("chunks");
+  if (chunks !== undefined) chips.push(`${chunks} 块`);
+  return chips;
+}
+
 function punctuationText({ sections, kept_original: kept, corrected, reverted }: Schemas["Punctuation"]): string {
   if (kept >= sections) return `原文是中文,不翻译;AI 的回复都没能用上,${sections} 节全部保留原转写`;
   let text = "原文是中文,不翻译,由 AI 加了标点";
@@ -70,6 +102,7 @@ const rows = computed(() => (detail.value?.steps ?? []).map((step) => {
   const lines = text.split("\n").slice(1).filter((line) => line.trim() && !LOG_HEADER.test(line));
   return {
     step,
+    chips: metaChips(step.meta),
     log: text,
     last: lines.at(-1) ?? "",
     // Pending steps have no start; a step between automatic retries stays running and keeps counting.
@@ -212,7 +245,7 @@ onBeforeUnmount(() => {
         <section class="card">
           <h2>步骤</h2>
           <ol class="steps">
-            <li v-for="{ step, log: stepLog, last, seconds: spent } in rows" :key="step.seq">
+            <li v-for="{ step, chips, log: stepLog, last, seconds: spent } in rows" :key="step.seq">
               <div class="row">
                 <b class="grow">{{ stepText[step.name] }}</b>
                 <small v-if="spent !== undefined" class="meta">{{ duration(spent) }}</small>
@@ -223,6 +256,14 @@ onBeforeUnmount(() => {
               <p v-if="step.error" class="error">{{ step.error }}</p>
               <p v-if="step.skipped_reason" class="meta">{{ skipText[step.skipped_reason] ?? `已跳过:${step.skipped_reason}` }}</p>
               <p v-if="step.punctuation" class="meta">{{ punctuationText(step.punctuation) }}</p>
+              <div v-if="chips.length" class="chips">
+                <span v-for="chip in chips" :key="chip" class="chip">{{ chip }}</span>
+              </div>
+              <div v-if="step.files.length" class="step-files">
+                <a v-for="file in step.files" :key="file.path" :href="fileUrl(detail.preview_base, file.path)" target="_blank" rel="noopener">
+                  {{ fileText[file.name] ?? file.name }}
+                </a>
+              </div>
               <p v-if="step.status === 'running' && last" class="meta tail">{{ last }}</p>
               <details v-if="stepLog" class="step-log">
                 <summary class="meta">本步日志</summary>

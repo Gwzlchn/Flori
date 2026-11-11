@@ -683,7 +683,12 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
             continue;
         };
         for (name, path) in manifest.files {
-            files.insert(name, format!("{rel}/{path}"));
+            let path = format!("{rel}/{path}");
+            step.files.push(JobFile {
+                name: name.clone(),
+                path: path.clone(),
+            });
+            files.insert(name, path);
         }
         for asset in manifest.assets {
             let path = format!("{rel}/assets/{asset}");
@@ -709,6 +714,7 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
         if step.name == StepName::Publish {
             note_file = text("note_file");
         }
+        step.meta = manifest.meta;
     }
     let obsidian_uri = vault_path
         .as_deref()

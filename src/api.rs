@@ -11,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::pipeline::{FeedKind, Pipeline, Platform, StepName, TranslateMode};
+use crate::pipeline::{FeedKind, MetaValue, Pipeline, Platform, StepName, TranslateMode};
 
 /// Only the drift test builds the document; the server never serves it.
 #[cfg(test)]
@@ -300,6 +300,13 @@ pub struct StepInfo {
     /// translate on a Chinese video, which gets punctuation instead of a translation.
     #[sqlx(skip)]
     pub punctuation: Option<Punctuation>,
+    /// `manifest.meta` of a succeeded step as written; empty before it succeeds.
+    #[sqlx(skip)]
+    pub meta: BTreeMap<String, MetaValue>,
+    /// The step's own `manifest.files`, before the merge into `JobDetail.files` where later
+    /// steps win.
+    #[sqlx(skip)]
+    pub files: Vec<JobFile>,
     pub started: Option<String>,
     pub finished: Option<String>,
 }

@@ -87,6 +87,9 @@ details[open] > .fold { margin-bottom: 10px; }
 .step-log .log { max-height: 320px; margin-top: 6px; }
 .tail { margin: 4px 0 0; overflow: hidden; font-family: var(--mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .danger { color: var(--danger); }
+.chips, .step-files { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 6px; }
+.chip { padding: 1px 6px; border-radius: 4px; color: var(--muted); background: var(--line-soft); font-size: 12px; overflow-wrap: anywhere; }
+.step-files a { font-size: 12px; }
 .steps li, .files li, .collections li, .feed-items li { padding: 8px 0; border-top: 1px solid var(--line-soft); }
 .steps li:first-child, .files li:first-child { border-top: 0; }
 .files li { display: flex; gap: 8px; justify-content: space-between; }

@@ -1298,6 +1298,31 @@
           }
         }
       },
+      "MetaValue": {
+        "oneOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "integer",
+            "format": "int64"
+          },
+          {
+            "type": "number",
+            "format": "double"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        ],
+        "description": "A manifest meta value: a JSON scalar or an array of strings."
+      },
       "NewCollection": {
         "type": "object",
         "required": [
@@ -1397,7 +1422,9 @@
           "seq",
           "name",
           "status",
-          "attempts"
+          "attempts",
+          "meta",
+          "files"
         ],
         "properties": {
           "attempts": {
@@ -1420,11 +1447,28 @@
             "format": "int32",
             "description": "30 means credentials expired."
           },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobFile"
+            },
+            "description": "The step's own `manifest.files`, before the merge into `JobDetail.files` where later\nsteps win."
+          },
           "finished": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "meta": {
+            "type": "object",
+            "description": "`manifest.meta` of a succeeded step as written; empty before it succeeds.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MetaValue"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "name": {
             "$ref": "#/components/schemas/StepName"

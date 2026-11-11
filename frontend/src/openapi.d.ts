@@ -350,6 +350,8 @@ export interface components {
             /** @description Whole UTF-8 lines starting at `offset`. */
             text: string;
         };
+        /** @description A manifest meta value: a JSON scalar or an array of strings. */
+        MetaValue: boolean | number | string | string[];
         NewCollection: {
             /** Format: int64 */
             domain_id: number;
@@ -402,7 +404,16 @@ export interface components {
              * @description 30 means credentials expired.
              */
             exit_code?: number | null;
+            /**
+             * @description The step's own `manifest.files`, before the merge into `JobDetail.files` where later
+             *     steps win.
+             */
+            files: components["schemas"]["JobFile"][];
             finished?: string | null;
+            /** @description `manifest.meta` of a succeeded step as written; empty before it succeeds. */
+            meta: {
+                [key: string]: components["schemas"]["MetaValue"];
+            };
             name: components["schemas"]["StepName"];
             punctuation?: null | components["schemas"]["Punctuation"];
             /** Format: int32 */
