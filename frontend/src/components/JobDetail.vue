@@ -191,6 +191,13 @@ async function load(path: string): Promise<void> {
   texts.value.set(path, response.ok ? await response.text() : null);
 }
 
+// pullLog cannot scroll the folded box, so it would open at the top. Opening jumps to the newest
+// lines, which pullLog then keeps in view.
+function openLog(event: Event): void {
+  const box = logBox.value;
+  if (box && (event.target as HTMLDetailsElement).open) box.scrollTo({ top: box.scrollHeight });
+}
+
 async function openCall(call: Schemas["AiCall"], event: Event): Promise<void> {
   const base = detail.value?.preview_base;
   if (!base || !(event.target as HTMLDetailsElement).open) return;
@@ -274,7 +281,7 @@ onBeforeUnmount(() => {
           <MarkdownView v-else :source="texts.get(current.path) ?? ''" :base="detail.preview_base" :assets="detail.assets" />
         </section>
         <section class="card">
-          <details>
+          <details @toggle="openLog">
             <summary class="fold">完整日志</summary>
             <pre ref="logBox" class="log">{{ log || "暂无日志" }}</pre>
           </details>
