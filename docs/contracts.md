@@ -105,6 +105,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 简体中文:video-fetch 把留下的每条中文字幕(subtitle.srt 为中文时、subtitle_zh.srt、manual_subtitle_zh.srt、ai_subtitle_zh.srt)与中文标题(有汉字、没有假名和谚文,中点 `・` 不算假名)用 `python3 -I $FLORI_STEPS_DIR/whisper.py t2s <in.json> <out.json>` 转成简体,输入输出都是字符串数组,与 whisper 输出所用的 OpenCC t2s 相同;没有中文时不调用。转写稿、人工译文、job 标题、主笔记文件名与 frontmatter 的 title 因此都是简体。
 - video-fetch 的下载:
   - yt-dlp 把视频下到 FLORI_CACHE_DIR,输出模板 `video.%(format_id)s.%(ext)s`,靠它默认的 `.part` 续传;`--ignore-config`,不加 `--no-continue` 或 `--no-part`。超时、取消或失败时缓存原样保留,下次尝试与手动重试从断点接着下;已下完的视频不再下载。
+  - 例外是被打断的 remux:`--remux-video` 让 ffmpeg 直接写 `<文件名>.mp4`,写完 yt-dlp 才删原文件 `<文件名>.<ext>`;SIGTERM 下 ffmpeg 会把截断的 mp4 收尾成能播放的短文件,下次 yt-dlp 会当它已下完。所以每次尝试开始先删掉旁边还有同名原文件的 mp4,由 yt-dlp 从原文件重新 remux。合并先写 `.temp.mp4` 再改名,不受影响。
   - 文件名带 format_id:合并下载的分片本来就带 `.f<format_id>`,单一格式却直接写 `<文件名>.part`,文件名不带 format_id 时站点换了格式也会接着上一个格式的残片下。
   - 整步成功时才把视频移成 out_dir 的 video.mp4,并清空缓存目录(含别的格式的残片);字幕仍直接写 out_dir,每次尝试重下。
   - 视频下完后 job.log 记一行大小、用时与平均速度(十进制单位),如 `video-fetch: 31.2 MB in 1384 s (22.5 KB/s)`。续传时速度只算本次下载的字节,写成 `video-fetch: 31.2 MB, 19.2 MB of it in 853 s (22.5 KB/s), the rest from earlier attempts`;此前的字节取尝试开始时缓存里同一格式的文件大小之和。

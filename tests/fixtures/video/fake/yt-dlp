@@ -63,10 +63,28 @@ esac
 # downloaded again. The format is 136+140, or 18 with other bytes for fmt18 in the id. A fresh
 # download with part-fail or part-killed in the id stops after 5 bytes, the way a dropped
 # connection or the step timeout stops it.
+#
+# remux in the id: an flv format 80 that --remux-video turns into <final>, the way yt-dlp does:
+# ffmpeg writes <final> in place, the flv goes after it, and an existing <final> counts as
+# downloaded ahead of the flv. remux-killed: the remux right after a fresh download is cut off
+# after 5 bytes, with the flv left, the way the step timeout stops it.
 format=136+140 media='fake video'
-case $url in *fmt18*) format=18 media='format 18 video' ;; esac
+case $url in *fmt18*) format=18 media='format 18 video' ;; *remux*) format=80 ;; esac
 final=$(printf '%s' "$out" | sed "s/%(format_id)s/$format/; s/%(ext)s/mp4/")
 case $args in *--no-continue*) rm -f "$final.part" ;; esac
+flv=${final%.mp4}.flv
+case $url in *remux*)
+    if [ ! -f "$final" ]; then
+        fresh=
+        [ -f "$flv" ] || { printf '%s' "$media" > "$flv"; fresh=1; }
+        case $fresh:$url in 1:*remux-killed*)
+            printf '%s' "$media" | head -c 5 > "$final"
+            kill -TERM $$ ;;
+        esac
+        printf '%s' "$media" > "$final"
+        rm "$flv"
+    fi ;;
+esac
 if [ ! -f "$final" ]; then
     have=0
     [ -f "$final.part" ] && have=$(wc -c < "$final.part")

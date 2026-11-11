@@ -221,6 +221,7 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
         .arg(&meta_file)
         .arg("--")
         .arg(&url);
+    remove_cut_off_remux(cache)?;
     let earlier = file_sizes(cache)?;
     let started = Instant::now();
     let (status, errors) = run_ytdlp(video).await?;
@@ -356,8 +357,42 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     write_manifest(out_dir, &manifest)?;
     // Last: until the video leaves the cache, a failed attempt keeps it for the next one.
     clear_cache(cache, &cached)?;
-    fs::rename(&cached, out_dir.join(VIDEO_FILE))?;
+    move_file(&cached, &out_dir.join(VIDEO_FILE))?;
     Ok(())
+}
+
+/// `--remux-video` has ffmpeg write `<name>.mp4` in place, and yt-dlp deletes the original
+/// `<name>.<ext>` only after that. SIGTERM makes ffmpeg close the cut-off mp4 as a short but
+/// playable file, and the next run would take it as downloaded. An mp4 next to its original is
+/// such a remux, so it goes and yt-dlp remuxes the original again. Merge parts are named
+/// `<name>.f<format>.<ext>` and the merge writes `<name>.temp.mp4`, so neither matches.
+fn remove_cut_off_remux(cache: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(cache)? {
+        let path = entry?.path();
+        if !path.is_file() || path.extension().is_some_and(|ext| ext == "mp4") {
+            continue;
+        }
+        let remuxed = path.with_extension("mp4");
+        if remuxed.is_file() {
+            let name = remuxed.file_name().unwrap_or_default().to_string_lossy();
+            eprintln!("video-fetch: {name} is a cut-off remux, remuxing again");
+            fs::remove_file(&remuxed)?;
+        }
+    }
+    Ok(())
+}
+
+/// A rename, or a copy when the cache and out_dir are different mounts: `just step` mounts the
+/// job directory and out_dir separately. The cached file goes only after the copy, so a kill in
+/// between leaves the video in the cache.
+fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::rename(from, to) {
+        Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
+            fs::copy(from, to)?;
+            fs::remove_file(from)
+        }
+        result => result,
+    }
 }
 
 /// Name and size of each file in the cache before yt-dlp runs.

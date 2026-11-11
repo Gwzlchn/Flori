@@ -1146,6 +1146,40 @@ async fn a_part_of_another_format_is_left_alone_and_removed() {
     assert_eq!(names(&run.cache()), Vec::<String>::new());
 }
 
+/// The step timeout during a remux to mp4 leaves a short but playable mp4 next to the whole
+/// original, and yt-dlp would take that mp4 as downloaded.
+#[tokio::test]
+async fn a_cut_off_remux_is_done_again_from_the_original() {
+    let run = FetchRun::new("bilibili", "BV-remux-killed", None);
+    assert_eq!(run.run().await.unwrap_err().exit, StepExit::Retry);
+    assert_eq!(names(&run.cache()), ["video.80.flv", "video.80.mp4"]);
+    run.next_attempt(None);
+    run.run().await.unwrap();
+    let video = fs::read(run.out().join(VIDEO_FILE)).unwrap();
+    assert_eq!(String::from_utf8_lossy(&video), "fake video");
+    assert_eq!(names(&run.cache()), Vec::<String>::new());
+}
+
+/// `just step` mounts the job directory and out_dir separately, so a rename crosses mounts.
+/// /dev/shm stands in for the other mount where it is another filesystem than the temp dir.
+#[tokio::test]
+async fn the_video_is_copied_when_the_cache_is_on_another_filesystem() {
+    use std::os::unix::fs::MetadataExt;
+    let mut run = FetchRun::new("youtube", "video-subs-ok", None);
+    let Ok(cache) = tempfile::tempdir_in("/dev/shm") else {
+        return;
+    };
+    let dev = |path: &Path| fs::metadata(path).unwrap().dev();
+    if dev(cache.path()) == dev(&run.out()) {
+        return;
+    }
+    run.env.cache_dir = Some(cache.path().into());
+    run.run().await.unwrap();
+    let video = fs::read(run.out().join(VIDEO_FILE)).unwrap();
+    assert_eq!(String::from_utf8_lossy(&video), "fake video");
+    assert_eq!(names(cache.path()), Vec::<String>::new());
+}
+
 #[test]
 fn the_download_line_counts_only_this_attempts_bytes() {
     let line = |size, earlier, secs| download_line(size, earlier, Duration::from_secs(secs));
