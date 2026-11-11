@@ -645,7 +645,8 @@ fn names(dir: &Path) -> Vec<String> {
 }
 
 /// A video-fetch run against tests/fixtures/video/fake/{yt-dlp,curl}. The fake yt-dlp acts on
-/// words in the video id and logs its arguments to `steps/fake-yt-dlp.log`.
+/// words in the video id and logs its arguments to `steps/fake-yt-dlp.log`. The cache is
+/// `cache/video-fetch` like the executor's.
 struct FetchRun {
     job: tempfile::TempDir,
     tmp: tempfile::TempDir,
@@ -657,6 +658,8 @@ impl FetchRun {
         let job = tempfile::tempdir().unwrap();
         fs::write(job.path().join("job.json"), job_json(platform, id)).unwrap();
         fs::create_dir_all(job.path().join("steps/01-video-fetch.tmp")).unwrap();
+        let cache = job.path().join("cache/video-fetch");
+        fs::create_dir_all(&cache).unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let env = FetchEnv {
             proxy: None,
@@ -666,12 +669,27 @@ impl FetchRun {
             curl: fixture("fake/curl").into(),
             python: "python3".into(),
             steps_dir: Some(fixture("fake").to_string_lossy().into_owned()),
+            cache_dir: Some(cache),
         };
         FetchRun { job, tmp, env }
     }
 
     fn out(&self) -> PathBuf {
         self.job.path().join("steps/01-video-fetch.tmp")
+    }
+
+    fn cache(&self) -> PathBuf {
+        self.job.path().join("cache/video-fetch")
+    }
+
+    /// What the executor does after a failed attempt: out_dir goes, an empty one comes back.
+    /// `id` replaces the video id, so the fake yt-dlp can act differently.
+    fn next_attempt(&self, id: Option<&str>) {
+        fs::remove_dir_all(self.out()).unwrap();
+        fs::create_dir(self.out()).unwrap();
+        if let Some(id) = id {
+            fs::write(self.job.path().join("job.json"), job_json("youtube", id)).unwrap();
+        }
     }
 
     async fn run(&self) -> StepResult {
@@ -1071,8 +1089,81 @@ async fn a_subtitle_run_killed_by_a_signal_is_retried() {
     let run = FetchRun::new("bilibili", "BVsubs-killed", Some("good-cookie"));
     let failure = run.run().await.unwrap_err();
     assert_eq!(failure.exit, StepExit::Retry, "{}", failure.message);
-    assert_eq!(names(&run.out()), ["video.mp4"]);
+    // The finished video waits in the cache for the next attempt.
+    assert_eq!(names(&run.out()), Vec::<String>::new());
+    assert_eq!(names(&run.cache()), ["video.136+140.mp4"]);
     assert_eq!(names(run.tmp.path()), Vec::<String>::new());
+}
+
+/// On a slow link only attempts that each continue the last one's part get a video through the
+/// 30m timeout.
+#[tokio::test]
+async fn the_next_attempt_continues_the_part_a_failed_one_left() {
+    for id in ["video-part-fail", "video-part-killed", "BV-part-fail"] {
+        let platform = if id.starts_with("BV") {
+            "bilibili"
+        } else {
+            "youtube"
+        };
+        let run = FetchRun::new(platform, id, None);
+        let failure = run.run().await.unwrap_err();
+        assert_eq!(failure.exit, StepExit::Retry, "{id}: {}", failure.message);
+        assert_eq!(names(&run.cache()), ["video.136+140.mp4.part"], "{id}");
+        run.next_attempt(None);
+        // The fake fails every fresh download of this id, so only a continued one gets here.
+        run.run().await.unwrap();
+        let video = fs::read(run.out().join(VIDEO_FILE)).unwrap();
+        assert_eq!(String::from_utf8_lossy(&video), "fake video", "{id}");
+        assert_eq!(run.manifest().meta["filesize_bytes"], MetaValue::Int(10));
+        assert_eq!(names(&run.cache()), Vec::<String>::new(), "{id}");
+        // The failed attempt logged one run, this one a video and a subtitle run.
+        let video_run = run.log().lines().nth(1).unwrap().to_owned();
+        let template = run.cache().join("video.%(format_id)s.%(ext)s");
+        assert!(
+            video_run.contains(&format!(" -o {} ", template.display())),
+            "{id}: {video_run}"
+        );
+        for flag in ["--no-continue", "--no-part", "--force-overwrites"] {
+            assert!(!video_run.contains(flag), "{id}: {video_run}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_part_of_another_format_is_left_alone_and_removed() {
+    let run = FetchRun::new("youtube", "video-fmt18-part-fail", None);
+    assert_eq!(run.run().await.unwrap_err().exit, StepExit::Retry);
+    assert_eq!(names(&run.cache()), ["video.18.mp4.part"]);
+    // The site now serves 136+140, which must not continue format 18's bytes.
+    run.next_attempt(Some("video-lang-en-subs-ok"));
+    run.run().await.unwrap();
+    let video = fs::read(run.out().join(VIDEO_FILE)).unwrap();
+    assert_eq!(String::from_utf8_lossy(&video), "fake video");
+    assert_eq!(
+        names(&run.out()),
+        ["manifest.json", "subtitle.srt", "video.mp4"]
+    );
+    assert_eq!(names(&run.cache()), Vec::<String>::new());
+}
+
+#[test]
+fn the_download_line_counts_only_this_attempts_bytes() {
+    let line = |size, earlier, secs| download_line(size, earlier, Duration::from_secs(secs));
+    assert_eq!(
+        line(31_200_000, 0, 1384),
+        "video-fetch: 31.2 MB in 1384 s (22.5 KB/s)"
+    );
+    assert_eq!(
+        line(31_200_000, 12_000_000, 853),
+        "video-fetch: 31.2 MB, 19.2 MB of it in 853 s (22.5 KB/s), the rest from earlier attempts"
+    );
+    // A video finished by an earlier attempt; a merge's temp file can push the earlier bytes
+    // past the size.
+    assert_eq!(
+        line(31_200_000, 40_000_000, 3),
+        "video-fetch: 31.2 MB, 0.0 MB of it in 3 s (0.0 KB/s), the rest from earlier attempts"
+    );
+    assert_eq!(line(0, 0, 0), "video-fetch: 0.0 MB in 0 s (0.0 KB/s)");
 }
 
 /// What SIGTERM does in `fetch`: the download future is dropped mid-run.

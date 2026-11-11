@@ -107,6 +107,8 @@ fn terminate_during(id: &str, runs: usize) -> String {
     fs::write(job.path().join("job.json"), job_json.to_string()).unwrap();
     let out = job.path().join("steps/01-video-fetch.tmp");
     fs::create_dir_all(&out).unwrap();
+    let cache = job.path().join("cache/video-fetch");
+    fs::create_dir_all(&cache).unwrap();
     let fakes = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video/fake");
 
     let child = Command::new(env!("CARGO_BIN_EXE_flori"))
@@ -114,6 +116,7 @@ fn terminate_during(id: &str, runs: usize) -> String {
         .arg(job.path())
         .arg(&out)
         .env_clear()
+        .env("FLORI_CACHE_DIR", &cache)
         .env("PATH", format!("{}:/usr/bin:/bin", fakes.display()))
         .env("TMPDIR", tmp.path())
         .env("HOME", home.path())

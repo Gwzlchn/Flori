@@ -9,6 +9,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
+    time::{Duration, Instant},
 };
 
 use serde::Deserialize;
@@ -46,6 +47,8 @@ struct FetchedMeta {
     upload_date: Option<String>,
     /// The spoken language, e.g. `en` or `en-US`. yt-dlp's Bilibili extractor never sets it.
     language: Option<String>,
+    /// Where yt-dlp left the finished video.
+    filepath: Option<String>,
     #[serde(flatten)]
     media: FetchedMedia,
 }
@@ -112,6 +115,9 @@ pub(super) struct FetchEnv {
     /// Runs `whisper.py t2s` from `steps_dir`.
     pub(super) python: OsString,
     pub(super) steps_dir: Option<String>,
+    /// FLORI_CACHE_DIR. The media downloads here, so the `.part` files of a failed attempt are
+    /// still there for the next one to continue.
+    pub(super) cache_dir: Option<PathBuf>,
 }
 
 impl FetchEnv {
@@ -124,6 +130,7 @@ impl FetchEnv {
             curl: "curl".into(),
             python: "python3".into(),
             steps_dir: env_value("FLORI_STEPS_DIR"),
+            cache_dir: env_value("FLORI_CACHE_DIR").map(PathBuf::from),
         }
     }
 }
@@ -172,8 +179,14 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     if let Some(path) = cookie_path {
         check_login(env, path).await?;
     }
-    // Both runs share the output template, so yt-dlp's intermediate files land in out_dir.
-    let ytdlp = || {
+    let cache = env
+        .cache_dir
+        .as_deref()
+        .ok_or_else(|| StepFailure::permanent("FLORI_CACHE_DIR is not set"))?;
+    fs::create_dir_all(cache)?;
+    // `--ignore-config` also keeps a user config from adding `--no-continue` or `--no-part`,
+    // which would restart the download on every attempt.
+    let ytdlp = |template: &Path| {
         let mut cmd = Command::new(&env.ytdlp);
         cmd.args(["--ignore-config", "--no-plugin-dirs"])
             .args(["--playlist-items", "1", "--no-progress", "--no-colors"])
@@ -181,15 +194,19 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
             .arg(proxy.unwrap_or_default())
             // A running live stream would be recorded until the step times out.
             .args(["--match-filter", "!is_live", "-o"])
-            .arg(out_dir.join("video.%(ext)s"));
+            .arg(template);
         if let Some(path) = cookie_path {
             cmd.arg("--cookies").arg(path);
         }
         cmd
     };
 
+    // Not in the cache: `--print-to-file` appends, and each attempt needs the JSON alone.
     let meta_file = out_dir.join("fetched.json");
-    let mut video = ytdlp();
+    // The format id is in the name because only a merged download names its parts by format.
+    // A single format goes straight to `<name>.part`, which the next attempt would continue
+    // even if the site then serves another format.
+    let mut video = ytdlp(&cache.join("video.%(format_id)s.%(ext)s"));
     // h264 first: it plays in every browser and ffmpeg decodes it fast.
     video
         // 720p is enough for keyframes and playback, and the YouTube path goes through a
@@ -199,22 +216,40 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
         .arg("--print-to-file")
         .arg(concat!(
             "after_move:%(.{title,playlist_title,uploader,duration,upload_date,language,",
-            "width,height,fps,vcodec,acodec,tags})j"
+            "filepath,width,height,fps,vcodec,acodec,tags})j"
         ))
         .arg(&meta_file)
         .arg("--")
         .arg(&url);
+    let earlier = file_sizes(cache)?;
+    let started = Instant::now();
     let (status, errors) = run_ytdlp(video).await?;
+    let elapsed = started.elapsed();
     if let Some(failure) = classify_ytdlp(status.success(), &errors) {
         return Err(failure);
     }
-    if !out_dir.join(VIDEO_FILE).is_file() {
-        return Err(StepFailure::permanent(
-            "yt-dlp exited 0 without video.mp4; a live stream still running is skipped",
-        ));
+    let no_video = || {
+        StepFailure::permanent(
+            "yt-dlp exited 0 without a video; a live stream still running is skipped",
+        )
+    };
+    if !meta_file.is_file() {
+        return Err(no_video());
     }
     let fetched: FetchedMeta = read_json(&meta_file)?;
     fs::remove_file(&meta_file)?;
+    let cached = fetched
+        .filepath
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+        .map(|name| cache.join(name))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "mp4") && path.is_file())
+        .ok_or_else(no_video)?;
+    let size = fs::metadata(&cached)?.len();
+    eprintln!(
+        "{}",
+        download_line(size, earlier_bytes(&earlier, &cached), elapsed)
+    );
     // The language becomes a --sub-langs regex, so anything but a plain tag counts as unknown.
     // yt-dlp takes it from YouTube's audio track or original-language captions (the ones it also
     // lists as `<lang>-orig`), so no other field knows more. Its Bilibili extractor never sets
@@ -239,7 +274,8 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     // Subtitles are best effort in a second run: a failed subtitle request (429 from YouTube's
     // timedtext, Bilibili's subtitle JSON) must not cost the video; whisper covers it.
     // Manual subtitles and Bilibili AI tracks only. YouTube auto captions are worse than whisper.
-    let mut subtitles = ytdlp();
+    // Subtitles go straight to out_dir: they are small and fetched again on every attempt.
+    let mut subtitles = ytdlp(&out_dir.join("video.%(ext)s"));
     subtitles
         .args(["--skip-download", "--write-subs"])
         .args([
@@ -305,7 +341,6 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
         ),
         text("subtitle_language", kept.language),
     ];
-    let size = fs::metadata(out_dir.join(VIDEO_FILE))?.len();
     let mut meta: BTreeMap<String, MetaValue> = meta.into_iter().flatten().collect();
     meta.extend(media_meta(&fetched.media));
     meta.insert(
@@ -319,6 +354,70 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
         meta,
     };
     write_manifest(out_dir, &manifest)?;
+    // Last: until the video leaves the cache, a failed attempt keeps it for the next one.
+    clear_cache(cache, &cached)?;
+    fs::rename(&cached, out_dir.join(VIDEO_FILE))?;
+    Ok(())
+}
+
+/// Name and size of each file in the cache before yt-dlp runs.
+fn file_sizes(cache: &Path) -> io::Result<Vec<(String, u64)>> {
+    let mut sizes = Vec::new();
+    for entry in fs::read_dir(cache)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        if meta.is_file() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            sizes.push((name, meta.len()));
+        }
+    }
+    Ok(sizes)
+}
+
+/// Bytes of `video` that earlier attempts left: the sizes, before this attempt, of the files
+/// named like it, i.e. the finished file, its `.part` and the `.f<format>` parts of a merge.
+fn earlier_bytes(sizes: &[(String, u64)], video: &Path) -> u64 {
+    let name = video.file_name().unwrap_or_default().to_string_lossy();
+    let stem = name.strip_suffix("mp4").unwrap_or(&name);
+    let mine = sizes.iter().filter(|(name, _)| name.starts_with(stem));
+    mine.map(|(_, size)| size).sum()
+}
+
+/// The job.log line that makes a slow link visible. Decimal units. The speed counts only the
+/// bytes this attempt downloaded.
+pub(super) fn download_line(size: u64, earlier: u64, elapsed: Duration) -> String {
+    let fetched = size.saturating_sub(earlier);
+    let secs = elapsed.as_secs_f64();
+    let speed = if secs > 0.0 {
+        fetched as f64 / secs
+    } else {
+        0.0
+    };
+    let mb = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1e6);
+    let took = format!("in {secs:.0} s ({:.1} KB/s)", speed / 1e3);
+    if fetched == size {
+        format!("video-fetch: {} {took}", mb(size))
+    } else {
+        let (size, fetched) = (mb(size), mb(fetched));
+        format!("video-fetch: {size}, {fetched} of it {took}, the rest from earlier attempts")
+    }
+}
+
+/// Removes everything but the finished video from the cache: parts of other formats and
+/// whatever else yt-dlp left there.
+fn clear_cache(cache: &Path, video: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(cache)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path == video {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
     Ok(())
 }
 

@@ -163,6 +163,13 @@ impl Inner {
         if name == StepName::VideoFetch {
             env.push(("FLORI_STEPS_DIR", self.steps_dir.clone().into()));
         }
+        // Outside the step directory, so it outlives failed attempts and manual retries: the
+        // video download continues its `.part` files, translate skips the chunks it has.
+        if matches!(name, StepName::VideoFetch | StepName::Translate) {
+            let cache = job_dir.join("cache").join(name.as_str());
+            fs::create_dir_all(&cache)?;
+            env.push(("FLORI_CACHE_DIR", cache.into()));
+        }
         match name {
             StepName::VideoFetch if job.source.platform == Platform::Youtube => env.extend(proxy),
             StepName::VideoFetch => {
@@ -196,11 +203,6 @@ impl Inner {
                 );
                 if job.ai.tool == AiTool::Codex {
                     env.extend(c.codex_home.iter().map(|h| ("CODEX_HOME", h.into())));
-                }
-                if name == StepName::Translate {
-                    let cache = job_dir.join("cache/translate");
-                    fs::create_dir_all(&cache)?;
-                    env.push(("FLORI_CACHE_DIR", cache.into()));
                 }
                 // Outside the step directory, so failed attempts keep their calls' records.
                 let ai_log = job_dir.join("ai");

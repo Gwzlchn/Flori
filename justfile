@@ -50,9 +50,10 @@ dev_data := env("FLORI_DEV_DATA", "../flori-working/dev/data")
 # Run one built-in step with real tools: just step video-frames <job_dir> <out_dir>
 step name job_dir out_dir:
     cargo build
-    mkdir -p {{out_dir}}
+    mkdir -p {{out_dir}} {{job_dir}}/cache/{{name}}
     docker run --rm --network host --user "$(id -u):$(id -g)" \
       -e FLORI_STEPS_DIR=/app/steps -e FLORI_WHISPER_MODEL=/data/models/whisper-base \
+      -e FLORI_CACHE_DIR="$(realpath {{job_dir}})/cache/{{name}}" \
       -e HTTPS_PROXY={{proxy}} -e HTTP_PROXY={{proxy}} \
       -v "$PWD/target/debug/flori:/usr/local/bin/flori:ro" -v "$PWD/steps:/app/steps:ro" \
       -v "$(realpath {{dev_data}}):/data" \

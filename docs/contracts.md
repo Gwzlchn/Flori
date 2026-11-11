@@ -9,7 +9,7 @@
        Python:python3 -I $FLORI_STEPS_DIR/<script>.py <子命令> <job_dir> <out_dir>
 job_dir 只读:job.json、steps/<nn>-<name>/{manifest.json, 文件, assets/}
 out_dir steps/<nn>-<name>.tmp/,执行器建好的空目录;成功后原子 rename 为 steps/<nn>-<name>/;失败时整体删除,下次尝试重建
-cache   只有 translate 拿到 FLORI_CACHE_DIR=jobs/<id>/cache/translate/(可写,跨尝试保留)
+cache   只有 video-fetch 与 translate 拿到 FLORI_CACHE_DIR=jobs/<id>/cache/<name>/(可写,各用各的;不在步骤目录里,跨尝试与手动重试保留)
 ai      note 与 translate 拿到 FLORI_AI_LOG_DIR=jobs/<id>/ai/(可写,跨尝试保留,只增不删),放每次 AI CLI 调用的记录,见"AI CLI 固定调用"
 日志   执行器把子进程 stdout/stderr 逐行追加到 jobs/<id>/job.log,每段以 `== <nn>-<name> attempt <n> ==` 开头,只追加不截断;步骤目录里不放日志
 env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATTEMPT,再加下表白名单
@@ -57,7 +57,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | env |
 |---|---|
-| video-fetch | FLORI_STEPS_DIR(运行 `whisper.py t2s`) |
+| video-fetch | FLORI_STEPS_DIR(运行 `whisper.py t2s`)、FLORI_CACHE_DIR |
 | video-fetch(youtube) | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY |
 | video-fetch(bilibili) | FLORI_BILI_SESSDATA(服务端有值时才传);不带代理 |
 | video-transcribe | FLORI_WHISPER_MODEL、FLORI_STEPS_DIR |
@@ -103,6 +103,11 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long;chinese 只出现在 arXiv),too_long 时另有 chunks(int)。译出时另有 translation_source:ai(调用 AI)或 subtitle(视频用 video-transcribe 或 video-fetch 的 subtitle_zh)。中文视频加了标点时 translated 为 false,另有 punctuated(true)、sections(送去加标点的有文字的节数,int)、kept_original(回复用不上、保留原文的节数,int)、corrected(采用的同音替换处数,int)与 reverted(还原的其它改动处数,int)。
 
 - 简体中文:video-fetch 把留下的每条中文字幕(subtitle.srt 为中文时、subtitle_zh.srt、manual_subtitle_zh.srt、ai_subtitle_zh.srt)与中文标题(有汉字、没有假名和谚文,中点 `・` 不算假名)用 `python3 -I $FLORI_STEPS_DIR/whisper.py t2s <in.json> <out.json>` 转成简体,输入输出都是字符串数组,与 whisper 输出所用的 OpenCC t2s 相同;没有中文时不调用。转写稿、人工译文、job 标题、主笔记文件名与 frontmatter 的 title 因此都是简体。
+- video-fetch 的下载:
+  - yt-dlp 把视频下到 FLORI_CACHE_DIR,输出模板 `video.%(format_id)s.%(ext)s`,靠它默认的 `.part` 续传;`--ignore-config`,不加 `--no-continue` 或 `--no-part`。超时、取消或失败时缓存原样保留,下次尝试与手动重试从断点接着下;已下完的视频不再下载。
+  - 文件名带 format_id:合并下载的分片本来就带 `.f<format_id>`,单一格式却直接写 `<文件名>.part`,文件名不带 format_id 时站点换了格式也会接着上一个格式的残片下。
+  - 整步成功时才把视频移成 out_dir 的 video.mp4,并清空缓存目录(含别的格式的残片);字幕仍直接写 out_dir,每次尝试重下。
+  - 视频下完后 job.log 记一行大小、用时与平均速度(十进制单位),如 `video-fetch: 31.2 MB in 1384 s (22.5 KB/s)`。续传时速度只算本次下载的字节,写成 `video-fetch: 31.2 MB, 19.2 MB of it in 853 s (22.5 KB/s), the rest from earlier attempts`;此前的字节取尝试开始时缓存里同一格式的文件大小之和。
 - video-fetch 的字幕:取人工字幕与 B站 AI 字幕,不取 YouTube 自动字幕;尽力而为,失败只记日志,由 whisper 转写。
   - 原声语言取 yt-dlp 的 language 的主子标签(`en-US` 记 en);不是纯小写字母标签时按未知处理。YouTube 的 language 来自音轨或原声自动字幕(yt-dlp 同时把后者列为 `<lang>-orig`),没有别的字段知道更多。yt-dlp 的 B站提取器不给 language,B站总按未知处理。
   - subtitle.srt:只在原声已知时写,只取原声语言的轨,原声为中文时没有中文轨再用英文。同一语言内简体先于繁体,不带地区的标签先于带地区的。

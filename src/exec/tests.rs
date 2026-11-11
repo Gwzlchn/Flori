@@ -298,7 +298,12 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
     };
     assert_eq!(
         env("video-fetch"),
-        with(&["FLORI_STEPS_DIR", "HTTPS_PROXY", "HTTP_PROXY"])
+        with(&[
+            "FLORI_CACHE_DIR",
+            "FLORI_STEPS_DIR",
+            "HTTPS_PROXY",
+            "HTTP_PROXY"
+        ])
     );
     assert_eq!(
         env("video-transcribe"),
@@ -319,11 +324,15 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
         with(&[&ai[..], &["FLORI_CACHE_DIR"]].concat())
     );
     assert_eq!(env("publish"), with(&["FLORI_VAULT_DIR"]));
+    // Each its own cache, outside the step directories.
+    for step in ["video-fetch", "translate"] {
+        let env = fs::read_to_string(dir.join(format!("fake/{step}.env"))).unwrap();
+        let cache = dir.join("cache").join(step);
+        let line = format!("FLORI_CACHE_DIR={}\n", cache.display());
+        assert!(env.contains(&line), "{step}: {env}");
+        assert!(cache.is_dir(), "{step}");
+    }
     let translate = fs::read_to_string(dir.join("fake/translate.env")).unwrap();
-    assert!(translate.contains(&format!(
-        "FLORI_CACHE_DIR={}",
-        dir.join("cache/translate").display()
-    )));
     assert!(translate.contains("LANG=C.UTF-8"));
     for step in ["note", "translate"] {
         let env = fs::read_to_string(dir.join(format!("fake/{step}.env"))).unwrap();

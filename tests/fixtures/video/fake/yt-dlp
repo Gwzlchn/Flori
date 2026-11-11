@@ -1,6 +1,7 @@
 #!/bin/sh
 # Fake yt-dlp for the video-fetch tests. Words in the video id pick the behavior; every call
-# appends its arguments to fake-yt-dlp.log next to the step's out_dir.
+# appends its arguments to fake-yt-dlp.log next to the step's out_dir, which it finds from the
+# --print-to-file path of the video run and the subtitle template of the subtitle run.
 args="$*"
 # ignore-term: SIGTERM is ignored from before the log line on, so only the step can stop it.
 case $args in *ignore-term*) trap '' TERM ;; esac
@@ -16,7 +17,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$out" ] && [ -n "$url" ] || { echo "ERROR: fake yt-dlp needs -o and -- <url>" >&2; exit 2; }
 dir=$(dirname "$out")
-printf '%s\n' "$args" >> "$dir/../fake-yt-dlp.log"
+printf '%s\n' "$args" >> "$(dirname "${meta:-$subs}")/../fake-yt-dlp.log"
 
 cue() { printf '1\n00:00:00,000 --> 00:00:01,000\n%s\n' "$2" > "$dir/subtitle.$1.srt"; }
 if [ -n "$skip" ]; then
@@ -56,22 +57,46 @@ case $url in
         echo "ERROR: [youtube] gone: Video unavailable. This video has been removed by the uploader" >&2
         exit 1 ;;
 esac
-printf 'fake video' > "$dir/video.mp4"
+
+# One stream, downloaded the way yt-dlp downloads a single format: into <final>.part, continued
+# from its size unless --no-continue, renamed when complete; a complete <final> is not
+# downloaded again. The format is 136+140, or 18 with other bytes for fmt18 in the id. A fresh
+# download with part-fail or part-killed in the id stops after 5 bytes, the way a dropped
+# connection or the step timeout stops it.
+format=136+140 media='fake video'
+case $url in *fmt18*) format=18 media='format 18 video' ;; esac
+final=$(printf '%s' "$out" | sed "s/%(format_id)s/$format/; s/%(ext)s/mp4/")
+case $args in *--no-continue*) rm -f "$final.part" ;; esac
+if [ ! -f "$final" ]; then
+    have=0
+    [ -f "$final.part" ] && have=$(wc -c < "$final.part")
+    case $have:$url in
+        0:*part-fail*|0:*part-killed*)
+            printf '%s' "$media" | head -c 5 > "$final.part"
+            case $url in *part-killed*) kill -TERM $$ ;; esac
+            echo "ERROR: unable to download video data: The read operation timed out" >&2
+            exit 1 ;;
+    esac
+    printf '%s' "$media" | tail -c +$((have + 1)) >> "$final.part"
+    mv "$final.part" "$final"
+fi
+filepath=
+case $template in *filepath*) filepath="\"filepath\": \"$final\", " ;; esac
 case $url in
-    *multi*) printf '{"title": "Course p01 lec01.mp4", "playlist_title": "Course", "uploader": "U", "duration": 12.5, "upload_date": "20240102"}' > "$meta" ;;
+    *multi*) printf '{%s"title": "Course p01 lec01.mp4", "playlist_title": "Course", "uploader": "U", "duration": 12.5, "upload_date": "20240102"}' "$filepath" > "$meta" ;;
     *)
         # lang-xx in the id is the reported original language, printed only when asked for.
         language=
         case $url in *lang-en*) language=en ;; *lang-fr*) language=fr-FR ;; esac
         case $template in *language*) ;; *) language= ;; esac
         # The merged formats and tags, as yt-dlp reports them when the template asks.
-        media=
+        fields=
         case $template in *vcodec*)
-            media=', "width": 1280, "height": 720, "fps": 29.97, "vcodec": "avc1.64001F", "acodec": "mp4a.40.2", "tags": ["talk", " ted  ed ", "talk", ""]' ;;
+            fields=', "width": 1280, "height": 720, "fps": 29.97, "vcodec": "avc1.64001F", "acodec": "mp4a.40.2", "tags": ["talk", " ted  ed ", "talk", ""]' ;;
         esac
         # title-tw: a traditional Chinese title; title-ja: a Japanese one with kanji.
         title=Title
         case $url in *title-tw*) title=這個標題說廣 ;; *title-ja*) title=東京の標題 ;; esac
-        printf '{"title": "%s", "uploader": "U", "duration": 12.5, "upload_date": "20240102"%s%s}' \
-            "$title" "${language:+, \"language\": \"$language\"}" "$media" > "$meta" ;;
+        printf '{%s"title": "%s", "uploader": "U", "duration": 12.5, "upload_date": "20240102"%s%s}' \
+            "$filepath" "$title" "${language:+, \"language\": \"$language\"}" "$fields" > "$meta" ;;
 esac
