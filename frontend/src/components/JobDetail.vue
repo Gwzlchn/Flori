@@ -66,6 +66,7 @@ const detail = ref<Schemas["JobDetail"]>();
 const missing = ref(false);
 const log = ref("");
 const logBox = ref<HTMLPreElement>();
+const player = ref<HTMLVideoElement>();
 const message = ref("");
 const busy = ref(false);
 // Job-relative path -> Markdown text; null when loading failed. Finished step files never change.
@@ -238,6 +239,8 @@ function sentImages(path: string): string[] {
 }
 
 watch(() => current.value?.path, (path) => { if (path) void load(path).catch(() => texts.value.set(path, null)); });
+// A hidden player has no controls in view, so it must not keep playing there.
+watch(showVideo, (shown) => { if (!shown) player.value?.pause(); });
 onMounted(watchJob);
 onBeforeUnmount(() => {
   polling = false;
@@ -277,9 +280,9 @@ onBeforeUnmount(() => {
         <nav class="tabs">
           <a v-for="item in tabs" :key="item.name" :href="item.href" :aria-current="active === item.name ? 'page' : undefined">{{ item.label }}</a>
         </nav>
-        <!-- v-show keeps the playback position when 元信息 is opened and closed. -->
+        <!-- v-show keeps the playback position when 元信息 is opened and closed; hiding pauses it. -->
         <video
-          v-if="video" v-show="showVideo" class="card video" controls preload="metadata"
+          v-if="video" v-show="showVideo" ref="player" class="card video" controls preload="metadata"
           :src="fileUrl(detail.preview_base, video.path)"
         />
         <JobMeta v-if="active === META_TAB" :detail :domain="domainName" :collection="collectionName" :spent="total" />
