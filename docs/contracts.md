@@ -102,7 +102,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - sections.json 的 text 是未转义的原文;写进 Markdown 的一方(video-frames 的 transcript.md、translate 的双语版与加标点版)统一用 `pipeline::escape_markdown` 转义。Section 类型、取前序文件(`pipeline::step_file`)与节时间格式(`pipeline::clock`)只在 src/pipeline.rs 定义一次。
 - translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long;chinese 只出现在 arXiv),too_long 时另有 chunks(int)。译出时另有 translation_source:ai(调用 AI)或 subtitle(视频用 video-fetch 的 subtitle_zh)。中文视频加了标点时 translated 为 false,另有 punctuated(true)、sections(送去加标点的有文字的节数,int)、kept_original(回复用不上、保留原文的节数,int)、corrected(采用的同音替换处数,int)与 reverted(还原的其它改动处数,int)。
 
-- 简体中文:video-fetch 把留下的每条中文字幕(subtitle.srt 为中文时、subtitle_zh.srt、manual_subtitle_zh.srt、ai_subtitle_zh.srt)与中文标题(有汉字、没有假名和谚文)用 `python3 -I $FLORI_STEPS_DIR/whisper.py t2s <in.json> <out.json>` 转成简体,输入输出都是字符串数组,与 whisper 输出所用的 OpenCC t2s 相同;没有中文时不调用。转写稿、人工译文、job 标题、主笔记文件名与 frontmatter 的 title 因此都是简体。
+- 简体中文:video-fetch 把留下的每条中文字幕(subtitle.srt 为中文时、subtitle_zh.srt、manual_subtitle_zh.srt、ai_subtitle_zh.srt)与中文标题(有汉字、没有假名和谚文,中点 `・` 不算假名)用 `python3 -I $FLORI_STEPS_DIR/whisper.py t2s <in.json> <out.json>` 转成简体,输入输出都是字符串数组,与 whisper 输出所用的 OpenCC t2s 相同;没有中文时不调用。转写稿、人工译文、job 标题、主笔记文件名与 frontmatter 的 title 因此都是简体。
 - video-fetch 的字幕:取人工字幕与 B站 AI 字幕,不取 YouTube 自动字幕;尽力而为,失败只记日志,由 whisper 转写。
   - 原声语言取 yt-dlp 的 language 的主子标签(`en-US` 记 en);不是纯小写字母标签时按未知处理。YouTube 的 language 来自音轨或原声自动字幕(yt-dlp 同时把后者列为 `<lang>-orig`),没有别的字段知道更多。yt-dlp 的 B站提取器不给 language,B站总按未知处理。
   - subtitle.srt:只在原声已知时写,只取原声语言的轨,原声为中文时没有中文轨再用英文。同一语言内简体先于繁体,不带地区的标签先于带地区的。

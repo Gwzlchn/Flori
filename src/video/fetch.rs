@@ -370,10 +370,12 @@ async fn simplified(
     })
 }
 
-/// Han ideographs without kana or hangul: Chinese rather than Japanese or Korean.
+/// Han ideographs without kana or hangul: Chinese rather than Japanese or Korean. The katakana
+/// middle dot `・` is no kana here: Chinese titles separate foreign names with it too.
 pub(super) fn chinese(text: &str) -> bool {
     let han = |c: char| matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}');
-    let kana = |c: char| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}');
+    let kana =
+        |c: char| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}') && c != '\u{30FB}';
     let hangul = |c: char| matches!(c, '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{AC00}'..='\u{D7AF}');
     text.chars().any(han) && !text.chars().any(|c| kana(c) || hangul(c))
 }

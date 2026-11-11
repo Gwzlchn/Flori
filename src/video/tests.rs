@@ -953,6 +953,9 @@ async fn chinese_titles_and_tracks_become_simplified() {
 fn chinese_means_ideographs_without_kana_or_hangul() {
     assert!(chinese("脚踩刹车踏板，为何会刹停几吨重的汽车？"));
     assert!(chinese("4 ways 注意力"));
+    // The katakana middle dot also separates names in Chinese; katakana around it does not.
+    assert!(chinese("李奧納多・狄卡皮歐的電影"));
+    assert!(!chinese("ハリー・ポッター 賢者の石"));
     assert!(!chinese("東京の標題"));
     assert!(!chinese("한국어 漢字"));
     assert!(!chinese("4 ways to fix your attention span"));
