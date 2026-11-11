@@ -244,3 +244,32 @@ async fn nothing_is_recorded_without_a_log_dir_or_before_the_cli_starts() {
     assert!(records(&fx).is_empty());
     assert!(!Path::new(&fx.job_dir().join("ai")).exists());
 }
+
+#[tokio::test]
+async fn a_step_or_attempt_that_is_no_plain_name_stays_inside_the_log_dir() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let mut env = step_env(&fx, "../escaped", 1);
+    for (key, value) in &mut env {
+        if key == "FLORI_ATTEMPT" {
+            *value = "1/../../x".into();
+        }
+    }
+    complete(&env, AiTool::Claude, "m", "hi", &[], 20 * SECOND)
+        .await
+        .unwrap();
+    assert_eq!(
+        records(&fx),
+        [
+            "ai-a0-1.call.json",
+            "ai-a0-1.err.txt",
+            "ai-a0-1.out.json",
+            "ai-a0-1.prompt.md"
+        ]
+    );
+    let mut beside: Vec<String> = fs::read_dir(fx.job_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    beside.sort();
+    assert_eq!(beside, ["ai", "job.json"]);
+}
