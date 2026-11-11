@@ -10,9 +10,9 @@ fn merged(original: &str, reply: &str) -> Merged {
 fn assert_guarantee(original: &str, text: &str) -> usize {
     let (a, b) = (keys(&units(original).units), keys(&units(text).units));
     assert_eq!(a.len(), b.len(), "{original} -> {text}");
-    let replaced = a.iter().zip(&b).filter(|(x, y)| x != y);
+    let replaced = (0..a.len()).filter(|&i| a[i] != b[i]);
     replaced
-        .inspect(|(x, y)| assert!(may_replace(**x, **y), "{x} -> {y} in {text}"))
+        .inspect(|&i| assert!(may_replace(a[i], &b, i), "{} -> {} in {text}", a[i], b[i]))
         .count()
 }
 
@@ -81,9 +81,12 @@ fn same_sounding_replacements_are_kept() {
         // Heteronyms: 的 reads de and di, 得 de and dei, 地 di and de.
         ("这块把控的还算不错", "这块把控得还算不错。"),
         ("毫不掩饰的开始砸钱", "毫不掩饰地开始砸钱，"),
-        // A numeral may come in for an ideograph that sounds the same.
+        // A numeral may come in for an ideograph that sounds the same where no number is next
+        // to it; any other ideograph may come in next to one.
         ("吃掉卖武当上面的大单即可", "吃掉卖五档上面的大单即可，"),
         ("他便以不低于卖溢价申买", "他便以不低于卖一价申买。"),
+        ("对比前是大流通股东", "对比前十大流通股东。"),
+        ("或买一架连续扫货", "或买一价连续扫货，"),
     ];
     for (original, reply) in cases {
         let got = merged(original, reply);
@@ -125,6 +128,16 @@ fn other_changes_are_put_back_and_punctuation_stays() {
         // The transcript's numerals and number words stay, even for one that sounds the same.
         ("涨了十一个点", "涨了十亿个点。", "涨了十一个点。"),
         ("穿了一件", "穿了衣件。", "穿了一件。"),
+        // Nor does a numeral come in next to a number, which it would change.
+        (
+            "一是因为二是避免监管",
+            "一是因为，二十避免监管。",
+            "一是因为，二是避免监管。",
+        ),
+        ("这是一个机会", "这十一个机会。", "这是一个机会。"),
+        ("涨了十义个点", "涨了十亿个点。", "涨了十义个点。"),
+        ("就是这样", "九十这样。", "就是这样。"),
+        ("指数涨到3前点", "指数涨到3千点。", "指数涨到3前点。"),
         // 半 stays and does not come in.
         ("涨了一半", "涨了一板。", "涨了一半。"),
         ("涨了一板", "涨了一半。", "涨了一板。"),
@@ -320,6 +333,7 @@ fn readings_decide_strictly_without_tones() {
 
 #[test]
 fn numerals_may_come_in_and_fixed_words_never_swap() {
+    let may_replace = |from: char, to: char| may_replace(from, &[to], 0);
     for (from, to) in [
         // Ideographs that sound alike, and a numeral for a word that sounds like it.
         ('复', '浮'),
@@ -356,6 +370,37 @@ fn numerals_may_come_in_and_fixed_words_never_swap() {
         // They sound the same: only the lists keep them apart.
         assert!(same_sound(from, to), "{from} {to}");
         assert!(!may_replace(from, to), "{from} -> {to}");
+    }
+}
+
+#[test]
+fn a_numeral_comes_in_only_away_from_numbers() {
+    // The reply's text, the unit of it in question, and what the original had there.
+    let may_replace = |from: char, text: &str, at: usize| {
+        let text: Vec<char> = text.chars().collect();
+        assert!(same_sound(from, text[at]), "{from} {}", text[at]);
+        may_replace(from, &text, at)
+    };
+    assert!(may_replace('武', "卖五档", 1));
+    assert!(may_replace('溢', "卖一价", 1));
+    assert!(may_replace('是', "前十大", 1));
+    // Any other ideograph may come in next to a number.
+    assert!(may_replace('架', "买一价", 2));
+    assert!(may_replace('架', "3价", 1));
+    for (from, text, at) in [
+        // A numeral on either side, or a digit of any script.
+        ('是', "二十避", 1),
+        ('是', "十一个", 0),
+        ('义', "十亿个", 1),
+        ('前', "3千点", 1),
+        ('前', "３千点", 1),
+        ('前', "〇千", 1),
+        ('完', "1万", 1),
+        // Both units of 就是 replaced: each touches the other.
+        ('就', "九十", 0),
+        ('是', "九十", 1),
+    ] {
+        assert!(!may_replace(from, text, at), "{from} -> {text}");
     }
 }
 

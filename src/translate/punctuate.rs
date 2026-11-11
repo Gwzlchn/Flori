@@ -49,8 +49,8 @@ const PAIRS: &[(char, char)] = &[
 ];
 
 /// Numerals and number words. A reply may bring one in for a same-sounding ideograph, as 五档 for
-/// 武当, but never replaces one: 十一 and 十亿 sound the same, and the transcript's numbers stay as
-/// they were heard.
+/// 武当, but never replaces one, and brings none in next to a number: 十一 and 十亿 sound the
+/// same, and the transcript's numbers stay as they were heard.
 const NUMERALS: &str = "零一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟兆廿卅仨俩幺";
 
 /// Ideographs a reply may neither replace nor bring in, though another sounds the same, because
@@ -165,11 +165,19 @@ fn same_sound(a: char, b: char) -> bool {
     }
 }
 
-/// Whether the reply's `to` may stand for the original's `from`: the two sound the same, `from`
-/// is no numeral, and neither is in [`FIXED`].
-fn may_replace(from: char, to: char) -> bool {
+/// Whether unit `at` of the reply's `text` may stand for the original's `from`: the two sound the
+/// same, `from` is no numeral, and neither is in [`FIXED`]. A numeral comes in only where no
+/// numeral or digit is next to it, as one there would change how much that number says: 二是
+/// would become 二十, 十义 十亿, and 就是, with both units replaced, 九十.
+fn may_replace(from: char, text: &[char], at: usize) -> bool {
+    let to = text[at];
     let fixed = |c: char| FIXED.contains(c);
-    same_sound(from, to) && !NUMERALS.contains(from) && !fixed(from) && !fixed(to)
+    let number = |i: Option<usize>| {
+        i.and_then(|i| text.get(i))
+            .is_some_and(|c| NUMERALS.contains(*c) || c.is_numeric())
+    };
+    let joins_number = NUMERALS.contains(to) && (number(at.checked_sub(1)) || number(Some(at + 1)));
+    same_sound(from, to) && !NUMERALS.contains(from) && !fixed(from) && !fixed(to) && !joins_number
 }
 
 /// A section's text built from its reply.
@@ -227,7 +235,7 @@ pub(super) fn merge(original: &str, reply: &str) -> Option<Merged> {
             break;
         }
         let pairs = || hunk.a.clone().zip(hunk.b.clone());
-        if hunk.a.len() == hunk.b.len() && pairs().all(|(x, y)| may_replace(a[x], b[y])) {
+        if hunk.a.len() == hunk.b.len() && pairs().all(|(x, y)| may_replace(a[x], &b, y)) {
             for (x, y) in pairs() {
                 (place[y], texts[x], want[x]) = (Some(x), theirs.units[y].text, b[y]);
             }
