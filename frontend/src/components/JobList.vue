@@ -58,6 +58,7 @@ function place(job: Schemas["JobSummary"]): string {
           <small class="meta">
             #{{ job.id }} · {{ platformText[job.platform] }} · {{ place(job) }} · {{ shortTime(job.created) }}
             <template v-if="job.status === 'running' && job.current_step"> · {{ stepText[job.current_step] }}</template>
+            <template v-if="job.status === 'failed' && job.current_step"> · 失败于{{ stepText[job.current_step] }}</template>
           </small>
         </a>
       </li>

@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { api, failure, fileUrl, isActive, jobStatusText, platformText, shortTime, stepStatusText, stepText, type Schemas } from "../client";
+import {
+  api, duration, failure, fileUrl, isActive, jobStatusText, platformText, seconds, shortTime, stepStatusText, stepText, type Schemas,
+} from "../client";
 import MarkdownView from "./MarkdownView.vue";
 
 const props = defineProps<{ id: number; domains: Schemas["Domain"][]; collections: Schemas["Collection"][] }>();
@@ -12,6 +14,8 @@ const fileText: Record<string, string> = {
   subtitle: "转写字幕", subtitle_zh: "中文字幕", ai_subtitle_zh: "B站 AI 字幕(中文)", ai_subtitle_en: "B站 AI 字幕(英文)",
   transcript_json: "转写数据", sections: "分节数据", page: "论文网页",
 };
+// The executor opens each attempt's part of job.log with this line (contract 1).
+const LOG_HEADER = /^== (\d{2}-[a-z-]+) attempt \d+ ==$/;
 const skipText: Record<string, string> = { chinese: "原文是中文,不需要翻译", unknown: "无法判断语言,未翻译", too_long: "篇幅过长,未翻译" };
 
 function punctuationText({ sections, kept_original: kept, corrected, reverted }: Schemas["Punctuation"]): string {
@@ -32,6 +36,8 @@ const busy = ref(false);
 const tab = ref("");
 // Job-relative path -> Markdown text; null when loading failed. Finished step files never change.
 const texts = ref(new Map<string, string | null>());
+// Wall clock of the last poll; running steps count up from their start with it.
+const now = ref(Date.now());
 let offset = 0;
 let polling = false;
 let timer: number | undefined;
@@ -47,6 +53,33 @@ const docs = computed(() => (detail.value?.files ?? [])
   .sort((a, b) => rank(a.name) - rank(b.name)));
 const current = computed(() => docs.value.find((file) => file.name === tab.value) ?? docs.value[0]);
 const video = computed(() => detail.value?.files.find((file) => file.name === "video"));
+// job.log by step directory name (`<nn>-<name>`); all attempts of a step, headers included.
+const stepLogs = computed(() => {
+  const parts = new Map<string, string[]>();
+  let key = "";
+  for (const line of log.value.split("\n")) {
+    key = LOG_HEADER.exec(line)?.[1] ?? key;
+    if (!key) continue;
+    if (!parts.has(key)) parts.set(key, []);
+    parts.get(key)?.push(line);
+  }
+  return new Map([...parts].map(([name, lines]) => [name, lines.join("\n").trimEnd()]));
+});
+const rows = computed(() => (detail.value?.steps ?? []).map((step) => {
+  const text = stepLogs.value.get(`${String(step.seq).padStart(2, "0")}-${step.name}`) ?? "";
+  const lines = text.split("\n").slice(1).filter((line) => line.trim() && !LOG_HEADER.test(line));
+  return {
+    step,
+    log: text,
+    last: lines.at(-1) ?? "",
+    // Pending steps have no start; a step between automatic retries stays running and keeps counting.
+    seconds: step.started && (step.finished || step.status === "running")
+      ? seconds(step.started, step.finished, now.value)
+      : undefined,
+  };
+}));
+const total = computed(() => rows.value.reduce((sum, row) => sum + (row.seconds ?? 0), 0));
+const failedStep = computed(() => detail.value?.steps.find((step) => step.status === "failed"));
 
 function rank(name: string): number {
   const index = docOrder.indexOf(name);
@@ -78,6 +111,7 @@ async function pullLog(): Promise<boolean> {
 async function loop(): Promise<void> {
   try {
     await Promise.all([refresh(), pullLog()]);
+    now.value = Date.now();
     if (missing.value || (job.value && !isActive(job.value.status))) {
       polling = false;
       let more = true;
@@ -136,6 +170,11 @@ onBeforeUnmount(() => {
           #{{ job.id }} · {{ platformText[job.platform] }} · {{ place }} · {{ shortTime(job.created) }}
           · {{ job.translate === "auto" ? "自动翻译" : "不翻译" }} · <a :href="job.url" target="_blank" rel="noopener">原始链接</a>
         </p>
+        <p v-if="total > 0 || failedStep" class="meta">
+          <template v-if="total > 0">各步共用时 {{ duration(total) }}</template>
+          <template v-if="total > 0 && failedStep"> · </template>
+          <span v-if="failedStep" class="danger">失败于{{ stepText[failedStep.name] }}</span>
+        </p>
         <p v-if="detail.vault_path" class="meta">已发布到 {{ detail.vault_path }}</p>
       </div>
       <div class="row">
@@ -162,8 +201,10 @@ onBeforeUnmount(() => {
           <MarkdownView v-else :source="texts.get(current.path) ?? ''" :base="detail.preview_base" :assets="detail.assets" />
         </section>
         <section class="card">
-          <h2>日志</h2>
-          <pre ref="logBox" class="log">{{ log || "暂无日志" }}</pre>
+          <details>
+            <summary class="fold">完整日志</summary>
+            <pre ref="logBox" class="log">{{ log || "暂无日志" }}</pre>
+          </details>
         </section>
       </div>
 
@@ -171,9 +212,10 @@ onBeforeUnmount(() => {
         <section class="card">
           <h2>步骤</h2>
           <ol class="steps">
-            <li v-for="step in detail.steps" :key="step.seq">
+            <li v-for="{ step, log: stepLog, last, seconds: spent } in rows" :key="step.seq">
               <div class="row">
                 <b class="grow">{{ stepText[step.name] }}</b>
+                <small v-if="spent !== undefined" class="meta">{{ duration(spent) }}</small>
                 <small v-if="step.attempts > 0" class="meta">尝试 {{ step.attempts }} 次</small>
                 <span v-if="step.exit_code === 30" class="pill state-failed">凭据失效</span>
                 <span class="pill" :class="`state-${step.status}`">{{ stepStatusText[step.status] }}</span>
@@ -181,6 +223,11 @@ onBeforeUnmount(() => {
               <p v-if="step.error" class="error">{{ step.error }}</p>
               <p v-if="step.skipped_reason" class="meta">{{ skipText[step.skipped_reason] ?? `已跳过:${step.skipped_reason}` }}</p>
               <p v-if="step.punctuation" class="meta">{{ punctuationText(step.punctuation) }}</p>
+              <p v-if="step.status === 'running' && last" class="meta tail">{{ last }}</p>
+              <details v-if="stepLog" class="step-log">
+                <summary class="meta">本步日志</summary>
+                <pre class="log">{{ stepLog }}</pre>
+              </details>
             </li>
           </ol>
         </section>

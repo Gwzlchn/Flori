@@ -80,6 +80,13 @@ input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var
 .tabs button { padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; cursor: pointer; font-weight: 600; white-space: nowrap; }
 .tabs button[aria-pressed="true"] { color: var(--brand-dark); border-color: var(--brand); }
 .log { max-height: 420px; margin: 0; padding: 10px; overflow: auto; border-radius: 5px; color: #e7e6e2; background: var(--ink); font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.fold { color: var(--ink); cursor: pointer; font-size: 16px; font-weight: 700; }
+details[open] > .fold { margin-bottom: 10px; }
+.step-log { margin-top: 4px; }
+.step-log summary { cursor: pointer; }
+.step-log .log { max-height: 320px; margin-top: 6px; }
+.tail { margin: 4px 0 0; overflow: hidden; font-family: var(--mono); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.danger { color: var(--danger); }
 .steps li, .files li, .collections li, .feed-items li { padding: 8px 0; border-top: 1px solid var(--line-soft); }
 .steps li:first-child, .files li:first-child { border-top: 0; }
 .files li { display: flex; gap: 8px; justify-content: space-between; }

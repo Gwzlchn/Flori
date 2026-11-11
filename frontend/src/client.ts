@@ -41,3 +41,16 @@ export function fileUrl(base: string, path: string): string {
 export function shortTime(rfc3339: string): string {
   return rfc3339.slice(0, 16).replace("T", " ");
 }
+
+// Whole seconds from `started` to `finished`, or to `now` (ms) while unfinished.
+export function seconds(started: string, finished: string | null | undefined, now: number): number {
+  const end = finished ? Date.parse(finished) : now;
+  return Math.max(0, Math.round((end - Date.parse(started)) / 1000));
+}
+
+export function duration(total: number): string {
+  if (total < 60) return `${total} 秒`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes} 分 ${total % 60} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+}
