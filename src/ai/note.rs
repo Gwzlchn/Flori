@@ -15,7 +15,7 @@ use std::{
 
 use tokio::process::Command;
 
-use super::{Env, INPUT_MARKER, Scratch, complete, inherited, media_type, until_terminated};
+use super::{Env, INPUT_MARKER, Image, Scratch, complete, inherited, media_type, until_terminated};
 use crate::pipeline::{self, Manifest, Pipeline, Section, StepName, StepResult};
 
 const NOTE_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -45,6 +45,8 @@ const SHRINK_TIMEOUT: Duration = Duration::from_secs(120);
 struct Picture {
     /// Name under the source step's `assets/`, which the note links.
     basename: String,
+    /// The asset itself, which the call record names.
+    asset: PathBuf,
     /// The file sent to the model: the asset itself or a shrunk copy.
     path: PathBuf,
     /// Its line in the image list: a time and section text, or a caption.
@@ -104,7 +106,13 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
         list.push('\n');
     }
     let prompt = format!("{prompt}\n{INPUT_MARKER}\n标题:{title}\n\n{list}{text}");
-    let images: Vec<PathBuf> = pictures.iter().map(|p| p.path.clone()).collect();
+    let images: Vec<Image> = pictures
+        .iter()
+        .map(|p| Image {
+            file: p.path.clone(),
+            shows: p.asset.clone(),
+        })
+        .collect();
     let reply = complete(
         env,
         job.ai.tool,
@@ -142,6 +150,7 @@ fn video_frames(sections: &[Section], dir: &Path) -> Vec<Picture> {
                     ms,
                     Picture {
                         basename: name.clone(),
+                        asset: path.clone(),
                         path,
                         label,
                     },
@@ -206,6 +215,7 @@ fn paper_figures(original: &str, dir: &Path) -> Vec<Picture> {
                     position,
                     Picture {
                         basename: name.to_owned(),
+                        asset: path.clone(),
                         path,
                         label,
                     },

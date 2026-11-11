@@ -155,6 +155,14 @@ pub(crate) fn job_spec(pipeline: Pipeline, tool: AiTool) -> JobSpec {
 
 const SECOND: Duration = Duration::from_secs(1);
 
+/// An image sent as it is, showing itself.
+fn image(path: &Path) -> Image {
+    Image {
+        file: path.to_owned(),
+        shows: path.to_owned(),
+    }
+}
+
 #[test]
 fn test_path_reaches_only_the_fakes() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
@@ -391,7 +399,7 @@ async fn images_go_with_the_prompt_to_both_tools() {
     let jpg = dir.path().join("frame-1000.JPG");
     fs::write(&png, image_bytes("png", 640, 480)).unwrap();
     fs::write(&jpg, image_bytes("jpg", 1280, 720)).unwrap();
-    let images = [png.clone(), jpg.clone()];
+    let images = [image(&png), image(&jpg)];
     let prompt = format!("x\n{INPUT_MARKER}\nhi");
 
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
@@ -443,7 +451,7 @@ async fn an_unsupported_image_is_refused_before_spawning() {
     let svg = dir.path().join("fig.svg");
     fs::write(&svg, "<svg/>").unwrap();
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    let result = complete(&fx.env(), AiTool::Claude, "m", "hi", &[svg], SECOND).await;
+    let result = complete(&fx.env(), AiTool::Claude, "m", "hi", &[image(&svg)], SECOND).await;
     assert_eq!(exit(result), StepExit::Permanent);
     assert!(fx.calls().is_empty());
 }
@@ -568,7 +576,7 @@ async fn the_media_type_follows_the_bytes() {
     fs::write(&mislabeled, image_bytes("jpg", 64, 64)).unwrap();
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
     let env = fx.env();
-    let images = [mislabeled];
+    let images = [image(&mislabeled)];
     complete(&env, AiTool::Claude, "m", "hi", &images, 20 * SECOND)
         .await
         .unwrap();

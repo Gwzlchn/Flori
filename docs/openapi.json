@@ -821,6 +821,40 @@
   },
   "components": {
     "schemas": {
+      "AiCall": {
+        "type": "object",
+        "description": "The record of one AI CLI call. Its files hold untrusted transcript and model text.",
+        "required": [
+          "name",
+          "attempt",
+          "index",
+          "files"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Job-relative paths, in this order where present: `.prompt.md`, `.call.json`,\n`.out.json` or `.out.txt`, `.err.txt`."
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Counts the attempt's calls from 1.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "`<step>-a<attempt>-<k>`."
+          }
+        }
+      },
       "ApiError": {
         "type": "object",
         "description": "Every non-2xx JSON body.",
@@ -1424,9 +1458,17 @@
           "status",
           "attempts",
           "meta",
-          "files"
+          "files",
+          "ai_calls"
         ],
         "properties": {
+          "ai_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AiCall"
+            },
+            "description": "The step's AI CLI calls over all attempts, oldest first, from `ai/` (contract 1)."
+          },
           "attempts": {
             "type": "integer",
             "format": "int32",

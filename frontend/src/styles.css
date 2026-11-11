@@ -90,6 +90,11 @@ details[open] > .fold { margin-bottom: 10px; }
 .chips, .step-files { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 6px; }
 .chip { padding: 1px 6px; border-radius: 4px; color: var(--muted); background: var(--line-soft); font-size: 12px; overflow-wrap: anywhere; }
 .step-files a { font-size: 12px; }
+.ai-call { margin: 6px 0 0 10px; }
+.ai-call summary { cursor: pointer; }
+.ai-file { margin-top: 6px; }
+.thumbs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.thumbs img { display: block; width: 72px; height: 54px; border-radius: 3px; object-fit: cover; background: var(--line-soft); }
 .steps li, .files li, .collections li, .feed-items li { padding: 8px 0; border-top: 1px solid var(--line-soft); }
 .steps li:first-child, .files li:first-child { border-top: 0; }
 .files li { display: flex; gap: 8px; justify-content: space-between; }

@@ -1035,9 +1035,11 @@ async fn cache_key_includes_the_prompt() {
     let job = pipeline::read_job(fx.job_dir()).unwrap();
     let part = [protect(&long_section(0), Pipeline::Video)];
     let (env, cache) = (with_cache(&fx), cache_dir(&fx));
-    ask_chunk(&env, &job, PROMPT, &cache, &part).await.unwrap();
+    ask_chunk(&env, &job, PROMPT, &cache, &part, "chunk 1/1")
+        .await
+        .unwrap();
     assert_eq!(fx.calls().len(), 2);
-    ask_chunk(&env, &job, punctuate::PROMPT, &cache, &part)
+    ask_chunk(&env, &job, punctuate::PROMPT, &cache, &part, "chunk 1/1")
         .await
         .unwrap();
     assert_eq!(fx.calls().len(), 2);
@@ -1078,6 +1080,59 @@ async fn invalid_reply_is_asked_again_once() {
     );
     assert_eq!(fx.calls().len(), 2);
     assert_eq!(fs::read_dir(cache_dir(&fx)).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn each_call_of_a_re_ask_is_recorded_and_cached_chunks_make_none() {
+    let fx = arxiv(&long_paper(1, Some((1, "FAKE_INVALID_ONCE"))));
+    let ai = fx.job_dir().join("ai");
+    let env = |attempt: &str| {
+        let mut env = with_cache(&fx);
+        env.push(("FLORI_AI_LOG_DIR".into(), ai.clone().into()));
+        env.push(("FLORI_STEP".into(), "translate".into()));
+        env.push(("FLORI_ATTEMPT".into(), attempt.into()));
+        env
+    };
+    let names = || {
+        let mut names: Vec<String> = fs::read_dir(&ai)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    let out = fx.out_dir("04-translate");
+    run_with(fx.job_dir(), &out, &env("1")).await.unwrap();
+    let first = names();
+    assert_eq!(
+        first,
+        [
+            "translate-a1-1.call.json",
+            "translate-a1-1.err.txt",
+            "translate-a1-1.out.json",
+            "translate-a1-1.prompt.md",
+            "translate-a1-2.call.json",
+            "translate-a1-2.err.txt",
+            "translate-a1-2.out.json",
+            "translate-a1-2.prompt.md",
+        ]
+    );
+    // The rejected reply is kept as the CLI printed it, and the re-ask carries the feedback.
+    let rejected = fs::read_to_string(ai.join("translate-a1-1.out.json")).unwrap();
+    assert!(rejected.contains(r#""result": "not json""#), "{rejected}");
+    let reask = fs::read_to_string(ai.join("translate-a1-2.prompt.md")).unwrap();
+    assert!(reask.contains(FEEDBACK_MARKER), "{reask}");
+    assert!(
+        !fs::read_to_string(ai.join("translate-a1-1.prompt.md"))
+            .unwrap()
+            .contains(FEEDBACK_MARKER)
+    );
+
+    // A manual retry finds the chunk cached: no call, no record.
+    let out = fx.out_dir("04-translate");
+    run_with(fx.job_dir(), &out, &env("2")).await.unwrap();
+    assert_eq!(fx.calls().len(), 2);
+    assert_eq!(names(), first);
 }
 
 #[tokio::test]

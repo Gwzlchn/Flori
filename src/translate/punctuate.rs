@@ -8,7 +8,7 @@ mod diff;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use crate::pipeline::Section;
+use crate::pipeline::{self, Section};
 
 pub(super) const PROMPT: &str = include_str!("../../prompts/punctuate.md");
 
@@ -184,10 +184,28 @@ fn may_replace(from: char, text: &[char], at: usize) -> bool {
 #[derive(Debug, PartialEq)]
 pub(super) struct Merged {
     pub text: String,
-    /// Runs of ideographs the reply replaced with same-sounding ones, kept.
-    pub corrected: usize,
-    /// Other runs the reply inserted, deleted or replaced, put back as transcribed.
-    pub reverted: usize,
+    /// Every run where the reply differs from the original, in order.
+    pub edits: Vec<Edit>,
+}
+
+/// A run where the reply differs from the original, as the units' text on both sides.
+#[derive(Debug, PartialEq)]
+pub(super) struct Edit {
+    /// Ideographs the reply replaced with same-sounding ones, kept. Otherwise the reply inserted,
+    /// deleted or replaced the run some other way and it went back as transcribed.
+    pub kept: bool,
+    pub before: String,
+    pub after: String,
+}
+
+impl Merged {
+    pub fn corrected(&self) -> usize {
+        self.edits.iter().filter(|e| e.kept).count()
+    }
+
+    pub fn reverted(&self) -> usize {
+        self.edits.iter().filter(|e| !e.kept).count()
+    }
 }
 
 /// The original's units with the reply's punctuation. None when the reply is no copy of this
@@ -219,7 +237,7 @@ pub(super) fn merge(original: &str, reply: &str) -> Option<Merged> {
     let mut want = a.clone();
     // place[j]: the unit of the result that unit j of the reply became, if it was not put back.
     let mut place: Vec<Option<usize>> = vec![None; m];
-    let (mut corrected, mut reverted) = (0, 0);
+    let mut edits = Vec::new();
     let end = diff::Hunk { a: n..n, b: m..m };
     let (mut i, mut j) = (0, 0);
     for hunk in hunks.iter().chain([&end]) {
@@ -235,14 +253,18 @@ pub(super) fn merge(original: &str, reply: &str) -> Option<Merged> {
             break;
         }
         let pairs = || hunk.a.clone().zip(hunk.b.clone());
-        if hunk.a.len() == hunk.b.len() && pairs().all(|(x, y)| may_replace(a[x], &b, y)) {
+        let kept = hunk.a.len() == hunk.b.len() && pairs().all(|(x, y)| may_replace(a[x], &b, y));
+        if kept {
             for (x, y) in pairs() {
                 (place[y], texts[x], want[x]) = (Some(x), theirs.units[y].text, b[y]);
             }
-            corrected += 1;
-        } else {
-            reverted += 1;
         }
+        let joined = |units: &[Unit]| units.iter().map(|u| u.text).collect();
+        edits.push(Edit {
+            kept,
+            before: joined(&ours.units[hunk.a.clone()]),
+            after: joined(&theirs.units[hunk.b.clone()]),
+        });
         (i, j) = (hunk.a.end, hunk.b.end);
     }
 
@@ -302,8 +324,7 @@ pub(super) fn merge(original: &str, reply: &str) -> Option<Merged> {
     }
     Some(Merged {
         text: render(&gaps),
-        corrected,
-        reverted,
+        edits,
     })
 }
 
@@ -314,6 +335,9 @@ pub(super) struct Tally {
     pub kept: usize,
     pub corrected: usize,
     pub reverted: usize,
+    /// For job.log: each section kept as transcribed and each edit with its section's time, the
+    /// record of what was taken from the AI.
+    pub log: Vec<String>,
 }
 
 /// The sections with their replies merged in. Replies belong to the sections with text, in
@@ -326,13 +350,26 @@ pub(super) fn apply(sections: &[Section], replies: Vec<String>) -> (Vec<Section>
             let mut section = section.clone();
             if section.has_text() {
                 let reply = replies.next().unwrap_or_default();
+                let at = pipeline::clock(section.start_ms);
                 match merge(&section.text, &reply) {
                     Some(merged) => {
+                        tally.corrected += merged.corrected();
+                        tally.reverted += merged.reverted();
+                        for edit in &merged.edits {
+                            let what = if edit.kept { "corrected" } else { "reverted" };
+                            let (before, after) = (&edit.before, &edit.after);
+                            tally
+                                .log
+                                .push(format!("[{at}] {what} {before:?} -> {after:?}"));
+                        }
                         section.text = merged.text;
-                        tally.corrected += merged.corrected;
-                        tally.reverted += merged.reverted;
                     }
-                    None => tally.kept += 1,
+                    None => {
+                        tally.kept += 1;
+                        tally.log.push(format!(
+                            "[{at}] kept as transcribed: the reply is no copy of it"
+                        ));
+                    }
                 }
             }
             section

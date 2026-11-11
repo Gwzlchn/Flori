@@ -10,6 +10,7 @@
 job_dir 只读:job.json、steps/<nn>-<name>/{manifest.json, 文件, assets/}
 out_dir steps/<nn>-<name>.tmp/,执行器建好的空目录;成功后原子 rename 为 steps/<nn>-<name>/;失败时整体删除,下次尝试重建
 cache   只有 translate 拿到 FLORI_CACHE_DIR=jobs/<id>/cache/translate/(可写,跨尝试保留)
+ai      note 与 translate 拿到 FLORI_AI_LOG_DIR=jobs/<id>/ai/(可写,跨尝试保留,只增不删),放每次 AI CLI 调用的记录,见"AI CLI 固定调用"
 日志   执行器把子进程 stdout/stderr 逐行追加到 jobs/<id>/job.log,每段以 `== <nn>-<name> attempt <n> ==` 开头,只追加不截断;步骤目录里不放日志
 env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATTEMPT,再加下表白名单
 退出码 0 成功,必须有 manifest.json,缺了按 20 处理;10 可重试;20 永久失败;30 凭据失效(处理同 20,UI 标注);其它退出码或信号按可重试处理
@@ -60,7 +61,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-fetch(bilibili) | FLORI_BILI_SESSDATA(服务端有值时才传);不带代理 |
 | video-transcribe | FLORI_WHISPER_MODEL、FLORI_STEPS_DIR |
 | publish | FLORI_VAULT_DIR=$DATA/vault |
-| note、translate | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY;CLAUDE_CODE_DISABLE_CLAUDE_MDS=1;DISABLE_AUTOUPDATER=1;DISABLE_UPDATES=1;CLAUDE_CODE_OAUTH_TOKEN(存在时);CODEX_HOME(tool=codex 时);translate 另加 FLORI_CACHE_DIR |
+| note、translate | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY;CLAUDE_CODE_DISABLE_CLAUDE_MDS=1;DISABLE_AUTOUPDATER=1;DISABLE_UPDATES=1;CLAUDE_CODE_OAUTH_TOKEN(存在时);CODEX_HOME(tool=codex 时);FLORI_AI_LOG_DIR;translate 另加 FLORI_CACHE_DIR |
 | feed.py(不是步骤,同样 env_clear) | FLORI_PROXY(只经 yt-dlp `--proxy` 使用,B站请求显式不走代理)、FLORI_BILI_SESSDATA |
 
 ### 步骤表
@@ -146,6 +147,11 @@ claude -p --model <必填> --tools "" --input-format stream-json --output-format
 - cwd:claude 是每次调用前清空重建的 `$HOME/ai-cwd`(固定目录,宿主 `~/.claude/projects` 下只多一项);codex 是每次新建的空目录。
 - 成功判据:stdout 的 stream-json 事件里 type=result 的那一条 is_error=false、subtype=success、result 非空,且退出码 0。退出码非 0 时也解析这条事件再分类。没有 result 事件时按 stderr、stdout 里不是 JSON 的行与各事件的 error 字段分类,stderr 在前;assistant 正文不参与分类。
 - 失败分类:凭据失效 → 30;限流和超时 → 10;其它 → 20。
+- 调用记录:有 FLORI_AI_LOG_DIR 时,每次启动 CLI 的调用在其中写 `<step>-a<attempt>-<k>.*`。step 与 attempt 取 FLORI_STEP、FLORI_ATTEMPT,k 是本次尝试里从 1 起第一个未被占用的号。
+  - 调用前写 prompt.md 与 call.json。prompt.md 是发出的文字原样,图片块写成 `<image 路径>`,claude 的 `[N]` 标签照写。call.json 有 tool、model、cli_version(取 job.json)、argv、images(每张图所示 job 文件的相对路径,送的是缩小副本时也写原图)与 started。
+  - 调用后补全 call.json:finished、duration_ms、timed_out、exit_code、signal、outcome(ok|failed)、error_class(auth|retry|permanent)与 error。stdout 原样写成 out.json(每个非空行都是 JSON 时)或 out.txt,stderr 末尾 16 KiB 写成 err.txt。不论回复之后能否通过校验都写;translate 带反馈的重问是另一次调用。
+  - 记录不含环境变量,所以没有令牌和代理口令。写失败只在 job.log 记一行,不影响步骤。没有启动 CLI 的调用(model 为空、图片被拒)不写;被 SIGTERM 中止的调用只留调用前的两个文件。
+  - translate 缓存命中的块不调用、不写记录,只在 job.log 记一行。加标点对采用的每处同音替换和还原的每处改动各记一行 `punctuate [MM:SS] corrected|reverted "原文" -> "回复"`,回复用不上、保留原文的节记 `kept as transcribed`;这是从 AI 回复里取用了什么的记录。
 - codex:`--ask-for-approval never exec --strict-config --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox read-only --ephemeral --color never --json [--image <file>]… --model M -c history.persistence="none" -c web_search="disabled" -C <空目录> --output-last-message <file> -`。`--image` 每张图一次,放在 `--model` 之前,因为它会吞掉后面的多个值。
 
 ## 契约 2:vault 布局与 frontmatter
@@ -195,7 +201,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | POST /api/collections/{id}/feed/jobs | {items:[{platform,source_id}], translate?};每批 1–20 条,超出 400 invalid_request;服务端校验 ID 并自己拼 URL;一个事务内插入;返回 {created, skipped},每项带 job |
 | POST /api/jobs | {url, domain_id, collection_id?, translate?};识别不了 400 invalid_url;领域或集合不存在 404;重复 409 conflict 并带 job_id;成功 201 |
 | GET /api/jobs?limit= | 按 id 倒序,默认 200 条;筛选在前端做 |
-| GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url;files 是各步 manifest.files 按 publish 规则合并的结果;每步带 meta(成功步骤的 manifest.meta 原样,其余为空对象)与 files(本步自己的 manifest.files,不受后续步骤覆盖,路径相对 job 目录),以及 manifest 的 skipped_reason,translate 给中文视频加了标点时另有 punctuation{sections, kept_original, corrected, reverted}(早于同音纠错的任务后两项为 0);obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
+| GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url;files 是各步 manifest.files 按 publish 规则合并的结果;每步带 meta(成功步骤的 manifest.meta 原样,其余为空对象)与 files(本步自己的 manifest.files,不受后续步骤覆盖,路径相对 job 目录),以及 manifest 的 skipped_reason,translate 给中文视频加了标点时另有 punctuation{sections, kept_original, corrected, reverted}(早于同音纠错的任务后两项为 0);每步另带 ai_calls[{name, attempt, index, files}],即 ai/ 里本步各次尝试的调用记录,按尝试与序号排序,files 是 job 内相对路径,按 prompt.md、call.json、out.json\|out.txt、err.txt 排列,失败的步骤也列出;记录里是不可信的转写与模型文字,前端只按纯文本显示,经 files 端点按需读取;obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB;单行超过上限时按字符边界切开)与 next_offset;offset 超出文件末尾 400 invalid_request;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
 | GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range;所有响应只带一个 `Content-Security-Policy: sandbox allow-same-origin; frame-ancestors 'none'` 与 `X-Content-Type-Options: nosniff`:外部 HTML 不能运行脚本或提交表单,它引用的图片仍按同源加载 |

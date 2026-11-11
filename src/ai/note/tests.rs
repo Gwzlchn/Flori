@@ -295,6 +295,7 @@ fn the_budget_keeps_an_even_share_of_positions() {
                 fs::write(&path, vec![0; *size]).unwrap();
                 Picture {
                     basename: format!("p{i}"),
+                    asset: path.clone(),
                     path,
                     label: String::new(),
                 }
@@ -474,6 +475,7 @@ fn image_references_are_linked_or_dropped() {
         .iter()
         .map(|name| Picture {
             basename: (*name).into(),
+            asset: Path::new("/tmp").join(name),
             path: Path::new("/tmp").join(name),
             label: String::new(),
         })

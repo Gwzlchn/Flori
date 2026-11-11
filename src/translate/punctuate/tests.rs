@@ -1,5 +1,13 @@
 use super::*;
 
+fn edit(kept: bool, before: &str, after: &str) -> Edit {
+    Edit {
+        kept,
+        before: before.into(),
+        after: after.into(),
+    }
+}
+
 /// The merged text when the reply was usable.
 fn merged(original: &str, reply: &str) -> Merged {
     merge(original, reply).unwrap_or_else(|| panic!("{original} -> {reply}: unusable"))
@@ -40,8 +48,7 @@ fn inserted_punctuation_passes() {
     for (original, reply) in cases {
         let want = Merged {
             text: reply.into(),
-            corrected: 0,
-            reverted: 0,
+            edits: Vec::new(),
         };
         assert_eq!(merge(original, reply), Some(want), "{reply}");
     }
@@ -90,8 +97,12 @@ fn same_sounding_replacements_are_kept() {
     ];
     for (original, reply) in cases {
         let got = merged(original, reply);
-        assert_eq!((got.text.as_str(), got.reverted), (reply, 0), "{original}");
-        assert_eq!(got.corrected, 1, "{original}");
+        assert_eq!(
+            (got.text.as_str(), got.reverted()),
+            (reply, 0),
+            "{original}"
+        );
+        assert_eq!(got.corrected(), 1, "{original}");
         assert!(assert_guarantee(original, &got.text) > 0);
     }
     // Two fixes and one put back in a section, with the punctuation around each in place.
@@ -103,8 +114,11 @@ fn same_sounding_replacements_are_kept() {
         got,
         Merged {
             text: "福建老哥等的就是这部分浮筹出清。到了14.33分，他先是小单持续推高股价，".into(),
-            corrected: 2,
-            reverted: 1,
+            edits: vec![
+                edit(true, "复仇", "浮筹"),
+                edit(false, ".", ":"),
+                edit(true, "丹", "单")
+            ],
         }
     );
 }
@@ -213,8 +227,8 @@ fn other_changes_are_put_back_and_punctuation_stays() {
     for (original, reply, want) in cases {
         let got = merged(original, reply);
         assert_eq!(got.text, want, "{original} -> {reply}");
-        assert_eq!(got.corrected, 0, "{original} -> {reply}");
-        assert!(got.reverted > 0, "{original} -> {reply}");
+        assert_eq!(got.corrected(), 0, "{original} -> {reply}");
+        assert!(got.reverted() > 0, "{original} -> {reply}");
         assert_eq!(assert_guarantee(original, &got.text), 0);
     }
 }
@@ -246,8 +260,8 @@ fn whatever_else_changes_the_original_content_survives() {
     ];
     for (original, reply) in cases {
         let got = merged(original, reply);
-        assert_eq!(got.corrected, 0, "{original} -> {reply}");
-        assert!(got.reverted > 0, "{original} -> {reply}");
+        assert_eq!(got.corrected(), 0, "{original} -> {reply}");
+        assert!(got.reverted() > 0, "{original} -> {reply}");
         assert_eq!(assert_guarantee(original, &got.text), 0, "{reply}");
     }
     // The reply's ellipsis would end the decimal point put back after it: the whole section
@@ -541,6 +555,13 @@ fn sections_take_their_merged_replies_and_are_counted() {
             kept: 1,
             corrected: 2,
             reverted: 1,
+            log: vec![
+                r#"[00:00] corrected "做装" -> "坐庄""#.into(),
+                r#"[01:00] corrected "扶赢" -> "浮盈""#.into(),
+                // Only the units that differ: 单 is the same on both sides.
+                r#"[01:00] reverted "菜" -> "拆""#.into(),
+                "[02:00] kept as transcribed: the reply is no copy of it".into(),
+            ],
         }
     );
     assert_eq!(

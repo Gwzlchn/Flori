@@ -307,6 +307,9 @@ pub struct StepInfo {
     /// steps win.
     #[sqlx(skip)]
     pub files: Vec<JobFile>,
+    /// The step's AI CLI calls over all attempts, oldest first, from `ai/` (contract 1).
+    #[sqlx(skip)]
+    pub ai_calls: Vec<AiCall>,
     pub started: Option<String>,
     pub finished: Option<String>,
 }
@@ -323,6 +326,19 @@ pub struct Punctuation {
     pub corrected: u32,
     /// Other changes of the AI, put back as transcribed, counted as runs.
     pub reverted: u32,
+}
+
+/// The record of one AI CLI call. Its files hold untrusted transcript and model text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AiCall {
+    /// `<step>-a<attempt>-<k>`.
+    pub name: String,
+    pub attempt: u32,
+    /// Counts the attempt's calls from 1.
+    pub index: u32,
+    /// Job-relative paths, in this order where present: `.prompt.md`, `.call.json`,
+    /// `.out.json` or `.out.txt`, `.err.txt`.
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

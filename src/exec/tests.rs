@@ -306,6 +306,7 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
         "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
         "DISABLE_AUTOUPDATER",
         "DISABLE_UPDATES",
+        "FLORI_AI_LOG_DIR",
         "HTTPS_PROXY",
         "HTTP_PROXY",
     ];
@@ -321,6 +322,12 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
         dir.join("cache/translate").display()
     )));
     assert!(translate.contains("LANG=C.UTF-8"));
+    for step in ["note", "translate"] {
+        let env = fs::read_to_string(dir.join(format!("fake/{step}.env"))).unwrap();
+        let ai_log = format!("FLORI_AI_LOG_DIR={}\n", dir.join("ai").display());
+        assert!(env.contains(&ai_log), "{step}: {env}");
+    }
+    assert!(dir.join("ai").is_dir());
 }
 
 #[tokio::test]

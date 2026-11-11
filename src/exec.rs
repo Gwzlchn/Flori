@@ -197,6 +197,10 @@ impl Inner {
                     fs::create_dir_all(&cache)?;
                     env.push(("FLORI_CACHE_DIR", cache.into()));
                 }
+                // Outside the step directory, so failed attempts keep their calls' records.
+                let ai_log = job_dir.join("ai");
+                fs::create_dir_all(&ai_log)?;
+                env.push(("FLORI_AI_LOG_DIR", ai_log.into()));
             }
             StepName::VideoFrames | StepName::ArxivFetch | StepName::ArxivConvert => {}
         }

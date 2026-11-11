@@ -217,6 +217,23 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description The record of one AI CLI call. Its files hold untrusted transcript and model text. */
+        AiCall: {
+            /** Format: int32 */
+            attempt: number;
+            /**
+             * @description Job-relative paths, in this order where present: `.prompt.md`, `.call.json`,
+             *     `.out.json` or `.out.txt`, `.err.txt`.
+             */
+            files: string[];
+            /**
+             * Format: int32
+             * @description Counts the attempt's calls from 1.
+             */
+            index: number;
+            /** @description `<step>-a<attempt>-<k>`. */
+            name: string;
+        };
         /** @description Every non-2xx JSON body. */
         ApiError: {
             code: components["schemas"]["ErrorCode"];
@@ -395,6 +412,8 @@ export interface components {
             url?: string | null;
         };
         StepInfo: {
+            /** @description The step's AI CLI calls over all attempts, oldest first, from `ai/` (contract 1). */
+            ai_calls: components["schemas"]["AiCall"][];
             /** Format: int32 */
             attempts: number;
             /** @description Last stderr line of the failed attempt. */

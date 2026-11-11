@@ -2,6 +2,7 @@
 //! step lives in `note`. The fixed CLI arguments are contract 1 "AI CLI 固定调用" in
 //! docs/contracts.md.
 
+mod audit;
 mod note;
 
 use std::{
@@ -81,6 +82,14 @@ pub fn inherited() -> Vec<(OsString, OsString)> {
     std::env::vars_os().collect()
 }
 
+/// An image for the model: the file the CLI reads, which may be a shrunk copy, and the job file
+/// it shows, which the call record names.
+#[derive(Debug, Clone)]
+pub struct Image {
+    pub file: PathBuf,
+    pub shows: PathBuf,
+}
+
 /// Runs an AI step until it finishes or the executor sends SIGTERM (cancel or step timeout).
 /// Dropping the step future drops the running CLI, whose `Group` guard kills its process group;
 /// without this the CLI, in its own group, would outlive the step and keep spending quota.
@@ -95,13 +104,14 @@ pub(crate) async fn until_terminated(step: impl Future<Output = StepResult>) -> 
 
 /// One single-turn completion without tools, with optional images (see [`media_type`]). The
 /// prompt goes to stdin and the CLI runs in an empty directory. Failures map to step exits:
-/// credentials 30, rate limit and timeout 10, anything else 20.
+/// credentials 30, rate limit and timeout 10, anything else 20. With FLORI_AI_LOG_DIR every call
+/// that starts the CLI leaves its record there (see `audit`).
 pub async fn complete(
     env: &Env,
     tool: AiTool,
     model: &str,
     prompt: &str,
-    images: &[PathBuf],
+    images: &[Image],
     timeout: Duration,
 ) -> Result<String, StepFailure> {
     // Without --model the CLI silently uses the host user's default model.
@@ -129,7 +139,7 @@ pub async fn complete(
             // `--image` takes several values, so each one is followed by another flag, never by
             // the final `-`.
             for image in images {
-                cmd.arg("--image").arg(image);
+                cmd.arg("--image").arg(&image.file);
             }
             cmd.args(["--model", model, "-c", "history.persistence=\"none\""])
                 .args(["-c", "web_search=\"disabled\"", "-C"])
@@ -143,44 +153,60 @@ pub async fn complete(
     cmd.current_dir(&cwd)
         .env_clear()
         .envs(env.iter().map(|(k, v)| (k, v)));
-    // One line per call in job.log: the only record of how many AI calls a job made.
+    // One line per call in job.log, also without FLORI_AI_LOG_DIR.
     eprintln!(
         "{name} --model {model}: {} prompt chars, {} images",
         prompt.chars().count(),
         images.len()
     );
+    let std = cmd.as_std();
+    let argv = std::iter::once(std.get_program())
+        .chain(std.get_args())
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let log = audit::CallLog::start(env, tool, model, argv, prompt, images);
     let started = Instant::now();
-    let run = run_cli(cmd, &input, timeout, TERM_GRACE)
-        .await
-        .map_err(|e| StepFailure::permanent(format!("{name}: {e}")))?;
-    let Some(status) = run.status else {
-        let secs = timeout.as_secs();
-        return Err(StepFailure::retry(format!(
-            "{name} timed out after {secs}s"
-        )));
+    let run = run_cli(cmd, &input, timeout, TERM_GRACE).await;
+    let result = match &run {
+        Err(e) => Err(StepFailure::permanent(format!("{name}: {e}"))),
+        Ok(Run { status: None, .. }) => Err(StepFailure::retry(format!(
+            "{name} timed out after {}s",
+            timeout.as_secs()
+        ))),
+        Ok(Run {
+            status: Some(status),
+            stdout,
+            stderr,
+        }) => match tool {
+            AiTool::Claude => claude_result(*status, stdout, stderr),
+            AiTool::Codex => codex_result(*status, stdout, stderr, &last_message),
+        },
     };
-    let result = match tool {
-        AiTool::Claude => claude_result(status, &run.stdout, &run.stderr),
-        AiTool::Codex => {
-            let text = fs::read_to_string(&last_message).unwrap_or_default();
-            if status.success() && !text.trim().is_empty() {
-                return Ok(text);
-            }
-            let detail = if status.success() {
-                "empty last message".to_owned()
-            } else {
-                codex_errors(&run.stdout)
-            };
-            Err(classify(
-                "codex",
-                status,
-                &format!("{detail} {}", run.stderr),
-            ))
-        }
-    };
+    if let Some(log) = log {
+        log.finish(run.as_ref().ok(), &result);
+    }
     let outcome = if result.is_ok() { "ok" } else { "failed" };
     eprintln!("{name} {outcome} after {}s", started.elapsed().as_secs());
     result
+}
+
+/// codex writes its reply to the last-message file; stdout only carries events.
+fn codex_result(
+    status: ExitStatus,
+    stdout: &str,
+    stderr: &str,
+    last_message: &std::path::Path,
+) -> Result<String, StepFailure> {
+    let text = fs::read_to_string(last_message).unwrap_or_default();
+    if status.success() && !text.trim().is_empty() {
+        return Ok(text);
+    }
+    let detail = if status.success() {
+        "empty last message".to_owned()
+    } else {
+        codex_errors(stdout)
+    };
+    Err(classify("codex", status, &format!("{detail} {stderr}")))
 }
 
 /// Media type of an image the AI CLIs accept, from its leading bytes; None for anything else,
@@ -202,9 +228,10 @@ pub(crate) fn media_type(head: &[u8]) -> Option<&'static str> {
 
 /// The single stream-json user message: the prompt, then each image as a base64 block behind a
 /// `[N]` text block, so the numbers the prompt uses sit next to their images.
-fn claude_message(prompt: &str, images: &[PathBuf]) -> Result<String, StepFailure> {
+fn claude_message(prompt: &str, images: &[Image]) -> Result<String, StepFailure> {
     let mut content = vec![json!({"type": "text", "text": prompt})];
-    for (i, path) in images.iter().enumerate() {
+    for (i, image) in images.iter().enumerate() {
+        let path = &image.file;
         let bytes = fs::read(path)?;
         let media_type = media_type(&bytes).ok_or_else(|| {
             StepFailure::permanent(format!("unsupported image {}", path.display()))

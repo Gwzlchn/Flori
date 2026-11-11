@@ -645,9 +645,50 @@ async fn detail_merges_manifests_and_builds_the_obsidian_link() {
     assert_eq!(job["id"], 1);
     wait_status(&app.state.db, 1, JobStatus::Succeeded).await;
 
+    // Call records as note and translate leave them, plus names that are no record.
+    let ai = app.job_dir(1).join("ai");
+    for name in [
+        "note-a1-1.err.txt",
+        "note-a1-1.out.json",
+        "note-a1-1.prompt.md",
+        "note-a1-1.call.json",
+        "note-a1-2.prompt.md",
+        "note-a2-10.call.json",
+        "note-a2-9.call.json",
+        "note-a2-9.out.txt.tmp",
+        "translate-a1-1.out.txt",
+        "note-ax-1.call.json",
+        "readme.txt",
+    ] {
+        fs::write(ai.join(name), "x").unwrap();
+    }
+
     let (status, detail) = app.get("/api/jobs/1").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["job"]["title"], "Talk");
+    let call = |name: &str, attempt: u32, index: u32, kinds: &[&str]| {
+        let files: Vec<String> = kinds.iter().map(|k| format!("ai/{name}.{k}")).collect();
+        json!({"name": name, "attempt": attempt, "index": index, "files": files})
+    };
+    assert_eq!(
+        detail["steps"][3]["ai_calls"],
+        json!([
+            call(
+                "note-a1-1",
+                1,
+                1,
+                &["prompt.md", "call.json", "out.json", "err.txt"]
+            ),
+            call("note-a1-2", 1, 2, &["prompt.md"]),
+            call("note-a2-9", 2, 9, &["call.json"]),
+            call("note-a2-10", 2, 10, &["call.json"]),
+        ])
+    );
+    assert_eq!(
+        detail["steps"][4]["ai_calls"],
+        json!([call("translate-a1-1", 1, 1, &["out.txt"])])
+    );
+    assert_eq!(detail["steps"][0]["ai_calls"], json!([]));
     assert_eq!(
         detail["files"],
         json!([
@@ -736,6 +777,26 @@ async fn a_punctuated_chinese_video_says_so_on_its_translate_step() {
     assert_eq!(
         detail["steps"][4]["punctuation"],
         json!({"sections": 62, "kept_original": 3, "corrected": 0, "reverted": 0})
+    );
+}
+
+#[tokio::test]
+async fn a_failed_step_still_lists_its_ai_calls() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    fake(&app.state.config, 1, "note", "20");
+    app.post(
+        "/api/jobs",
+        json!({"url": "https://youtu.be/dQw4w9WgXcQ", "domain_id": ml}),
+    )
+    .await;
+    wait_status(&app.state.db, 1, JobStatus::Failed).await;
+    fs::write(app.job_dir(1).join("ai/note-a1-1.call.json"), "{}").unwrap();
+    let (_, detail) = app.get("/api/jobs/1").await;
+    assert_eq!(detail["steps"][3]["status"], "failed");
+    assert_eq!(
+        detail["steps"][3]["ai_calls"][0]["files"],
+        json!(["ai/note-a1-1.call.json"])
     );
 }
 

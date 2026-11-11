@@ -135,6 +135,9 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
     } else if punctuate {
         let replies = ask_all(env, &job, punctuate::PROMPT, &segments, &chunks).await?;
         let (punctuated, tally) = punctuate::apply(&sections, replies);
+        for line in &tally.log {
+            eprintln!("punctuate {line}");
+        }
         let file = "transcript.md";
         fs::write(
             out_dir.join(file),
@@ -216,10 +219,11 @@ async fn ask_all(
     let mut replies = Vec::with_capacity(segments.len());
     for (i, range) in chunks.iter().enumerate() {
         let part = &segments[range.clone()];
-        let texts = ask_chunk(env, job, prompt, &cache, part)
+        let label = format!("chunk {}/{}", i + 1, chunks.len());
+        let texts = ask_chunk(env, job, prompt, &cache, part, &label)
             .await
             .map_err(|mut failure| {
-                failure.message = format!("chunk {}/{}: {}", i + 1, chunks.len(), failure.message);
+                failure.message = format!("{label}: {}", failure.message);
                 failure
             })?;
         replies.extend(part.iter().zip(texts).map(|(seg, text)| seg.restore(&text)));
@@ -239,13 +243,15 @@ struct Item {
 }
 
 /// Reply texts of one chunk, still holding placeholders. Valid replies are cached under
-/// sha256(prompt, model, payload), so a retry only calls the AI for chunks not yet cached.
+/// sha256(prompt, model, payload), so a retry only calls the AI for chunks not yet cached; a
+/// cached chunk leaves a line in job.log instead of a call record.
 async fn ask_chunk(
     env: &Env,
     job: &JobSpec,
     prompt: &str,
     cache: &Path,
     part: &[Segment],
+    label: &str,
 ) -> Result<Vec<String>, StepFailure> {
     let payload = to_payload(part.iter().map(|seg| seg.text.as_str()));
     let model = &job.ai.model_translate;
@@ -260,6 +266,7 @@ async fn ask_chunk(
         .ok()
         .and_then(|t| check(&t, part).ok())
     {
+        eprintln!("{label}: cached reply {}, no AI call", &key[..12]);
         return Ok(texts);
     }
     let ask = |feedback: String| format!("{prompt}\n{feedback}{INPUT_MARKER}\n{payload}");

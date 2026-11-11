@@ -18,6 +18,9 @@ const fileText: Record<string, string> = {
 const LOG_HEADER = /^== (\d{2}-[a-z-]+) attempt \d+ ==$/;
 const skipText: Record<string, string> = { chinese: "原文是中文,不需要翻译", unknown: "无法判断语言,未翻译", too_long: "篇幅过长,未翻译" };
 
+const callFileText: Record<string, string> = {
+  "prompt.md": "发出的 prompt", "call.json": "调用信息", "out.json": "原始输出", "out.txt": "原始输出", "err.txt": "stderr 末尾",
+};
 const transcriptSource: Record<string, string> = { manual: "人工字幕", ai: "B站 AI 字幕" };
 const htmlSource: Record<string, string> = { arxiv: "arXiv 官方 HTML", ar5iv: "ar5iv" };
 const translationSource: Record<string, string> = { ai: "AI 翻译", subtitle: "中文人工字幕" };
@@ -68,6 +71,10 @@ const busy = ref(false);
 const tab = ref("");
 // Job-relative path -> Markdown text; null when loading failed. Finished step files never change.
 const texts = ref(new Map<string, string | null>());
+// AI call records by job-relative path; null when loading failed. They hold untrusted transcript
+// and model text, so they are only ever shown as plain text. Fetched on every open: a running
+// call's info is completed when it ends.
+const callTexts = ref(new Map<string, string | null>());
 // Wall clock of the last poll; running steps count up from their start with it.
 const now = ref(Date.now());
 let offset = 0;
@@ -184,6 +191,39 @@ async function load(path: string): Promise<void> {
   texts.value.set(path, response.ok ? await response.text() : null);
 }
 
+async function openCall(call: Schemas["AiCall"], event: Event): Promise<void> {
+  const base = detail.value?.preview_base;
+  if (!base || !(event.target as HTMLDetailsElement).open) return;
+  await Promise.all(call.files.map(async (path) => {
+    try {
+      const response = await fetch(fileUrl(base, path));
+      callTexts.value.set(path, response.ok ? await response.text() : null);
+    } catch {
+      callTexts.value.set(path, null);
+    }
+  }));
+}
+
+function callFileKind(path: string): string {
+  const name = path.split("/").pop() ?? path;
+  const kind = name.slice(name.indexOf(".") + 1);
+  return callFileText[kind] ?? kind;
+}
+
+// The job files a call sent as images, from its call.json; only plain job-relative paths.
+function sentImages(path: string): string[] {
+  const text = callTexts.value.get(path);
+  if (!path.endsWith(".call.json") || !text) return [];
+  try {
+    const images: unknown = (JSON.parse(text) as { images?: unknown }).images;
+    if (!Array.isArray(images)) return [];
+    return images.filter((image): image is string =>
+      typeof image === "string" && !image.startsWith("/") && !image.split("/").includes(".."));
+  } catch {
+    return [];
+  }
+}
+
 watch(() => current.value?.path, (path) => { if (path) void load(path).catch(() => texts.value.set(path, null)); });
 onMounted(watchJob);
 onBeforeUnmount(() => {
@@ -268,6 +308,26 @@ onBeforeUnmount(() => {
               <details v-if="stepLog" class="step-log">
                 <summary class="meta">本步日志</summary>
                 <pre class="log">{{ stepLog }}</pre>
+              </details>
+              <details v-if="step.ai_calls.length" class="step-log">
+                <summary class="meta">AI 调用 {{ step.ai_calls.length }} 次</summary>
+                <details v-for="call in step.ai_calls" :key="call.name" class="ai-call" @toggle="openCall(call, $event)">
+                  <summary class="meta">第 {{ call.attempt }} 次尝试 · 第 {{ call.index }} 次调用</summary>
+                  <div v-for="path in call.files" :key="path" class="ai-file">
+                    <div class="row">
+                      <small class="meta grow">{{ callFileKind(path) }}</small>
+                      <a class="meta" :href="fileUrl(detail.preview_base, path)" target="_blank" rel="noopener">原文件</a>
+                    </div>
+                    <p v-if="!callTexts.has(path)" class="meta">加载中…</p>
+                    <p v-else-if="callTexts.get(path) === null" class="error">加载失败。</p>
+                    <pre v-else class="log">{{ callTexts.get(path) || "(空)" }}</pre>
+                    <div v-if="sentImages(path).length" class="thumbs">
+                      <a v-for="image in sentImages(path)" :key="image" :href="fileUrl(detail.preview_base, image)" target="_blank" rel="noopener">
+                        <img :src="fileUrl(detail.preview_base, image)" :alt="image" loading="lazy">
+                      </a>
+                    </div>
+                  </div>
+                </details>
               </details>
             </li>
           </ol>

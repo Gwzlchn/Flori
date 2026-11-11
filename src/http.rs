@@ -40,9 +40,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::{
     Config,
     api::{
-        ApiError, Collection, Domain, ErrorCode, FeedList, FeedPicked, FeedQuery, FeedSubmit,
-        FeedSubmitResult, Health, JobDetail, JobFile, JobRef, JobSummary, JobsQuery, LogChunk,
-        LogQuery, NewCollection, NewDomain, Punctuation, SetFeed, StepStatus, SubmitJob,
+        AiCall, ApiError, Collection, Domain, ErrorCode, FeedList, FeedPicked, FeedQuery,
+        FeedSubmit, FeedSubmitResult, Health, JobDetail, JobFile, JobRef, JobSummary, JobsQuery,
+        LogChunk, LogQuery, NewCollection, NewDomain, Punctuation, SetFeed, StepStatus, SubmitJob,
     },
     db::{self, conflict, job_dir, not_found},
     exec::{self, ExecHandle, Stop},
@@ -673,8 +673,10 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
     let mut steps = db::steps(&s.db, id).await?;
     let dir = job_dir(&s.config.data_dir, id);
     let (mut files, mut assets, mut note_file) = (BTreeMap::new(), BTreeMap::new(), None);
+    let mut calls = ai_calls(&dir);
     // Same merge as publish: in step order, later steps win.
     for step in &mut steps {
+        step.ai_calls = calls.remove(step.name.as_str()).unwrap_or_default();
         if step.status != StepStatus::Succeeded {
             continue;
         }
@@ -741,6 +743,48 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
         job_url: format!("{}/jobs/{id}", s.config.public_url),
         job,
     }))
+}
+
+/// The suffixes of one AI call's files, in the order the API lists them.
+const AI_CALL_FILES: [&str; 5] = ["prompt.md", "call.json", "out.json", "out.txt", "err.txt"];
+
+/// The call records in the job's `ai/`, by step name, oldest first. One directory listing; files
+/// still being written (`.tmp`) and names that are no record are left out.
+fn ai_calls(job_dir: &std::path::Path) -> BTreeMap<String, Vec<AiCall>> {
+    let mut found: BTreeMap<(String, u32, u32), AiCall> = BTreeMap::new();
+    for entry in std::fs::read_dir(job_dir.join("ai"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let Some((stem, kind)) = file.split_once('.') else {
+            continue;
+        };
+        let parsed = stem.rsplit_once('-').and_then(|(head, index)| {
+            let (step, attempt) = head.rsplit_once("-a")?;
+            Some((step, attempt.parse().ok()?, index.parse().ok()?))
+        });
+        let Some((step, attempt, index)) = parsed.filter(|_| AI_CALL_FILES.contains(&kind)) else {
+            continue;
+        };
+        let call = found
+            .entry((step.to_owned(), attempt, index))
+            .or_insert_with(|| AiCall {
+                name: stem.to_owned(),
+                attempt,
+                index,
+                files: Vec::new(),
+            });
+        call.files.push(format!("ai/{file}"));
+    }
+    let mut by_step: BTreeMap<String, Vec<AiCall>> = BTreeMap::new();
+    for ((step, _, _), mut call) in found {
+        let rank = |path: &String| AI_CALL_FILES.iter().position(|kind| path.ends_with(kind));
+        call.files.sort_by_key(rank);
+        by_step.entry(step).or_default().push(call);
+    }
+    by_step
 }
 
 /// Percent-encodes everything outside RFC 3986 unreserved characters.
