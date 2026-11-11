@@ -6,13 +6,13 @@ fn merged(original: &str, reply: &str) -> Merged {
 }
 
 /// The guarantee, checked on its own: without punctuation and whitespace, `text` is `original`
-/// but for single ideographs replaced by same-sounding ones. Returns how many were replaced.
+/// but for single ideographs replaced as [`may_replace`] allows. Returns how many were replaced.
 fn assert_guarantee(original: &str, text: &str) -> usize {
     let (a, b) = (keys(&units(original).units), keys(&units(text).units));
     assert_eq!(a.len(), b.len(), "{original} -> {text}");
     let replaced = a.iter().zip(&b).filter(|(x, y)| x != y);
     replaced
-        .inspect(|(x, y)| assert!(same_sound(**x, **y), "{x} -> {y} in {text}"))
+        .inspect(|(x, y)| assert!(may_replace(**x, **y), "{x} -> {y} in {text}"))
         .count()
 }
 
@@ -81,6 +81,9 @@ fn same_sounding_replacements_are_kept() {
         // Heteronyms: 的 reads de and di, 得 de and dei, 地 di and de.
         ("这块把控的还算不错", "这块把控得还算不错。"),
         ("毫不掩饰的开始砸钱", "毫不掩饰地开始砸钱，"),
+        // A numeral may come in for an ideograph that sounds the same.
+        ("吃掉卖武当上面的大单即可", "吃掉卖五档上面的大单即可，"),
+        ("他便以不低于卖溢价申买", "他便以不低于卖一价申买。"),
     ];
     for (original, reply) in cases {
         let got = merged(original, reply);
@@ -119,13 +122,18 @@ fn other_changes_are_put_back_and_punctuation_stays() {
             "2017年，股灾修复期间。",
         ),
         ("到了14.33分", "到了14:33分。", "到了14.33分。"),
-        // A numeral is a digit even when it sounds the same, and so is a number word.
+        // The transcript's numerals and number words stay, even for one that sounds the same.
         ("涨了十一个点", "涨了十亿个点。", "涨了十一个点。"),
+        ("穿了一件", "穿了衣件。", "穿了一件。"),
+        // 半 stays and does not come in.
         ("涨了一半", "涨了一板。", "涨了一半。"),
-        // A negation stays and does not come in, and 买 does not become 卖.
+        ("涨了一板", "涨了一半。", "涨了一板。"),
+        // A negation stays and does not come in, and 买 and 卖 do not swap.
         ("公司今年不分红", "公司今年部分红。", "公司今年不分红。"),
+        ("超出订单不量级", "超出订单簿量级，", "超出订单不量级，"),
         ("这个布太好", "这个不太好。", "这个布太好。"),
         ("他今天买了", "他今天卖了。", "他今天买了。"),
+        ("他今天卖了", "他今天买了。", "他今天卖了。"),
         // An inserted word; the mark before it stays where it was.
         ("今天聊股市", "今天，我们聊股市。", "今天，聊股市。"),
         ("今天聊股市", "今天聊股市吧。", "今天聊股市。"),
@@ -287,34 +295,76 @@ fn readings_decide_strictly_without_tones() {
         ('肯', '根'),
         ('盘', '庞'),
         ('林', '宁'),
-        // Numerals and number words, negations and 买卖, letters, digits and marks are never
-        // ideographs that sound alike.
-        ('一', '亿'),
-        ('十', '是'),
-        ('〇', '零'),
-        ('半', '板'),
-        ('兆', '照'),
-        ('不', '布'),
-        ('不', '复'),
-        ('没', '美'),
-        ('未', '为'),
-        ('买', '卖'),
+        // Letters, digits and marks are no ideographs that sound alike.
         ('a', 'a'),
         ('3', '3'),
         ('。', '。'),
-        // Historical readings do not count: 沈 once read chen, 才 zai, 大 tai, 有 wei, 个 gan.
+        // Historical readings do not count: 沈 once read chen, 才 zai, 大 tai, 有 wei, 个 gan,
+        // 不 fu.
         ('沈', '陈'),
         ('在', '才'),
         ('大', '太'),
         ('有', '为'),
         ('个', '干'),
-        // Characters outside the modern table: traditional ones, and private-use characters of
-        // old GB fonts that other pinyin tables read.
+        ('不', '复'),
+        // Characters outside the modern table: traditional ones, 〇, and private-use characters
+        // of old GB fonts that other pinyin tables read.
         ('來', '来'),
+        ('萬', '万'),
+        ('〇', '零'),
         ('\u{E815}', '\u{E815}'),
     ] {
         assert!(!same_sound(a, b) && !same_sound(b, a), "{a} {b}");
     }
+}
+
+#[test]
+fn numerals_may_come_in_and_fixed_words_never_swap() {
+    for (from, to) in [
+        // Ideographs that sound alike, and a numeral for a word that sounds like it.
+        ('复', '浮'),
+        ('武', '五'),
+        ('溢', '一'),
+        ('是', '十'),
+        ('照', '兆'),
+        ('量', '两'),
+        ('碗', '万'),
+    ] {
+        assert!(may_replace(from, to), "{from} -> {to}");
+    }
+    for (from, to) in [
+        // An original numeral never goes, for a word or another numeral.
+        ('五', '武'),
+        ('一', '衣'),
+        ('一', '亿'),
+        ('十', '是'),
+        ('兆', '照'),
+        // 半, negations and 买卖 neither go nor come.
+        ('半', '板'),
+        ('板', '半'),
+        ('不', '簿'),
+        ('布', '不'),
+        ('不', '部'),
+        ('部', '不'),
+        ('没', '美'),
+        ('美', '没'),
+        ('未', '为'),
+        ('为', '未'),
+        ('买', '卖'),
+        ('卖', '买'),
+    ] {
+        // They sound the same: only the lists keep them apart.
+        assert!(same_sound(from, to), "{from} {to}");
+        assert!(!may_replace(from, to), "{from} -> {to}");
+    }
+}
+
+#[test]
+fn listed_characters_are_in_the_reading_table() {
+    // One outside it can never match, so listing it would do nothing.
+    let listed = NUMERALS.chars().chain(FIXED.chars());
+    let missing: String = listed.filter(|c| !READINGS.contains_key(c)).collect();
+    assert_eq!(missing, "");
 }
 
 #[test]

@@ -48,11 +48,15 @@ const PAIRS: &[(char, char)] = &[
     ('〔', '〕'),
 ];
 
+/// Numerals and number words. A reply may bring one in for a same-sounding ideograph, as 五档 for
+/// 武当, but never replaces one: 十一 and 十亿 sound the same, and the transcript's numbers stay as
+/// they were heard.
+const NUMERALS: &str = "零一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟兆廿卅仨俩幺";
+
 /// Ideographs a reply may neither replace nor bring in, though another sounds the same, because
-/// the swap changes what is said: numerals and other number words, as 十一 and 十亿 sound the
-/// same; negations, as 不 and 部 do; and 买 and 卖, which differ only in tone.
-const FIXED: &str = "〇零一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟萬億兩半兆廿卅仨俩幺\
-                     不没沒无無非未别別莫勿否毋甭买卖買賣";
+/// the swap changes what is said: 半, as 一半 and 一板 sound the same; negations, as 不 and 部 do;
+/// and 买 and 卖, which differ only in tone.
+const FIXED: &str = "半不没无非未别莫勿否毋甭买卖";
 
 /// One unit of what punctuation and whitespace may not change.
 #[derive(Debug, Clone, Copy)]
@@ -153,13 +157,19 @@ fn toneless(reading: &str) -> String {
 
 /// Two ideographs that share a modern reading, tones aside: any reading of a heteronym counts,
 /// and initials and finals must match exactly (c is not ch, n is not l). Characters outside
-/// [`READINGS`], traditional ones among them, and [`FIXED`] never match.
+/// [`READINGS`], traditional ones and 〇 among them, never match.
 fn same_sound(a: char, b: char) -> bool {
-    let readings = |c: char| READINGS.get(&c).filter(|_| !FIXED.contains(c));
-    match (readings(a), readings(b)) {
+    match (READINGS.get(&a), READINGS.get(&b)) {
         (Some(a), Some(b)) => a.iter().any(|r| b.contains(r)),
         _ => false,
     }
+}
+
+/// Whether the reply's `to` may stand for the original's `from`: the two sound the same, `from`
+/// is no numeral, and neither is in [`FIXED`].
+fn may_replace(from: char, to: char) -> bool {
+    let fixed = |c: char| FIXED.contains(c);
+    same_sound(from, to) && !NUMERALS.contains(from) && !fixed(from) && !fixed(to)
 }
 
 /// A section's text built from its reply.
@@ -178,8 +188,8 @@ pub(super) struct Merged {
 /// the reply's own marks between kept units would change how a number reads.
 ///
 /// Where the two differ, a run of the reply replaces the original's only when both are the same
-/// length and every pair of units is two ideographs that sound the same; any other run goes back
-/// to the original, a break the reply added with its marks. A gap between two units that stay
+/// length and [`may_replace`] allows every pair of units; any other run goes back to the
+/// original, a break the reply added with its marks. A gap between two units that stay
 /// neighbours goes between them; one that touches a run put back goes to the end of that run, or
 /// after the unit before it when that unit stays and the unit after it does not. A gap that
 /// would change how a number or word reads is dropped. Where gaps moved to one place meet, an
@@ -217,7 +227,7 @@ pub(super) fn merge(original: &str, reply: &str) -> Option<Merged> {
             break;
         }
         let pairs = || hunk.a.clone().zip(hunk.b.clone());
-        if hunk.a.len() == hunk.b.len() && pairs().all(|(x, y)| same_sound(a[x], b[y])) {
+        if hunk.a.len() == hunk.b.len() && pairs().all(|(x, y)| may_replace(a[x], b[y])) {
             for (x, y) in pairs() {
                 (place[y], texts[x], want[x]) = (Some(x), theirs.units[y].text, b[y]);
             }
