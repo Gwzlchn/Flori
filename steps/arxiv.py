@@ -110,7 +110,8 @@ def api_meta(arxiv_id: str, get) -> dict:
         raise StepError(PERMANENT, f"arXiv API 不认识 {arxiv_id}")
     version = re.search(r"v(\d+)$", entry_id)
     # published is the first version's date; the category is the one arXiv lists the paper under.
-    published = re.match(r"\d{4}-\d{2}-\d{2}", entry.findtext("a:published", "", ATOM).strip())
+    # [0-9], not \d, which also takes other scripts' digits.
+    published = re.match(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", entry.findtext("a:published", "", ATOM).strip())
     category = entry.find("arxiv:primary_category", ATOM)
     category = (category.get("term") or "").strip() if category is not None else ""
     return {

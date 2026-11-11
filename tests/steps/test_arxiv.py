@@ -222,15 +222,17 @@ class FetchConvertTest(unittest.TestCase):
                 self.assertEqual(arxiv.fetch(job, job / "steps/01-arxiv-fetch", web), 0)
                 self.assertEqual(manifest(job / "steps/01-arxiv-fetch")["meta"].get("version"), expected)
 
-        with self.subTest("no date or category"):
-            api = re.sub(r"<published>.*</published>|<arxiv:primary_category [^>]*/>", "", atom)
-            api = api.replace("<author>", "<published>soon</published><author>", 1).encode()
-            web = FakeWeb({page: ok(page, "2305.18290.html"), API + "2305.18290": (200, "", api)})
-            job = make_job(pathlib.Path(tempfile.mkdtemp(dir=self.root)), "2305.18290")
-            self.assertEqual(arxiv.fetch(job, job / "steps/01-arxiv-fetch", web), 0)
-            meta = manifest(job / "steps/01-arxiv-fetch")["meta"]
-            self.assertNotIn("published", meta)
-            self.assertNotIn("primary_category", meta)
+        # Arabic-Indic digits are digits to \d but no YYYY-MM-DD.
+        for published in ("soon", "٢٠٢٣-٠٥-٢٩T17:59:27Z"):
+            with self.subTest("no date or category", published=published):
+                api = re.sub(r"<published>.*</published>|<arxiv:primary_category [^>]*/>", "", atom)
+                api = api.replace("<author>", f"<published>{published}</published><author>", 1).encode()
+                web = FakeWeb({page: ok(page, "2305.18290.html"), API + "2305.18290": (200, "", api)})
+                job = make_job(pathlib.Path(tempfile.mkdtemp(dir=self.root)), "2305.18290")
+                self.assertEqual(arxiv.fetch(job, job / "steps/01-arxiv-fetch", web), 0)
+                meta = manifest(job / "steps/01-arxiv-fetch")["meta"]
+                self.assertNotIn("published", meta)
+                self.assertNotIn("primary_category", meta)
 
     def test_http_get_maps_server_errors_to_retry(self) -> None:
         error = urllib.error.HTTPError("https://arxiv.org/html/x", 503, "busy", {}, None)
