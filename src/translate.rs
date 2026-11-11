@@ -41,7 +41,10 @@ fn detect<'a>(texts: impl IntoIterator<Item = &'a str>) -> &'static str {
     let (mut han, mut kana, mut hangul, mut latin, mut other) = (0usize, 0, 0, 0, 0);
     for c in texts.into_iter().flat_map(str::chars).take(DETECT_CHARS) {
         match c {
-            c if is_han(c) => han += 1,
+            '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{3134F}' => han += 1,
             '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => {
                 kana += 1
             }
@@ -71,18 +74,6 @@ fn detect<'a>(texts: impl IntoIterator<Item = &'a str>) -> &'static str {
     } else {
         "other"
     }
-}
-
-/// CJK ideographs: the unified block, extension A, the compatibility block, and planes 2 and 3
-/// up to extension G.
-fn is_han(c: char) -> bool {
-    matches!(
-        c,
-        '\u{3400}'..='\u{4DBF}'
-            | '\u{4E00}'..='\u{9FFF}'
-            | '\u{F900}'..='\u{FAFF}'
-            | '\u{20000}'..='\u{3134F}'
-    )
 }
 
 pub async fn run(job_dir: &Path, out_dir: &Path) -> StepResult {

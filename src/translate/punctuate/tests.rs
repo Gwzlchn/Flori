@@ -81,8 +81,6 @@ fn same_sounding_replacements_are_kept() {
         // Heteronyms: 的 reads de and di, 得 de and dei, 地 di and de.
         ("这块把控的还算不错", "这块把控得还算不错。"),
         ("毫不掩饰的开始砸钱", "毫不掩饰地开始砸钱，"),
-        // Traditional to simplified sounds the same as well.
-        ("一起來看看", "一起来看看。"),
     ];
     for (original, reply) in cases {
         let got = merged(original, reply);
@@ -271,11 +269,10 @@ fn readings_decide_strictly_without_tones() {
         ('店', '垫'),
         ('神', '沈'),
         ('股', '鼓'),
-        // Any reading of a heteronym: 单 also reads shan, 行 hang, 还 huan, 沈 chen.
+        // Any modern reading of a heteronym: 单 also reads shan, 行 hang, 还 huan.
         ('单', '善'),
         ('行', '航'),
         ('还', '环'),
-        ('沈', '陈'),
         ('的', '得'),
         ('的', '地'),
     ] {
@@ -305,7 +302,15 @@ fn readings_decide_strictly_without_tones() {
         ('a', 'a'),
         ('3', '3'),
         ('。', '。'),
-        // The pinyin data also reads private-use characters of old GB fonts.
+        // Historical readings do not count: 沈 once read chen, 才 zai, 大 tai, 有 wei, 个 gan.
+        ('沈', '陈'),
+        ('在', '才'),
+        ('大', '太'),
+        ('有', '为'),
+        ('个', '干'),
+        // Characters outside the modern table: traditional ones, and private-use characters of
+        // old GB fonts that other pinyin tables read.
+        ('來', '来'),
         ('\u{E815}', '\u{E815}'),
     ] {
         assert!(!same_sound(a, b) && !same_sound(b, a), "{a} {b}");
@@ -318,11 +323,26 @@ fn readings_cover_the_examples_and_market_terms() {
                 股票基金债券期货涨跌停板盘口筹码仓位杠杆融资融券做空多头空头\
                 均线量价换手率市盈率净资产估值分红配股增发解禁减持回购庄家吸筹洗盘拉升出货\
                 利好利空牛市熊市散户量化主力游资北向资金成交额市值龙头";
-    let missing: String = text
-        .chars()
-        .filter(|c| c.to_pinyin_multi().is_none())
-        .collect();
+    let missing: String = text.chars().filter(|c| !READINGS.contains_key(c)).collect();
     assert_eq!(missing, "");
+}
+
+#[test]
+fn reading_table_parses_whole() {
+    assert_eq!(READINGS.len(), 8105);
+    for (c, readings) in READINGS.iter() {
+        assert!(!readings.is_empty(), "{c}");
+        for r in readings {
+            let plain = |x: char| x.is_ascii_lowercase() || x == 'ü' || x == 'ê';
+            assert!(!r.is_empty() && r.chars().all(plain), "{c} {r}");
+        }
+    }
+    let toneless = |c: char| READINGS[&c].join(",");
+    assert_eq!(toneless('的'), "de,di,di,di");
+    assert_eq!(toneless('绿'), "lu,lü");
+    assert_eq!(toneless('嗯'), "ng,ng,ng");
+    assert_eq!(toneless('欸'), "ai,ê,ê,ê,ê");
+    assert_eq!(toneless('呣'), "m,m");
 }
 
 #[test]

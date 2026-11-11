@@ -5,9 +5,9 @@
 
 mod diff;
 
-use pinyin::ToPinyinMulti;
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
-use super::is_han;
 use crate::pipeline::Section;
 
 pub(super) const PROMPT: &str = include_str!("../../prompts/punctuate.md");
@@ -115,15 +115,47 @@ fn keys(units: &[Unit]) -> Vec<char> {
     units.iter().map(|u| u.key).collect()
 }
 
-/// Two ideographs that share a reading, tones aside: any reading of a heteronym counts, and
-/// initials and finals must match exactly (c is not ch, n is not l). [`FIXED`] never matches.
+/// Modern readings of the 8105 characters of the 通用规范汉字表, from pinyin-data's kTGHZ2013 (MIT,
+/// licence beside it). Tables that merge in historical readings, as the pinyin crate's does, give
+/// 才 zāi and 大 tài and would let 在 pass for 才.
+static READINGS: LazyLock<HashMap<char, Vec<String>>> = LazyLock::new(|| {
+    include_str!("punctuate/pinyin-data/kTGHZ2013.txt")
+        .lines()
+        .filter_map(|line| {
+            let (code, rest) = line.strip_prefix("U+")?.split_once(':')?;
+            let c = char::from_u32(u32::from_str_radix(code, 16).ok()?)?;
+            let (readings, _) = rest.split_once('#')?;
+            Some((c, readings.trim().split(',').map(toneless).collect()))
+        })
+        .collect()
+});
+
+/// A reading without its tone: the marks come off the vowels, and ü and ê stay.
+fn toneless(reading: &str) -> String {
+    reading
+        .chars()
+        .filter_map(|c| match c {
+            'ā' | 'á' | 'ǎ' | 'à' => Some('a'),
+            'ē' | 'é' | 'ě' | 'è' => Some('e'),
+            'ī' | 'í' | 'ǐ' | 'ì' => Some('i'),
+            'ō' | 'ó' | 'ǒ' | 'ò' => Some('o'),
+            'ū' | 'ú' | 'ǔ' | 'ù' => Some('u'),
+            'ǖ' | 'ǘ' | 'ǚ' | 'ǜ' => Some('ü'),
+            'ế' | 'ề' => Some('ê'),
+            'ń' | 'ň' | 'ǹ' => Some('n'),
+            'ḿ' => Some('m'),
+            // Combining tone marks, as in m̀ and ê̄.
+            '\u{300}'..='\u{36F}' => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// Two ideographs that share a modern reading, tones aside: any reading of a heteronym counts,
+/// and initials and finals must match exactly (c is not ch, n is not l). Characters outside
+/// [`READINGS`], traditional ones among them, and [`FIXED`] never match.
 fn same_sound(a: char, b: char) -> bool {
-    let readings = |c: char| {
-        let multi = c
-            .to_pinyin_multi()
-            .filter(|_| is_han(c) && !FIXED.contains(c));
-        multi.map(|m| m.into_iter().map(|p| p.plain()).collect::<Vec<_>>())
-    };
+    let readings = |c: char| READINGS.get(&c).filter(|_| !FIXED.contains(c));
     match (readings(a), readings(b)) {
         (Some(a), Some(b)) => a.iter().any(|r| b.contains(r)),
         _ => false,
