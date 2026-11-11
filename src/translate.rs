@@ -41,10 +41,7 @@ fn detect<'a>(texts: impl IntoIterator<Item = &'a str>) -> &'static str {
     let (mut han, mut kana, mut hangul, mut latin, mut other) = (0usize, 0, 0, 0, 0);
     for c in texts.into_iter().flat_map(str::chars).take(DETECT_CHARS) {
         match c {
-            '\u{3400}'..='\u{4DBF}'
-            | '\u{4E00}'..='\u{9FFF}'
-            | '\u{F900}'..='\u{FAFF}'
-            | '\u{20000}'..='\u{3134F}' => han += 1,
+            c if is_han(c) => han += 1,
             '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}' | '\u{FF66}'..='\u{FF9F}' => {
                 kana += 1
             }
@@ -74,6 +71,18 @@ fn detect<'a>(texts: impl IntoIterator<Item = &'a str>) -> &'static str {
     } else {
         "other"
     }
+}
+
+/// CJK ideographs: the unified block, extension A, the compatibility block, and planes 2 and 3
+/// up to extension G.
+fn is_han(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{3134F}'
+    )
 }
 
 pub async fn run(job_dir: &Path, out_dir: &Path) -> StepResult {
@@ -134,7 +143,7 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
         meta.insert("skipped_reason".into(), MetaValue::Text(reason.into()));
     } else if punctuate {
         let replies = ask_all(env, &job, punctuate::PROMPT, &segments, &chunks).await?;
-        let (punctuated, kept) = punctuate::apply(&sections, replies);
+        let (punctuated, tally) = punctuate::apply(&sections, replies);
         let file = "transcript.md";
         fs::write(
             out_dir.join(file),
@@ -143,7 +152,9 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
         manifest.files.insert("transcript".into(), file.into());
         meta.insert("punctuated".into(), MetaValue::Bool(true));
         meta.insert("sections".into(), MetaValue::Int(segments.len() as i64));
-        meta.insert("kept_original".into(), MetaValue::Int(kept as i64));
+        meta.insert("kept_original".into(), MetaValue::Int(tally.kept as i64));
+        meta.insert("corrected".into(), MetaValue::Int(tally.corrected as i64));
+        meta.insert("reverted".into(), MetaValue::Int(tally.reverted as i64));
     } else {
         let (translated, source) = match subtitle_zh {
             Some(texts) => (texts, "subtitle"),

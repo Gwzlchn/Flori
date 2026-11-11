@@ -924,19 +924,24 @@ async fn chinese_video_is_punctuated_in_video_frames_layout() {
         {"start_ms": 120000, "frames": [], "text": lines[2]},
         {"start_ms": 150000, "frames": [], "text": lines[3]},
         {"start_ms": 3_690_000, "frames": [], "text": lines[4]},
+        {"start_ms": 3_720_000, "frames": [], "text": "等的就是这部分复仇出清 太依赖菜单程序"},
+        {"start_ms": 3_750_000, "frames": [], "text": "这一节 FAKE_REWRITE"},
     ]);
     let fx = video(&sections, "zh");
     let (out, result) = translate(&fx).await;
     result.unwrap();
     let punctuated = |line: &str| escape_markdown(&fake_punctuated(line));
-    // The section whose reply changed a word keeps its transcribed text.
+    // The edited word goes back and so does the fix that does not sound the same, the fix that
+    // does stays, and the section whose reply is other words keeps its transcribed text.
     let want = format!(
         "## 00:00\n\n![](assets/frame-0.jpg)\n\n大家好，我是，Pacon，FAKE\\_PUNCTUATE。\n\n\
          ## 00:30\n\n![](assets/frame-30000.jpg)\n\n![](assets/frame-41000.jpg)\n\n\
          ## 01:00\n\n{}\n\n## 01:30\n\n![](assets/frame-90000.jpg)\n\n{}\n\n\
-         ## 02:00\n\n{}\n\n## 02:30\n\n{}\n\n## 1:01:30\n\n{}\n",
+         ## 02:00\n\n{}\n\n## 02:30\n\n{}\n\n## 1:01:30\n\n{}\n\n\
+         ## 1:02:00\n\n等的就是这部分浮筹出清，太依赖菜单程序。\n\n\
+         ## 1:02:30\n\n这一节 FAKE\\_REWRITE\n",
         punctuated(lines[0]),
-        escape_markdown(&edited),
+        punctuated(&edited),
         punctuated(lines[2]),
         punctuated(lines[3]),
         punctuated(lines[4]),
@@ -944,11 +949,14 @@ async fn chinese_video_is_punctuated_in_video_frames_layout() {
     assert_eq!(fs::read_to_string(out.join("transcript.md")).unwrap(), want);
     let sections: Vec<Section> = serde_json::from_value(sections).unwrap();
     let mut rendered = sections.clone();
-    for section in rendered
-        .iter_mut()
-        .filter(|s| s.has_text() && s.text != edited)
-    {
-        section.text = fake_punctuated(&section.text);
+    for section in rendered.iter_mut().filter(|s| s.has_text()) {
+        section.text = match section.text.as_str() {
+            "等的就是这部分复仇出清 太依赖菜单程序" => {
+                "等的就是这部分浮筹出清，太依赖菜单程序。".to_owned()
+            }
+            "这一节 FAKE_REWRITE" => section.text.clone(),
+            text => fake_punctuated(text),
+        };
     }
     assert_eq!(want, crate::video::render_transcript(&rendered));
     let manifest = pipeline::read_manifest(&out).unwrap();
@@ -960,8 +968,10 @@ async fn chinese_video_is_punctuated_in_video_frames_layout() {
             ("language".to_owned(), text("zh")),
             ("translated".to_owned(), MetaValue::Bool(false)),
             ("punctuated".to_owned(), MetaValue::Bool(true)),
-            ("sections".to_owned(), MetaValue::Int(6)),
+            ("sections".to_owned(), MetaValue::Int(8)),
             ("kept_original".to_owned(), MetaValue::Int(1)),
+            ("corrected".to_owned(), MetaValue::Int(1)),
+            ("reverted".to_owned(), MetaValue::Int(2)),
         ])
     );
     let calls = fx.calls();

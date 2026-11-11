@@ -97,7 +97,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 标题取步骤顺序中第一个非 null 的 manifest.title。
 - transcript.json:`{"language": str|null, "segments": [{"start_ms": int, "end_ms": int, "text": str}]}`。
 - sections.json 的 text 是未转义的原文;写进 Markdown 的一方(video-frames 的 transcript.md、translate 的双语版与加标点版)统一用 `pipeline::escape_markdown` 转义。Section 类型、取前序文件(`pipeline::step_file`)与节时间格式(`pipeline::clock`)只在 src/pipeline.rs 定义一次。
-- translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long;chinese 只出现在 arXiv),too_long 时另有 chunks(int)。译出时另有 translation_source:ai(调用 AI)或 subtitle(视频用 video-fetch 的 subtitle_zh)。中文视频加了标点时 translated 为 false,另有 punctuated(true)、sections(送去加标点的有文字的节数,int)与 kept_original(校验未过、保留原文的节数,int)。
+- translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long;chinese 只出现在 arXiv),too_long 时另有 chunks(int)。译出时另有 translation_source:ai(调用 AI)或 subtitle(视频用 video-fetch 的 subtitle_zh)。中文视频加了标点时 translated 为 false,另有 punctuated(true)、sections(送去加标点的有文字的节数,int)、kept_original(回复用不上、保留原文的节数,int)、corrected(采用的同音替换处数,int)与 reverted(还原的其它改动处数,int)。
 
 - video-fetch 的字幕:取人工字幕与 B站 AI 字幕,不取 YouTube 自动字幕;尽力而为,失败只记日志,由 whisper 转写。
   - 原声语言取 yt-dlp 的 language 的主子标签(`en-US` 记 en);不是纯小写字母标签时按未知处理。yt-dlp 的 B站提取器不给 language,B站总按未知处理,即中文优先。
@@ -116,10 +116,13 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
   - 非中文视频:按 sections.json 的节翻译,每节写成"关键帧 + 中文 + 折叠的原文"(`> [!quote]- 原文`);没有中文的节只写原文,不折叠。译文与原文每行用 `pipeline::escape_markdown` 转义。
     - 有 subtitle_zh 时不调用 AI:每条中文 cue 按起点归入 `start_ms / SECTION_MS * SECTION_MS` 那个 30s 窗口的节(`pipeline::SECTION_MS`,与 video-frames 分节相同)。窗口没有节、或该节没有原文时丢弃这条 cue,第一节之前的 cue 同样丢弃;没有 cue 的节只写原文。
     - 没有 subtitle_zh 时由 AI 逐块翻译,转写不做占位符(只保护字面 `⟦`)。
-  - 中文视频:不翻译,也不用 subtitle_zh;按节由 AI 只加标点(`prompts/punctuate.md`),模型、CLI、分节协议、缓存、重问与失败分类都与翻译相同。转写原本带标点时同样处理,字幕和 whisper 的标点都不可靠。
+  - 中文视频:不翻译,也不用 subtitle_zh;按节由 AI 加标点并改正同音错字(`prompts/punctuate.md`),模型、CLI、分节协议、缓存、重问与失败分类都与翻译相同。转写原本带标点时同样处理,字幕和 whisper 的标点都不可靠。
     - 回复要把每个字写回来,所以每块约 6k 字符,是翻译的一半。
-    - 逐节校验:回复与原文各自去掉标点和空白后必须完全相同,否则该节保留原文、计入 kept_original,不重问。标点只有 ASCII 的 `, . ; : ? ! " ' ( ) [ ] { }` 与 `，。、；：？！．“”‘’＂＇「」『』（）［］｛｝《》〈〉【】〔〕…⋯—–―·・`;连字符 `-`、`~`、`/`、`%` 等符号都是内容。夹在两个 ASCII 字母或数字之间的 ASCII 标点是数字或词的一部分(3.5、1,000、10:30、Node.js),算内容;数字开头的小数点(.5,不接在另一个 `.` 之后)也算内容;两个 ASCII 字母或数字之间、字母或数字与这种小数点之间的断开(空白或标点)也算内容,单词与数字不能合并或拆开。
-    - 通过校验的节把空白压成一个空格。transcript.md 与 video-frames 的版式相同(都用 `video::render_transcript`):每节时间标题、关键帧、用 `pipeline::escape_markdown` 转义的文字,没有原文折叠。
+    - 内容单位:去掉标点和空白后,每个字符是一个单位。标点只有 ASCII 的 `, . ; : ? ! " ' ( ) [ ] { }` 与 `，。、；：？！．“”‘’＂＇「」『』（）［］｛｝《》〈〉【】〔〕…⋯—–―·・`;连字符 `-`、`~`、`/`、`%` 等符号都是内容。夹在两个 ASCII 字母或数字之间的 ASCII 标点是数字或词的一部分(3.5、1,000、10:30、Node.js),算内容;数字开头的小数点(.5,不接在另一个 `.` 之后)也算内容;两个 ASCII 字母或数字之间、字母或数字与这种小数点之间的断开(空白或标点)也是一个单位,单词与数字不能合并或拆开。
+    - 逐节对齐:原文与回复的单位序列取最短编辑脚本(Myers)。回复按序带回的原文单位不足一半时,该节保留原文、计入 kept_original,不重问。否则结果以原文的单位为准:相同处照抄;回复替换的一段只在两边等长、每对都是汉字、且每对有一个共同的不带声调的拼音时整段采用,计 1 处 corrected;其它改动(增、删、长度不同的替换、数字、ASCII、读音不同)整段还原为原文,计 1 处 reverted。
+    - 读音:pinyin crate 的多音字数据,多音字任一读音都算;声母韵母必须完全相同,不做 c/ch、z/zh、s/sh、n/l 或前后鼻音之类的模糊。汉字数字(〇零一二两三四五六七八九十百千万亿与壹贰叁肆伍陆柒捌玖拾佰仟萬億兩)按数字处理,读音相同也不替换,"十一"不会变成"十亿"。
+    - 标点全部取自回复,回复新加的单词断开是还原的改动,其中的标点随之去掉。其余标点:两侧单位在结果里仍相邻的,原位保留;挨着还原段的放到该段末尾,但紧跟在保留单位之后、后面是还原段的留在该段开头;落点会改变数字或词的切分时丢弃;同一处已有相同的标点时不重复。结果去掉标点和空白后与原文相同,只在 corrected 处换成同音字;写出前逐节校验这一点,不成立时该节同样保留原文、计入 kept_original。
+    - 结果把空白压成一个空格。transcript.md 与 video-frames 的版式相同(都用 `video::render_transcript`):每节时间标题、关键帧、用 `pipeline::escape_markdown` 转义的文字,没有原文折叠。
   - 串行;每块结果按 sha256(prompt‖model‖payload) 缓存,手动重试只补未缓存的块;校验失败时带反馈再问 1 次,仍失败退出 10。
   - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。加标点按它自己的块大小计;用 subtitle_zh 翻译的视频不受此限。
 - note:
@@ -187,7 +190,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | POST /api/collections/{id}/feed/jobs | {items:[{platform,source_id}], translate?};每批 1–20 条,超出 400 invalid_request;服务端校验 ID 并自己拼 URL;一个事务内插入;返回 {created, skipped},每项带 job |
 | POST /api/jobs | {url, domain_id, collection_id?, translate?};识别不了 400 invalid_url;领域或集合不存在 404;重复 409 conflict 并带 job_id;成功 201 |
 | GET /api/jobs?limit= | 按 id 倒序,默认 200 条;筛选在前端做 |
-| GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url;每步带 manifest 的 skipped_reason,translate 给中文视频加了标点时另有 punctuation{sections, kept_original};obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
+| GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url;每步带 manifest 的 skipped_reason,translate 给中文视频加了标点时另有 punctuation{sections, kept_original, corrected, reverted}(早于同音纠错的任务后两项为 0);obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB;单行超过上限时按字符边界切开)与 next_offset;offset 超出文件末尾 400 invalid_request;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
 | GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range;所有响应只带一个 `Content-Security-Policy: sandbox allow-same-origin; frame-ancestors 'none'` 与 `X-Content-Type-Options: nosniff`:外部 HTML 不能运行脚本或提交表单,它引用的图片仍按同源加载 |

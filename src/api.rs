@@ -304,13 +304,18 @@ pub struct StepInfo {
     pub finished: Option<String>,
 }
 
-/// From translate's `meta.punctuated`, `meta.sections` and `meta.kept_original`.
+/// From translate's `meta.punctuated`, `meta.sections`, `meta.kept_original`, `meta.corrected`
+/// and `meta.reverted`. Jobs punctuated before corrections existed report 0 for the last two.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Punctuation {
     /// Sections with text sent to the AI.
     pub sections: u32,
-    /// Sections whose reply changed more than punctuation; they keep the transcribed text.
+    /// Sections without the AI's punctuation; they keep the transcribed text.
     pub kept_original: u32,
+    /// Same-sounding ideographs the AI put in for misheard ones, counted as runs.
+    pub corrected: u32,
+    /// Other changes of the AI, put back as transcribed, counted as runs.
+    pub reverted: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

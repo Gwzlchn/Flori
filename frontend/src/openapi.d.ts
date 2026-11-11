@@ -362,13 +362,26 @@ export interface components {
         Pipeline: "video" | "arxiv";
         /** @enum {string} */
         Platform: "bilibili" | "youtube" | "arxiv";
-        /** @description From translate's `meta.punctuated`, `meta.sections` and `meta.kept_original`. */
+        /**
+         * @description From translate's `meta.punctuated`, `meta.sections`, `meta.kept_original`, `meta.corrected`
+         *     and `meta.reverted`. Jobs punctuated before corrections existed report 0 for the last two.
+         */
         Punctuation: {
             /**
              * Format: int32
-             * @description Sections whose reply changed more than punctuation; they keep the transcribed text.
+             * @description Same-sounding ideographs the AI put in for misheard ones, counted as runs.
+             */
+            corrected: number;
+            /**
+             * Format: int32
+             * @description Sections without the AI's punctuation; they keep the transcribed text.
              */
             kept_original: number;
+            /**
+             * Format: int32
+             * @description Other changes of the AI, put back as transcribed, counted as runs.
+             */
+            reverted: number;
             /**
              * Format: int32
              * @description Sections with text sent to the AI.

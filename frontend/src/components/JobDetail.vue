@@ -14,10 +14,13 @@ const fileText: Record<string, string> = {
 };
 const skipText: Record<string, string> = { chinese: "原文是中文,不需要翻译", unknown: "无法判断语言,未翻译", too_long: "篇幅过长,未翻译" };
 
-function punctuationText({ sections, kept_original: kept }: Schemas["Punctuation"]): string {
-  if (kept >= sections) return `原文是中文,不翻译;AI 加标点时改动了文字,${sections} 节全部保留原转写`;
-  const note = kept > 0 ? `;${kept}/${sections} 节的回复改动了文字,保留原转写` : "";
-  return `原文是中文,不翻译,由 AI 加了标点${note}`;
+function punctuationText({ sections, kept_original: kept, corrected, reverted }: Schemas["Punctuation"]): string {
+  if (kept >= sections) return `原文是中文,不翻译;AI 的回复都没能用上,${sections} 节全部保留原转写`;
+  let text = "原文是中文,不翻译,由 AI 加了标点";
+  if (corrected > 0) text += `,改了 ${corrected} 处同音错字`;
+  if (reverted > 0) text += `;AI 的其它 ${reverted} 处改动已还原为原转写`;
+  if (kept > 0) text += `;${kept}/${sections} 节未加标点,保留原转写`;
+  return text;
 }
 
 const detail = ref<Schemas["JobDetail"]>();

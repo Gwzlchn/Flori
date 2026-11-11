@@ -702,6 +702,8 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
             step.punctuation = Some(Punctuation {
                 sections: count("sections"),
                 kept_original: count("kept_original"),
+                corrected: count("corrected"),
+                reverted: count("reverted"),
             });
         }
         if step.name == StepName::Publish {

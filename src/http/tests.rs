@@ -682,31 +682,42 @@ async fn detail_merges_manifests_and_builds_the_obsidian_link() {
 async fn a_punctuated_chinese_video_says_so_on_its_translate_step() {
     let app = app().await;
     let ml = app.domain("ml").await;
-    let meta = json!({"language": "zh", "translated": false, "punctuated": true,
-                      "sections": 62, "kept_original": 3});
-    let manifest = json!({"title": null, "files": {"transcript": "transcript.md"},
-                          "assets": [], "meta": meta});
-    fake(
-        &app.state.config,
-        1,
-        "translate.json",
-        &manifest.to_string(),
-    );
-    app.post(
-        "/api/jobs",
-        json!({"url": "https://youtu.be/dQw4w9WgXcQ", "domain_id": ml}),
-    )
-    .await;
-    wait_status(&app.state.db, 1, JobStatus::Succeeded).await;
+    let counts = [
+        json!({"sections": 62, "kept_original": 1, "corrected": 4, "reverted": 2}),
+        // A job punctuated before corrections existed has no counts for them.
+        json!({"sections": 62, "kept_original": 3}),
+    ];
+    for (id, meta) in (1..).zip(&counts) {
+        let mut meta = meta.clone();
+        meta["language"] = json!("zh");
+        meta["translated"] = json!(false);
+        meta["punctuated"] = json!(true);
+        let manifest = json!({"title": null, "files": {"transcript": "transcript.md"},
+                              "assets": [], "meta": meta});
+        fake(
+            &app.state.config,
+            id,
+            "translate.json",
+            &manifest.to_string(),
+        );
+        app.post(
+            "/api/jobs",
+            json!({"url": format!("https://youtu.be/dQw4w9WgXc{id}"), "domain_id": ml}),
+        )
+        .await;
+        wait_status(&app.state.db, id, JobStatus::Succeeded).await;
+    }
     let (_, detail) = app.get("/api/jobs/1").await;
     let translate = &detail["steps"][4];
     assert_eq!(translate["name"], "translate");
-    assert_eq!(
-        translate["punctuation"],
-        json!({"sections": 62, "kept_original": 3})
-    );
+    assert_eq!(translate["punctuation"], counts[0]);
     assert_eq!(translate["skipped_reason"], Value::Null);
     assert_eq!(detail["steps"][0]["punctuation"], Value::Null);
+    let (_, detail) = app.get("/api/jobs/2").await;
+    assert_eq!(
+        detail["steps"][4]["punctuation"],
+        json!({"sections": 62, "kept_original": 3, "corrected": 0, "reverted": 0})
+    );
 }
 
 #[tokio::test]

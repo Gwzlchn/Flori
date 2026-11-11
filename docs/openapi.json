@@ -1344,16 +1344,30 @@
       },
       "Punctuation": {
         "type": "object",
-        "description": "From translate's `meta.punctuated`, `meta.sections` and `meta.kept_original`.",
+        "description": "From translate's `meta.punctuated`, `meta.sections`, `meta.kept_original`, `meta.corrected`\nand `meta.reverted`. Jobs punctuated before corrections existed report 0 for the last two.",
         "required": [
           "sections",
-          "kept_original"
+          "kept_original",
+          "corrected",
+          "reverted"
         ],
         "properties": {
+          "corrected": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Same-sounding ideographs the AI put in for misheard ones, counted as runs.",
+            "minimum": 0
+          },
           "kept_original": {
             "type": "integer",
             "format": "int32",
-            "description": "Sections whose reply changed more than punctuation; they keep the transcribed text.",
+            "description": "Sections without the AI's punctuation; they keep the transcribed text.",
+            "minimum": 0
+          },
+          "reverted": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Other changes of the AI, put back as transcribed, counted as runs.",
             "minimum": 0
           },
           "sections": {
