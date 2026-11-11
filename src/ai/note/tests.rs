@@ -231,30 +231,95 @@ async fn a_figure_ffmpeg_cannot_shrink_is_left_out() {
     assert!(read_note(&out).contains("[1] Figure 2: Fine.\n"));
 }
 
-#[tokio::test]
-async fn at_most_ten_figures_spread_over_the_paper() {
-    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    let names: Vec<String> = (1..=12).map(|n| format!("f{n}.png")).collect();
-    let original: String = names
+/// original.md with one captioned figure `f<n>.png` per paragraph pair, and their names.
+fn many_figures(count: usize) -> (String, Vec<String>) {
+    let names: Vec<String> = (1..=count).map(|n| format!("f{n}.png")).collect();
+    let original = names
         .iter()
         .enumerate()
         .map(|(i, name)| format!("![](assets/{name})\n\nFigure {}: Plot.\n\n", i + 1))
         .collect();
+    (original, names)
+}
+
+#[tokio::test]
+async fn every_captioned_figure_is_sent() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let (original, names) = many_figures(30);
     let assets: Vec<&str> = names.iter().map(String::as_str).collect();
     paper(&fx, &original, &assets);
     let (out, result) = run_note(&fx, "03-note").await;
     result.unwrap();
-    assert_eq!(sent_images(&fx).len(), MAX_FIGURES);
-    let note = read_note(&out);
-    let listed: Vec<&str> = note
-        .lines()
-        .filter(|l| l.starts_with('[') && l.contains("Figure"))
-        .map(|l| l.split_once("] ").unwrap().1)
+    assert_eq!(sent_images(&fx).len(), 30);
+    let want: Vec<String> = (1..=30).map(|n| format!("Figure {n}: Plot.")).collect();
+    assert_eq!(listed(&read_note(&out)), want);
+}
+
+#[tokio::test]
+async fn figures_over_the_request_budget_are_dropped_evenly() {
+    // Sixteen figures of 1 MiB, the most sent without shrinking: 22.4 MB as base64.
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let (original, names) = many_figures(16);
+    let assets: Vec<&str> = names.iter().map(String::as_str).collect();
+    let dir = paper(&fx, &original, &assets);
+    for name in &assets {
+        let mut bytes = image_bytes("png", 100, 100);
+        bytes.resize(MAX_IMAGE_BYTES as usize, 0);
+        fs::write(dir.join("assets").join(name), bytes).unwrap();
+    }
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    let images = sent_images(&fx);
+    let encoded: u64 = images
+        .iter()
+        .map(|i| i["bytes"].as_u64().unwrap().div_ceil(3) * 4)
+        .sum();
+    assert!(encoded <= REQUEST_IMAGE_BYTES, "{encoded}");
+    assert_eq!(images.len(), 14);
+    let labels = listed(&read_note(&out));
+    assert_eq!(labels.len(), 14);
+    assert_eq!(labels[0], "Figure 1: Plot.");
+    assert_eq!(labels[13], "Figure 16: Plot.");
+    assert!(ffmpeg_calls(&fx).is_empty());
+}
+
+#[test]
+fn the_budget_keeps_an_even_share_of_positions() {
+    let dir = tempfile::tempdir().unwrap();
+    let pictures = |sizes: &[usize]| -> Vec<Picture> {
+        sizes
+            .iter()
+            .enumerate()
+            .map(|(i, size)| {
+                let path = dir.path().join(format!("p{i}"));
+                fs::write(&path, vec![0; *size]).unwrap();
+                Picture {
+                    basename: format!("p{i}"),
+                    path,
+                    label: String::new(),
+                }
+            })
+            .collect()
+    };
+    let kept = |pictures: Vec<Picture>, budget: u64| -> Vec<String> {
+        within_budget(pictures, budget)
+            .into_iter()
+            .map(|p| p.basename)
+            .collect()
+    };
+    // Twenty pictures of 4000 base64 bytes: everything fits, then half of them.
+    assert_eq!(kept(pictures(&[3000; 20]), 80_000).len(), 20);
+    let half: Vec<String> = [0, 2, 4, 6, 8, 10, 12, 14, 16, 19]
+        .iter()
+        .map(|i| format!("p{i}"))
         .collect();
-    // Positions 0..11 spread to ten: the first and the last stay, two in between go.
-    assert_eq!(listed.len(), 10);
-    assert_eq!(listed[0], "Figure 1: Plot.");
-    assert_eq!(listed[9], "Figure 12: Plot.");
+    assert_eq!(kept(pictures(&[3000; 20]), 40_000), half);
+    // Room for one keeps the first; room for none sends none.
+    assert_eq!(kept(pictures(&[3000; 20]), 4_000), ["p0"]);
+    assert!(kept(pictures(&[3000; 20]), 100).is_empty());
+    // The average allows three, but the three even picks are the large ones: two go.
+    let mixed = kept(pictures(&[3000, 300, 3000, 300, 3000]), 8_500);
+    assert_eq!(mixed, ["p0", "p4"]);
 }
 
 fn frame_sections(frames_per_section: u64, sections: u64) -> (String, Vec<String>) {

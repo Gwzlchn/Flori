@@ -1,6 +1,7 @@
-//! The note step: the source text and every video keyframe or up to 10 paper figures in one AI
-//! call. The model places images with `![描述](img:N)`; the note on disk links `assets/<basename>` instead, which publish
-//! resolves because it merges every step's assets.
+//! The note step: the source text and every video keyframe or captioned paper figure in one AI
+//! call, as many as one request takes. The model places images with `![描述](img:N)`; the note on
+//! disk links `assets/<basename>` instead, which publish resolves because it merges every step's
+//! assets.
 
 use std::{
     fmt::Write as _,
@@ -22,11 +23,12 @@ const NOTE_ARXIV: &str = include_str!("../../prompts/note-arxiv.md");
 const NOTE_VIDEO: &str = include_str!("../../prompts/note-video.md");
 /// Appended only when images go along.
 const NOTE_IMAGES: &str = include_str!("../../prompts/note-images.md");
-/// A paper sends its figures spread over the text. A video sends every keyframe so each key
-/// point can get one; video-frames bounds them per section, and only the API's per-request
-/// image limit bounds them here.
-const MAX_FIGURES: usize = 10;
+/// A video sends every keyframe and a paper every captioned figure, so each key point can get
+/// its image; video-frames bounds frames per section. Only one request's limits bound them here:
+/// the API's image count, and the base64 bytes of the images. The API takes at most 32 MB per
+/// request, prompt included, and base64 adds a third, so 20 MiB leaves room for the longest text.
 const MAX_REQUEST_IMAGES: usize = 600;
+const REQUEST_IMAGE_BYTES: u64 = 20 << 20;
 /// How much of a frame's section text, or of a figure caption, the image list shows.
 const FRAME_TEXT_CHARS: usize = 150;
 const CAPTION_CHARS: usize = 300;
@@ -90,6 +92,7 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
     let title = title.unwrap_or_else(|| job.source.id.clone());
     let scratch = Scratch::new()?;
     let pictures = sendable(env, pictures, side, &scratch.0).await;
+    let pictures = within_budget(pictures, REQUEST_IMAGE_BYTES);
     let mut prompt = template.to_owned();
     let mut list = String::new();
     if !pictures.is_empty() {
@@ -162,7 +165,7 @@ enum Part {
     Text,
 }
 
-/// Images of original.md that have a caption, spread evenly over the paper. An object is a run
+/// Images of original.md that have a caption, in order of position. An object is a run
 /// of image paragraphs with subfigure labels between them, or a Markdown table; arxiv-convert
 /// gives every panel of a multi-panel figure its own paragraph. A caption owns the object right
 /// before it, as figures put it below; when that object is missing or already owned, the object
@@ -211,7 +214,7 @@ fn paper_figures(original: &str, dir: &Path) -> Vec<Picture> {
         }
         owned.push(object);
     }
-    spread(figures, MAX_FIGURES)
+    spread(figures, MAX_REQUEST_IMAGES)
 }
 
 fn part(paragraph: &str) -> Part {
@@ -300,22 +303,77 @@ fn head(path: &Path) -> io::Result<Vec<u8>> {
 /// At most `k` items spread evenly over their keys (time or position), first and last included.
 fn spread(mut items: Vec<(u64, Picture)>, k: usize) -> Vec<Picture> {
     items.sort_by_key(|(key, _)| *key);
-    if items.len() > k && k > 1 {
-        let (first, last) = (items[0].0, items[items.len() - 1].0);
-        let mut taken = vec![false; items.len()];
+    let keys: Vec<u64> = items.iter().map(|(key, _)| *key).collect();
+    let mut taken = evenly(&keys, k).into_iter();
+    items.retain(|_| taken.next().unwrap_or(false));
+    items.into_iter().map(|(_, picture)| picture).collect()
+}
+
+/// Which of the sorted `keys` to keep so that at most `k` remain, spread evenly over the keys:
+/// the first and the last, then those nearest to equal steps between them. One keeps the first.
+fn evenly(keys: &[u64], k: usize) -> Vec<bool> {
+    if keys.len() <= k {
+        return vec![true; keys.len()];
+    }
+    let mut taken = vec![false; keys.len()];
+    if k == 1 {
+        taken[0] = true;
+    } else if k > 1 {
+        let (first, last) = (keys[0], keys[keys.len() - 1]);
         for i in 0..k as u64 {
             let target = first + (last - first) * i / (k as u64 - 1);
-            let nearest = (0..items.len())
+            let nearest = (0..keys.len())
                 .filter(|&j| !taken[j])
-                .min_by_key(|&j| items[j].0.abs_diff(target));
+                .min_by_key(|&j| keys[j].abs_diff(target));
             if let Some(j) = nearest {
                 taken[j] = true;
             }
         }
-        let mut taken = taken.into_iter();
-        items.retain(|_| taken.next().unwrap_or(false));
     }
-    items.into_iter().map(|(_, picture)| picture).collect()
+    taken
+}
+
+/// The pictures whose files, base64-encoded, fit in `budget` bytes. When they all do not, as many
+/// as fit are kept spread evenly over their positions, first and last included. The files are
+/// the ones sent, after shrinking.
+fn within_budget(pictures: Vec<Picture>, budget: u64) -> Vec<Picture> {
+    let sizes: Vec<u64> = pictures
+        .iter()
+        .map(|p| {
+            let bytes = fs::metadata(&p.path).map_or(MAX_IMAGE_BYTES, |m| m.len());
+            bytes.div_ceil(3) * 4
+        })
+        .collect();
+    let total: u64 = sizes.iter().sum();
+    if total <= budget {
+        return pictures;
+    }
+    let positions: Vec<u64> = (0..pictures.len() as u64).collect();
+    // Start from the share the budget allows on average and give up one picture at a time.
+    let mut k = usize::try_from(budget * pictures.len() as u64 / total).unwrap_or(0);
+    let taken = loop {
+        let taken = evenly(&positions, k);
+        let size: u64 = sizes
+            .iter()
+            .zip(&taken)
+            .filter(|(_, t)| **t)
+            .map(|(s, _)| s)
+            .sum();
+        if size <= budget || k == 0 {
+            break taken;
+        }
+        k -= 1;
+    };
+    eprintln!(
+        "note: {} images are over the {} MiB request budget, sending {k} spread over the source",
+        pictures.len(),
+        budget >> 20
+    );
+    pictures
+        .into_iter()
+        .zip(taken)
+        .filter_map(|(picture, taken)| taken.then_some(picture))
+        .collect()
 }
 
 /// Pictures ready to send. One that is too large for `side` is shrunk by ffmpeg into `scratch`; one that

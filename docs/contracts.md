@@ -72,7 +72,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节,去重后每节至多 2 张关键帧,全片不设总数上限)、由它渲染的 transcript.md | 1h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv);官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
 | arxiv-convert | cpu | original.md、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$`,其中未转义的 `$`(`\text{}` 里的公式)依次换成 `\(`、`\)`,公式编号去掉 `$`,公式只在自己的定界符处结束;正文文字里的 `[`、`]`、`!` 一律转义,链接、图片与脚注只由 convert 写出,链接地址百分号编码 | 10m | 2 |
-| note | ai | note.md(读原文与全部关键帧或至多 10 张论文图,中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
+| note | ai | note.md(读原文与全部关键帧或全部带图注的论文图,只受单次请求的上限约束;中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json,非中文写双语 transcript.md,中文写加标点的 transcript.md;每块调用超时 600s | 3h | 1 |
 | publish | local | meta: vault_path(相对 FLORI_VAULT_DIR,含 vault 名), note_file(主笔记文件名) | 5m | 2 |
 
@@ -126,9 +126,10 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
   - 串行;每块结果按 sha256(prompt‖model‖payload) 缓存,手动重试只补未缓存的块;校验失败时带反馈再问 1 次,仍失败退出 10。
   - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。加标点按它自己的块大小计;用 subtitle_zh 翻译的视频不受此限。
 - note:
-  - 一次调用同时发原文与图,图按序号 [N] 列出,序号即附图顺序。视频按时间顺序发 sections 里的全部关键帧,只受 API 单次请求 600 张图的上限约束,超出时按时间均匀取;每张写时间与该节文字前 150 字;笔记每个要点只要有能说明它的画面就配一张。论文至多 10 张,取 original.md 里有图注的图,按出现位置均匀取:
+  - 一次调用同时发原文与图,图按序号 [N] 列出,序号即附图顺序。视频按时间顺序发 sections 里的全部关键帧,每张写时间与该节文字前 150 字;笔记每个要点只要有能说明它的画面就配一张。论文按出现位置发 original.md 里全部有图注的图:
     - 对象是一串相邻的图片段(中间可夹 "(a) …"、"b) …" 这类子图注段),或一个 Markdown 表格;arxiv-convert 把多面板图的每个面板写成单独一段。
     - 图注段以 "Figure"、"Fig."、"Table"、"图"、"表" 开头。图注归紧挨在它前面的对象(图注在下);前面没有对象或已被别的图注占用时,归紧挨在它后面的对象(图注在上,表格常见)。对象里每张图都用这条图注;正文段把对象隔开。
+  - 图数和总量不设固定上限,只受单次请求的两条上限约束:至多 600 张,超出时视频按时间、论文按位置均匀取;缩图之后所发图片的 base64 合计至多 20 MiB(API 单次请求体上限 32 MB,含正文,留出余量),超出时按序号位置均匀丢图,首尾保留,job.log 记一行。
   - 只发内容确实是 jpeg、png、gif、webp 的图,media_type 按文件头判断,不看扩展名;SVG、扩展名是图片但内容不是的文件跳过。
   - 送模型的图有长边上限:关键帧 768px,与源视频分辨率无关;论文图 1568px。大于 1 MiB 或长边超限的图用 ffmpeg 缩到上限以内只送模型(PNG 仍为 PNG,其余转 JPEG),笔记里仍引用原图;WebP 读不到尺寸,只按字节判断。缩完仍超限或缩不了的图不发。ffmpeg 按文件头固定 demuxer、只允许 file 协议,环境变量只给 PATH、LANG、TMPDIR。
   - 模型用 `![描述](img:N)` 插图,落盘时换成 `![描述](assets/<basename>)`;N 不在清单里时整条图片标记删除。`assets/` 下的图片原样保留,其它图片(http、data:、别的路径)整条删除。描述去掉 `[`、`]`、`\`,`|` 换成 `/`。
