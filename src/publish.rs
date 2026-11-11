@@ -33,6 +33,7 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
     // Defaults hold when translate is not scheduled.
     let mut language = "unknown".to_owned();
     let mut translated = false;
+    let mut source = Vec::new();
     for spec in pipeline::plan(job.pipeline, job.translate) {
         let step = spec.name;
         if step == StepName::Publish {
@@ -63,6 +64,7 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
             }
             translated = manifest.meta.get("translated") == Some(&MetaValue::Bool(true));
         }
+        source.extend(source_fields(step, &manifest.meta));
     }
     let note = files
         .get("note")
@@ -85,7 +87,7 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
         }
     } else {
         fs::create_dir(&tmp)?;
-        let fields = frontmatter(&job, &title, &language, translated, &job_url);
+        let fields = frontmatter(&job, &title, source, &language, translated, &job_url);
         fs::write(tmp.join(&note_file), fields + &fs::read_to_string(note)?)?;
         for name in COPIED {
             if let Some(src) = files.get(name) {
@@ -180,22 +182,76 @@ pub(crate) fn clean_title(title: &str) -> String {
     out.trim_end_matches(['.', ' ']).to_owned()
 }
 
+/// Frontmatter fields from what fetch and transcribe found out about the source. A missing or
+/// empty value leaves its field out, so older jobs publish as before.
+fn source_fields(step: StepName, meta: &BTreeMap<String, MetaValue>) -> Vec<(&'static str, Value)> {
+    let text = |key: &str| match meta.get(key) {
+        Some(MetaValue::Text(value)) if !value.trim().is_empty() => Some(value.trim()),
+        _ => None,
+    };
+    let fields = match step {
+        StepName::VideoFetch => vec![
+            ("uploader", text("uploader").map(Value::from)),
+            ("published", text("published").map(Value::from)),
+            // Whole minutes, rounded; a video under half a minute still counts as one.
+            (
+                "duration_min",
+                match meta.get("duration_ms") {
+                    Some(MetaValue::Int(ms)) if *ms > 0 => {
+                        Some(json!((ms.saturating_add(30_000) / 60_000).max(1)))
+                    }
+                    _ => None,
+                },
+            ),
+        ],
+        StepName::VideoTranscribe => {
+            let transcript = match (text("origin"), text("subtitle_kind")) {
+                (Some("whisper"), _) => Some("whisper"),
+                (Some("subtitle"), Some(kind @ ("manual" | "ai"))) => Some(kind),
+                _ => None,
+            };
+            vec![("transcript", transcript.map(Value::from))]
+        }
+        StepName::ArxivFetch => vec![
+            (
+                "authors",
+                match meta.get("authors") {
+                    Some(MetaValue::List(names)) if !names.is_empty() => Some(json!(names)),
+                    _ => None,
+                },
+            ),
+            ("published", text("published").map(Value::from)),
+            ("arxiv_version", text("version").map(Value::from)),
+            ("arxiv_category", text("primary_category").map(Value::from)),
+        ],
+        _ => Vec::new(),
+    };
+    fields
+        .into_iter()
+        .filter_map(|(key, value)| Some((key, value?)))
+        .collect()
+}
+
 /// YAML frontmatter. Every value is written as JSON, which YAML reads as the same scalar or
 /// flow sequence, so titles with quotes or colons need no escaping rules of their own.
 fn frontmatter(
     job: &JobSpec,
     title: &str,
+    source: Vec<(&str, Value)>,
     language: &str,
     translated: bool,
     job_url: &str,
 ) -> String {
     let platform = json!(job.source.platform);
-    let fields: [(&str, Value); 15] = [
+    let mut fields: Vec<(&str, Value)> = vec![
         ("title", json!(title)),
         ("aliases", json!([title])),
         ("source_url", json!(job.source.url)),
         ("platform", platform.clone()),
         ("source_id", json!(job.source.id)),
+    ];
+    fields.extend(source);
+    fields.extend([
         ("domain", json!(job.domain)),
         ("collection", json!(job.collection.as_deref().unwrap_or(""))),
         ("created", json!(job.created)),
@@ -206,7 +262,7 @@ fn frontmatter(
         ("job_url", json!(job_url)),
         ("ai_tool", json!(job.ai.tool)),
         ("ai_model", json!(job.ai.model_note)),
-    ];
+    ]);
     let mut out = String::from("---\n");
     for (key, value) in fields {
         out.push_str(&format!("{key}: {value}\n"));

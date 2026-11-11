@@ -28,7 +28,7 @@ except ImportError:
 RETRY, PERMANENT = 10, 20
 UA = "Mozilla/5.0 (X11; Linux x86_64) flori-arxiv/1"
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-ATOM = {"a": "http://www.w3.org/2005/Atom"}
+ATOM = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 HOSTS = {"arxiv": "arxiv.org", "ar5iv": "ar5iv.labs.arxiv.org"}
 
 
@@ -109,11 +109,17 @@ def api_meta(arxiv_id: str, get) -> dict:
     if "/api/errors" in entry_id:
         raise StepError(PERMANENT, f"arXiv API 不认识 {arxiv_id}")
     version = re.search(r"v(\d+)$", entry_id)
+    # published is the first version's date; the category is the one arXiv lists the paper under.
+    published = re.match(r"\d{4}-\d{2}-\d{2}", entry.findtext("a:published", "", ATOM).strip())
+    category = entry.find("arxiv:primary_category", ATOM)
+    category = (category.get("term") or "").strip() if category is not None else ""
     return {
         "title": " ".join(entry.findtext("a:title", "", ATOM).split()),
         "authors": [n.strip() for n in (a.findtext("a:name", "", ATOM) for a in entry.findall("a:author", ATOM)) if n.strip()],
         "abstract": " ".join(entry.findtext("a:summary", "", ATOM).split()),
         "version": f"v{version.group(1)}" if version else None,
+        "published": published.group() if published else None,
+        "primary_category": category or None,
     }
 
 
@@ -175,6 +181,8 @@ def fetch(job_dir: pathlib.Path, out_dir: pathlib.Path, get=http_get) -> int:
         "authors": meta["authors"],
         "abstract": meta["abstract"],
         "html_source": source,
+        "published": meta["published"],
+        "primary_category": meta["primary_category"],
     }
     # manifest meta values cannot be null (MetaValue in src/pipeline.rs).
     meta = {key: value for key, value in meta.items() if value is not None}

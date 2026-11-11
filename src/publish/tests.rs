@@ -109,13 +109,30 @@ fn a_video_titled_transcript_keeps_both_files() {
 }
 
 fn arxiv_job(fx: &Fixture, translated: bool) {
+    let authors = vec![
+        "Albert Q. Jiang".to_owned(),
+        "Alexandre \"Sablayrolles\"".to_owned(),
+    ];
+    let meta = [
+        ("arxiv_id", MetaValue::Text("2401.04088".into())),
+        ("version", MetaValue::Text("v1".into())),
+        (
+            "title",
+            MetaValue::Text("Mixtral of Experts: Sparse MoE".into()),
+        ),
+        ("authors", MetaValue::List(authors)),
+        ("abstract", MetaValue::Text("We introduce Mixtral.".into())),
+        ("html_source", MetaValue::Text("arxiv".into())),
+        ("published", MetaValue::Text("2024-01-08".into())),
+        ("primary_category", MetaValue::Text("cs.LG".into())),
+    ];
     fx.step(
         1,
         StepName::ArxivFetch,
         Some("Mixtral of Experts: Sparse MoE"),
         &[("page", "page.html", "<html>")],
         &[],
-        &[],
+        &meta,
     );
     fx.step(
         2,
@@ -199,6 +216,10 @@ aliases: ["Mixtral of Experts: Sparse MoE"]
 source_url: "https://arxiv.org/abs/2401.04088"
 platform: "arxiv"
 source_id: "2401.04088"
+authors: ["Albert Q. Jiang","Alexandre \"Sablayrolles\""]
+published: "2024-01-08"
+arxiv_version: "v1"
+arxiv_category: "cs.LG"
 domain: "ml"
 collection: ""
 created: "2026-11-08T10:00:00+08:00"
@@ -325,21 +346,33 @@ fn video_uses_translated_transcript_and_collection() {
     // 2026-11-07 20:30 UTC is already the 8th in +08:00.
     job.created = "2026-11-07T20:30:00Z".into();
     fx.write_job(&job);
+    let fetched = [
+        ("title", MetaValue::Text("Talk / Part 1".into())),
+        ("uploader", MetaValue::Text("PAKEN财经说".into())),
+        ("duration_ms", MetaValue::Int(1_850_912)),
+        ("published", MetaValue::Text("2026-11-07".into())),
+    ];
     fx.step(
         1,
         StepName::VideoFetch,
         Some("Talk / Part 1"),
         &[("video", "video.mp4", "mp4")],
         &[],
-        &[],
+        &fetched,
     );
+    let transcribed = [
+        ("origin", MetaValue::Text("subtitle".into())),
+        ("subtitle_kind", MetaValue::Text("ai".into())),
+        ("language", MetaValue::Text("zh".into())),
+        ("language_probability", MetaValue::Float(0.99)),
+    ];
     fx.step(
         2,
         StepName::VideoTranscribe,
         None,
         &[("transcript_json", "transcript.json", "{}")],
         &[],
-        &[],
+        &transcribed,
     );
     let frames = [
         ("transcript", "transcript.md", "原始"),
@@ -385,6 +418,15 @@ fn video_uses_translated_transcript_and_collection() {
     assert!(folder.join("assets/frame-0.jpg").exists());
     assert!(!folder.join("video.mp4").exists());
     let note = fs::read_to_string(folder.join("Talk Part 1.md")).unwrap();
+    // Source facts follow source_id; the folder keeps the job's date, not the upload date.
+    assert!(
+        note.contains(
+            "\nsource_id: \"BV1GJ411x7h7\"\nuploader: \"PAKEN财经说\"\npublished: \"2026-11-07\"\n\
+             duration_min: 31\ntranscript: \"ai\"\ndomain: \"ml\"\n"
+        ),
+        "{note}"
+    );
+    assert!(note.contains("\nlanguage: \"en\"\n"), "{note}");
     assert!(note.contains("\ncollection: \"talks\"\n"), "{note}");
     assert!(note.contains("\nai_tool: \"codex\"\n"), "{note}");
     assert!(
@@ -428,4 +470,56 @@ fn without_translate_language_is_unknown() {
         text.contains("\nlanguage: \"unknown\"\ntranslated: false\n"),
         "{text}"
     );
+    // A fetch without source facts adds no fields.
+    assert!(
+        text.contains("\nsource_id: \"hep-th/9711200\"\ndomain: \"ml\"\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn source_fields_take_only_usable_values() {
+    let meta = |pairs: &[(&str, MetaValue)]| -> BTreeMap<String, MetaValue> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.clone()))
+            .collect()
+    };
+    let text = |value: &str| MetaValue::Text(value.into());
+    let transcript =
+        |pairs: &[(&str, MetaValue)]| source_fields(StepName::VideoTranscribe, &meta(pairs));
+    assert_eq!(
+        transcript(&[("origin", text("whisper")), ("language", text("en"))]),
+        [("transcript", json!("whisper"))]
+    );
+    assert_eq!(
+        transcript(&[
+            ("origin", text("subtitle")),
+            ("subtitle_kind", text("manual"))
+        ]),
+        [("transcript", json!("manual"))]
+    );
+    // A subtitle of unknown kind says nothing about who wrote it.
+    assert!(transcript(&[("origin", text("subtitle"))]).is_empty());
+    assert!(transcript(&[("origin", text("subtitle")), ("subtitle_kind", text("x"))]).is_empty());
+    let minutes = |ms: i64| {
+        source_fields(
+            StepName::VideoFetch,
+            &meta(&[("duration_ms", MetaValue::Int(ms))]),
+        )
+    };
+    assert_eq!(minutes(20_000), [("duration_min", json!(1))]);
+    assert_eq!(minutes(89_999), [("duration_min", json!(1))]);
+    assert_eq!(minutes(90_000), [("duration_min", json!(2))]);
+    assert!(minutes(0).is_empty());
+    let fetched = meta(&[
+        ("uploader", text("  ")),
+        ("published", MetaValue::Int(20261107)),
+        ("authors", MetaValue::List(Vec::new())),
+    ]);
+    assert!(source_fields(StepName::VideoFetch, &fetched).is_empty());
+    assert!(source_fields(StepName::ArxivFetch, &fetched).is_empty());
+    // Other steps' meta never reaches the frontmatter.
+    let translate = meta(&[("published", text("2026-11-07")), ("uploader", text("x"))]);
+    assert!(source_fields(StepName::Translate, &translate).is_empty());
 }

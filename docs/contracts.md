@@ -70,7 +70,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(转写用的人工字幕,选轨规则见下)、subtitle_zh.srt(中文人工字幕,作译文)与 ai_subtitle_<lang>.srt(B站 AI 字幕,待 video-transcribe 核对语言);meta: title, uploader, duration_ms, published,有 subtitle.srt 时另有 subtitle_language | 30m | 3 |
 | video-transcribe | whisper | transcript.json;人工字幕优先,其次与音频语言相同的 B站 AI 字幕,最后 whisper;meta: origin(subtitle\|whisper), language, language_probability,origin 为 subtitle 时另有 subtitle_kind(manual\|ai) | 2h | 2 |
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节,去重后每节至多 2 张关键帧,全片不设总数上限)、由它渲染的 transcript.md | 1h | 2 |
-| arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv);官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
+| arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv), published(arXiv API 的第一版日期 YYYY-MM-DD)与 primary_category(如 cs.LG),后两项拿不到时省略;官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
 | arxiv-convert | cpu | original.md、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$`,其中未转义的 `$`(`\text{}` 里的公式)依次换成 `\(`、`\)`,公式编号去掉 `$`,公式只在自己的定界符处结束;正文文字里的 `[`、`]`、`!` 一律转义,链接、图片与脚注只由 convert 写出,链接地址百分号编码 | 10m | 2 |
 | note | ai | note.md(读原文与全部关键帧或全部带图注的论文图,只受单次请求的上限约束;中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json,非中文写双语 transcript.md,中文写加标点的 transcript.md;每块调用超时 600s | 3h | 1 |
@@ -170,6 +170,8 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | title、aliases | 原标题;aliases 是只含原标题的数组 |
 | source_url | 原始链接 |
 | platform、source_id | bilibili/youtube/arxiv 与平台 ID |
+| uploader、published、duration_min、transcript | 视频:video-fetch 的 uploader、published(YYYY-MM-DD)与 duration_ms 四舍五入的整分钟数(不足半分钟记 1);transcript 是 video-transcribe 的来源,manual(人工字幕)、ai(B站 AI 字幕)或 whisper |
+| authors、published、arxiv_version、arxiv_category | arXiv:arxiv-fetch 的 authors(数组)、published、version 与 primary_category |
 | domain、collection | slug;无集合为 "" |
 | created | ISO 时间 +08:00 |
 | status | unread |
@@ -177,6 +179,8 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | tags | [flori, <platform>, <domain>] |
 | job_url | $FLORI_PUBLIC_URL/jobs/<id> |
 | ai_tool、ai_model | 生成笔记所用 |
+
+- 来源字段紧跟 source_id,值缺失或为空时不写该字段。文件夹日期与 created 仍取 job 创建时间,不取 published。
 
 ## 契约 3:HTTP API
 

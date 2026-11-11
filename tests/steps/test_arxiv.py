@@ -109,6 +109,8 @@ class FetchConvertTest(unittest.TestCase):
         self.assertEqual(meta["meta"]["arxiv_id"], "2305.18290")
         self.assertEqual(meta["meta"]["authors"][0], "Rafael Rafailov")
         self.assertTrue(meta["meta"]["abstract"].startswith("While large-scale"))
+        self.assertEqual(meta["meta"]["published"], "2023-05-29")
+        self.assertEqual(meta["meta"]["primary_category"], "cs.LG")
         image = fetched / "res/html/2305.18290v3/figures/diagrams/teaser.png"
         self.assertTrue(image.is_file())
         self.assertIn('src="res/html/2305.18290v3/figures/diagrams/teaser.png"', (fetched / "page.html").read_text())
@@ -219,6 +221,16 @@ class FetchConvertTest(unittest.TestCase):
                 job = make_job(pathlib.Path(tempfile.mkdtemp(dir=self.root)), "2305.18290")
                 self.assertEqual(arxiv.fetch(job, job / "steps/01-arxiv-fetch", web), 0)
                 self.assertEqual(manifest(job / "steps/01-arxiv-fetch")["meta"].get("version"), expected)
+
+        with self.subTest("no date or category"):
+            api = re.sub(r"<published>.*</published>|<arxiv:primary_category [^>]*/>", "", atom)
+            api = api.replace("<author>", "<published>soon</published><author>", 1).encode()
+            web = FakeWeb({page: ok(page, "2305.18290.html"), API + "2305.18290": (200, "", api)})
+            job = make_job(pathlib.Path(tempfile.mkdtemp(dir=self.root)), "2305.18290")
+            self.assertEqual(arxiv.fetch(job, job / "steps/01-arxiv-fetch", web), 0)
+            meta = manifest(job / "steps/01-arxiv-fetch")["meta"]
+            self.assertNotIn("published", meta)
+            self.assertNotIn("primary_category", meta)
 
     def test_http_get_maps_server_errors_to_retry(self) -> None:
         error = urllib.error.HTTPError("https://arxiv.org/html/x", 503, "busy", {}, None)
