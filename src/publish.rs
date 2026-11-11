@@ -34,6 +34,8 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
     let mut language = "unknown".to_owned();
     let mut translated = false;
     let mut source = Vec::new();
+    // The title as the platform gave it, before video-fetch made Chinese simplified.
+    let mut original_title = None;
     for spec in pipeline::plan(job.pipeline, job.translate) {
         let step = spec.name;
         if step == StepName::Publish {
@@ -65,6 +67,11 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
             translated = manifest.meta.get("translated") == Some(&MetaValue::Bool(true));
         }
         source.extend(source_fields(step, &manifest.meta));
+        if matches!(step, StepName::VideoFetch | StepName::ArxivFetch)
+            && let Some(MetaValue::Text(value)) = manifest.meta.get("title")
+        {
+            original_title = Some(value.trim().to_owned()).filter(|t| !t.is_empty());
+        }
     }
     let note = files
         .get("note")
@@ -87,7 +94,9 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
         }
     } else {
         fs::create_dir(&tmp)?;
-        let fields = frontmatter(&job, &title, source, &language, translated, &job_url);
+        let mut aliases = vec![title.clone()];
+        aliases.extend(original_title.filter(|original| *original != title));
+        let fields = frontmatter(&job, &aliases, source, &language, translated, &job_url);
         fs::write(tmp.join(&note_file), fields + &fs::read_to_string(note)?)?;
         for name in COPIED {
             if let Some(src) = files.get(name) {
@@ -233,10 +242,11 @@ fn source_fields(step: StepName, meta: &BTreeMap<String, MetaValue>) -> Vec<(&'s
 }
 
 /// YAML frontmatter. Every value is written as JSON, which YAML reads as the same scalar or
-/// flow sequence, so titles with quotes or colons need no escaping rules of their own.
+/// flow sequence, so titles with quotes or colons need no escaping rules of their own. The first
+/// alias is the title.
 fn frontmatter(
     job: &JobSpec,
-    title: &str,
+    aliases: &[String],
     source: Vec<(&str, Value)>,
     language: &str,
     translated: bool,
@@ -244,8 +254,8 @@ fn frontmatter(
 ) -> String {
     let platform = json!(job.source.platform);
     let mut fields: Vec<(&str, Value)> = vec![
-        ("title", json!(title)),
-        ("aliases", json!([title])),
+        ("title", json!(aliases[0])),
+        ("aliases", json!(aliases)),
         ("source_url", json!(job.source.url)),
         ("platform", platform.clone()),
         ("source_id", json!(job.source.id)),

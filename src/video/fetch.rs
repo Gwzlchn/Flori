@@ -19,9 +19,10 @@ use tokio::{
     signal::unix::{SignalKind, signal},
 };
 
-use super::{env_value, exit_failure, transcribe::parse_srt};
+use super::{env_value, exit_failure, run_checked, transcribe::parse_srt};
 use crate::pipeline::{
-    self, Manifest, MetaValue, Platform, StepFailure, StepResult, read_json, write_manifest,
+    self, Manifest, MetaValue, Platform, StepFailure, StepResult, read_json, write_json,
+    write_manifest,
 };
 
 pub(super) const VIDEO_FILE: &str = "video.mp4";
@@ -108,6 +109,9 @@ pub(super) struct FetchEnv {
     pub(super) tmp_dir: PathBuf,
     pub(super) ytdlp: OsString,
     pub(super) curl: OsString,
+    /// Runs `whisper.py t2s` from `steps_dir`.
+    pub(super) python: OsString,
+    pub(super) steps_dir: Option<String>,
 }
 
 impl FetchEnv {
@@ -118,6 +122,8 @@ impl FetchEnv {
             tmp_dir: env::temp_dir(),
             ytdlp: "yt-dlp".into(),
             curl: "curl".into(),
+            python: "python3".into(),
+            steps_dir: env_value("FLORI_STEPS_DIR"),
         }
     }
 }
@@ -264,7 +270,24 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     for name in candidates.chain(kept.ai.iter().map(|l| format!("{AI_SUBTITLE}{l}"))) {
         files.insert(name.clone(), format!("{name}.srt"));
     }
-    let title = fetched.playlist_title.or(fetched.title);
+    // Chinese goes on in simplified characters: every Chinese track, which becomes the transcript
+    // or the human translation, and a Chinese title, which names the job and the note.
+    let has_zh = |langs: &[String]| langs.iter().any(|l| l == "zh");
+    let tracks = [
+        (
+            kept.language.as_deref() == Some("zh"),
+            SUBTITLE_FILE.to_owned(),
+        ),
+        (kept.chinese, SUBTITLE_ZH_FILE.to_owned()),
+        (has_zh(&kept.manual), format!("{MANUAL_SUBTITLE}zh.srt")),
+        (has_zh(&kept.ai), format!("{AI_SUBTITLE}zh.srt")),
+    ];
+    let chinese_tracks: Vec<PathBuf> = tracks
+        .into_iter()
+        .filter_map(|(kept, file)| kept.then(|| out_dir.join(file)))
+        .collect();
+    let original_title = fetched.playlist_title.or(fetched.title);
+    let title = simplified(env, out_dir, original_title.as_deref(), &chinese_tracks).await?;
     let text = |key: &str, value: Option<String>| Some((key.to_owned(), MetaValue::Text(value?)));
     let duration_ms = |s: f64| {
         (
@@ -273,7 +296,7 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
         )
     };
     let meta = [
-        text("title", title.clone()),
+        text("title", original_title),
         text("uploader", fetched.uploader),
         fetched.duration.map(duration_ms),
         text(
@@ -297,6 +320,62 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     };
     write_manifest(out_dir, &manifest)?;
     Ok(())
+}
+
+/// Converts the Chinese tracks in place and returns the title, both in simplified characters,
+/// with OpenCC through `whisper.py t2s`, the same conversion whisper's Chinese gets. A title is
+/// Chinese when it has ideographs and no kana or hangul; any other title, and a run without
+/// Chinese, needs no Python.
+async fn simplified(
+    env: &FetchEnv,
+    out_dir: &Path,
+    title: Option<&str>,
+    tracks: &[PathBuf],
+) -> Result<Option<String>, StepFailure> {
+    let chinese_title = title.filter(|t| chinese(t));
+    if chinese_title.is_none() && tracks.is_empty() {
+        return Ok(title.map(str::to_owned));
+    }
+    let steps = env
+        .steps_dir
+        .as_deref()
+        .ok_or_else(|| StepFailure::permanent("FLORI_STEPS_DIR is not set"))?;
+    let mut texts = Vec::with_capacity(tracks.len() + 1);
+    for track in tracks {
+        texts.push(fs::read_to_string(track)?);
+    }
+    texts.extend(chinese_title.map(str::to_owned));
+    let (input, output) = (out_dir.join("t2s-in.json"), out_dir.join("t2s-out.json"));
+    write_json(&input, &texts)?;
+    let mut python = Command::new(&env.python);
+    python
+        .arg("-I")
+        .arg(Path::new(steps).join("whisper.py"))
+        .arg("t2s")
+        .arg(&input)
+        .arg(&output);
+    run_checked(python, "whisper.py t2s").await?;
+    let converted: Vec<String> = read_json(&output)?;
+    fs::remove_file(&input)?;
+    fs::remove_file(&output)?;
+    if converted.len() != texts.len() {
+        return Err(StepFailure::permanent("whisper.py t2s lost texts"));
+    }
+    for (track, text) in tracks.iter().zip(&converted) {
+        fs::write(track, text)?;
+    }
+    Ok(match chinese_title {
+        Some(_) => converted.last().cloned(),
+        None => title.map(str::to_owned),
+    })
+}
+
+/// Han ideographs without kana or hangul: Chinese rather than Japanese or Korean.
+pub(super) fn chinese(text: &str) -> bool {
+    let han = |c: char| matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}');
+    let kana = |c: char| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{31F0}'..='\u{31FF}');
+    let hangul = |c: char| matches!(c, '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{AC00}'..='\u{D7AF}');
+    text.chars().any(han) && !text.chars().any(|c| kana(c) || hangul(c))
 }
 
 /// Netscape cookie file for curl and yt-dlp in TMPDIR, never in the job directory, removed on

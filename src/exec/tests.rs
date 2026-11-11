@@ -296,7 +296,10 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
     let with = |extra: &[&str]| -> BTreeSet<String> {
         base.iter().chain(extra).map(|s| s.to_string()).collect()
     };
-    assert_eq!(env("video-fetch"), with(&["HTTPS_PROXY", "HTTP_PROXY"]));
+    assert_eq!(
+        env("video-fetch"),
+        with(&["FLORI_STEPS_DIR", "HTTPS_PROXY", "HTTP_PROXY"])
+    );
     assert_eq!(
         env("video-transcribe"),
         with(&["FLORI_STEPS_DIR", "FLORI_WHISPER_MODEL"])

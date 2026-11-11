@@ -32,6 +32,8 @@ if [ -n "$skip" ]; then
         *subs-ok*) cue en hello ;;
         # Manual tracks in several languages; lang-xx in the id sets the reported original.
         *subs-both*) cue en hello; cue zh-Hant 哈囉; cue zh-Hans 你好 ;;
+        # TED-Ed: English and a community translation into traditional Chinese.
+        *subs-tw*) cue en hello; cue zh-TW 這個標題 ;;
         *subs-zh*) cue zh-Hans 你好 ;;
         *subs-fr*) cue fr bonjour; cue en hello; cue zh-Hans 你好 ;;
         *subs-stall*) exec sleep 30 ;;
@@ -67,6 +69,9 @@ case $url in
         case $template in *vcodec*)
             media=', "width": 1280, "height": 720, "fps": 29.97, "vcodec": "avc1.64001F", "acodec": "mp4a.40.2", "tags": ["talk", " ted  ed ", "talk", ""]' ;;
         esac
-        printf '{"title": "Title", "uploader": "U", "duration": 12.5, "upload_date": "20240102"%s%s}' \
-            "${language:+, \"language\": \"$language\"}" "$media" > "$meta" ;;
+        # title-tw: a traditional Chinese title; title-ja: a Japanese one with kanji.
+        title=Title
+        case $url in *title-tw*) title=這個標題說廣 ;; *title-ja*) title=東京の標題 ;; esac
+        printf '{"title": "%s", "uploader": "U", "duration": 12.5, "upload_date": "20240102"%s%s}' \
+            "$title" "${language:+, \"language\": \"$language\"}" "$media" > "$meta" ;;
 esac

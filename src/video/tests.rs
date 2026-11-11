@@ -664,6 +664,8 @@ impl FetchRun {
             tmp_dir: tmp.path().into(),
             ytdlp: fixture("fake/yt-dlp").into(),
             curl: fixture("fake/curl").into(),
+            python: "python3".into(),
+            steps_dir: Some(fixture("fake").to_string_lossy().into_owned()),
         };
         FetchRun { job, tmp, env }
     }
@@ -678,6 +680,11 @@ impl FetchRun {
 
     fn log(&self) -> String {
         fs::read_to_string(self.job.path().join("steps/fake-yt-dlp.log")).unwrap_or_default()
+    }
+
+    /// The fake whisper.py modes that ran, one per line.
+    fn whisper_log(&self) -> String {
+        fs::read_to_string(self.job.path().join("steps/fake-whisper.log")).unwrap_or_default()
     }
 
     fn manifest(&self) -> Manifest {
@@ -897,6 +904,58 @@ async fn original_language_picks_the_transcript_and_chinese_becomes_the_translat
         let sub_langs = format!("--sub-langs {} ", case.sub_langs);
         assert!(subtitle_run.contains(&sub_langs), "{id}: {subtitle_run}");
     }
+}
+
+#[tokio::test]
+async fn chinese_titles_and_tracks_become_simplified() {
+    let srt = |run: &FetchRun, file: &str| {
+        let text = fs::read_to_string(run.out().join(file)).unwrap();
+        text.lines().nth(2).unwrap().to_owned()
+    };
+    // TED-Ed's case with a traditional title: the community translation is a candidate.
+    let run = FetchRun::new("youtube", "video-title-tw-subs-tw", None);
+    run.run().await.unwrap();
+    let manifest = run.manifest();
+    // The simplified title names the job and the note; the meta keeps the platform's.
+    assert_eq!(manifest.title.as_deref(), Some("这个标题说广"));
+    assert_eq!(
+        manifest.meta["title"],
+        MetaValue::Text("這個標題說廣".into())
+    );
+    assert_eq!(srt(&run, "manual_subtitle_zh.srt"), "这个标题");
+    assert_eq!(srt(&run, "manual_subtitle_en.srt"), "hello");
+    assert_eq!(run.whisper_log(), "t2s\n");
+    assert_eq!(
+        names(&run.out()),
+        [
+            "manifest.json",
+            "manual_subtitle_en.srt",
+            "manual_subtitle_zh.srt",
+            "video.mp4"
+        ]
+    );
+
+    // A known English original: the traditional track is the human translation.
+    let run = FetchRun::new("youtube", "video-lang-en-subs-tw", None);
+    run.run().await.unwrap();
+    assert_eq!(srt(&run, "subtitle_zh.srt"), "这个标题");
+    assert_eq!(srt(&run, "subtitle.srt"), "hello");
+    assert_eq!(run.manifest().title.as_deref(), Some("Title"));
+
+    // A Japanese title keeps its kanji, and nothing Chinese means no Python at all.
+    let run = FetchRun::new("youtube", "video-title-ja-subs-404", None);
+    run.run().await.unwrap();
+    assert_eq!(run.manifest().title.as_deref(), Some("東京の標題"));
+    assert_eq!(run.whisper_log(), "");
+}
+
+#[test]
+fn chinese_means_ideographs_without_kana_or_hangul() {
+    assert!(chinese("脚踩刹车踏板，为何会刹停几吨重的汽车？"));
+    assert!(chinese("4 ways 注意力"));
+    assert!(!chinese("東京の標題"));
+    assert!(!chinese("한국어 漢字"));
+    assert!(!chinese("4 ways to fix your attention span"));
 }
 
 #[tokio::test]

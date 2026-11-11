@@ -57,6 +57,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | env |
 |---|---|
+| video-fetch | FLORI_STEPS_DIR(运行 `whisper.py t2s`) |
 | video-fetch(youtube) | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY |
 | video-fetch(bilibili) | FLORI_BILI_SESSDATA(服务端有值时才传);不带代理 |
 | video-transcribe | FLORI_WHISPER_MODEL、FLORI_STEPS_DIR |
@@ -95,12 +96,13 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | publish | 无 | 无 |
 
 - 进 vault 的逻辑名只有 note、transcript、original、translation:note 写成 `<标题>.md`,其余写成 `<逻辑名>.md`;合并后的 assets 放进 `assets/`。其余逻辑名只留在 job 目录。
-- 标题取步骤顺序中第一个非 null 的 manifest.title。
+- 标题取步骤顺序中第一个非 null 的 manifest.title。video-fetch 的 manifest.title 是转成简体的标题,meta.title 保留平台原标题。
 - transcript.json:`{"language": str|null, "segments": [{"start_ms": int, "end_ms": int, "text": str}]}`。
 - figures.json:`[{"label": str, "caption": str, "images": [basename]}]`,按页面顺序,每个最外层的 figure 元素一项(ltx_figure、ltx_table 等,不在跳过的元素里)。label 是图注的编号标签去掉冒号,如 "Figure 2",没有时为空串;caption 是图注其余的纯文本,公式写成 `$TeX$`,脚注不算,压成一行、去掉控制字符,至多 1000 字符;images 是它里面所有图片(含嵌套面板与 object)在 assets 里的名字,按页面顺序去重。没有图片的不算,所以纯表格不在其中。
 - sections.json 的 text 是未转义的原文;写进 Markdown 的一方(video-frames 的 transcript.md、translate 的双语版与加标点版)统一用 `pipeline::escape_markdown` 转义。Section 类型、取前序文件(`pipeline::step_file`)与节时间格式(`pipeline::clock`)只在 src/pipeline.rs 定义一次。
 - translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long;chinese 只出现在 arXiv),too_long 时另有 chunks(int)。译出时另有 translation_source:ai(调用 AI)或 subtitle(视频用 video-fetch 的 subtitle_zh)。中文视频加了标点时 translated 为 false,另有 punctuated(true)、sections(送去加标点的有文字的节数,int)、kept_original(回复用不上、保留原文的节数,int)、corrected(采用的同音替换处数,int)与 reverted(还原的其它改动处数,int)。
 
+- 简体中文:video-fetch 把留下的每条中文字幕(subtitle.srt 为中文时、subtitle_zh.srt、manual_subtitle_zh.srt、ai_subtitle_zh.srt)与中文标题(有汉字、没有假名和谚文)用 `python3 -I $FLORI_STEPS_DIR/whisper.py t2s <in.json> <out.json>` 转成简体,输入输出都是字符串数组,与 whisper 输出所用的 OpenCC t2s 相同;没有中文时不调用。转写稿、人工译文、job 标题、主笔记文件名与 frontmatter 的 title 因此都是简体。
 - video-fetch 的字幕:取人工字幕与 B站 AI 字幕,不取 YouTube 自动字幕;尽力而为,失败只记日志,由 whisper 转写。
   - 原声语言取 yt-dlp 的 language 的主子标签(`en-US` 记 en);不是纯小写字母标签时按未知处理。YouTube 的 language 来自音轨或原声自动字幕(yt-dlp 同时把后者列为 `<lang>-orig`),没有别的字段知道更多。yt-dlp 的 B站提取器不给 language,B站总按未知处理。
   - subtitle.srt:只在原声已知时写,只取原声语言的轨,原声为中文时没有中文轨再用英文。同一语言内简体先于繁体,不带地区的标签先于带地区的。
@@ -174,7 +176,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 
 | frontmatter 字段 | 值 |
 |---|---|
-| title、aliases | 原标题;aliases 是只含原标题的数组 |
+| title、aliases | 标题(中文已转成简体);aliases 先是 title,与 video-fetch 或 arxiv-fetch 的 meta.title(平台原标题)不同时再加上原标题 |
 | source_url | 原始链接 |
 | platform、source_id | bilibili/youtube/arxiv 与平台 ID |
 | uploader、published、duration_min、transcript | 视频:video-fetch 的 uploader、published(YYYY-MM-DD)与 duration_ms 四舍五入的整分钟数(不足半分钟记 1);transcript 是 video-transcribe 的来源,manual(人工字幕)、ai(B站 AI 字幕)或 whisper |

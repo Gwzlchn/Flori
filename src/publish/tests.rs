@@ -346,8 +346,9 @@ fn video_uses_translated_transcript_and_collection() {
     // 2026-11-07 20:30 UTC is already the 8th in +08:00.
     job.created = "2026-11-07T20:30:00Z".into();
     fx.write_job(&job);
+    // video-fetch made the title simplified; its meta keeps the platform's traditional one.
     let fetched = [
-        ("title", MetaValue::Text("Talk / Part 1".into())),
+        ("title", MetaValue::Text("講座 / 第一講".into())),
         ("uploader", MetaValue::Text("PAKEN财经说".into())),
         ("duration_ms", MetaValue::Int(1_850_912)),
         ("published", MetaValue::Text("2026-11-07".into())),
@@ -355,7 +356,7 @@ fn video_uses_translated_transcript_and_collection() {
     fx.step(
         1,
         StepName::VideoFetch,
-        Some("Talk / Part 1"),
+        Some("讲座 / 第一讲"),
         &[("video", "video.mp4", "mp4")],
         &[],
         &fetched,
@@ -417,7 +418,13 @@ fn video_uses_translated_transcript_and_collection() {
     );
     assert!(folder.join("assets/frame-0.jpg").exists());
     assert!(!folder.join("video.mp4").exists());
-    let note = fs::read_to_string(folder.join("Talk Part 1.md")).unwrap();
+    let note = fs::read_to_string(folder.join("讲座 第一讲.md")).unwrap();
+    assert!(
+        note.starts_with(
+            "---\ntitle: \"讲座 / 第一讲\"\naliases: [\"讲座 / 第一讲\",\"講座 / 第一講\"]\n"
+        ),
+        "{note}"
+    );
     // Source facts follow source_id; the folder keeps the job's date, not the upload date.
     assert!(
         note.contains(

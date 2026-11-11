@@ -152,6 +152,21 @@ class WhisperTest(unittest.TestCase):
         self.assertIn("一只股票", raw)
         self.assertEqual(json.loads(raw)["segments"][0]["text"], "一只股票")
 
+    def test_t2s_converts_every_string_without_a_model(self) -> None:
+        self.model = None  # loading it would fail the call
+        with tempfile.TemporaryDirectory() as tmp:
+            source, out = pathlib.Path(tmp, "in.json"), pathlib.Path(tmp, "out.json")
+            source.write_text(json.dumps(["一隻股票", "1\n00:00:00,000 --> 00:00:01,000\n變得從無到有\n", "Hello"]))
+            self.assertEqual(whisper.main(["whisper.py", "t2s", str(source), str(out)]), 0)
+            self.assertEqual(
+                json.loads(out.read_text(encoding="utf-8")),
+                ["一只股票", "1\n00:00:00,000 --> 00:00:01,000\n变得从无到有\n", "Hello"],
+            )
+            self.assertEqual(self.configs, ["t2s"])
+            source.write_text(json.dumps({"title": "標題"}))
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(whisper.main(["whisper.py", "t2s", str(source), str(out)]), whisper.PERMANENT)
+
 
 if __name__ == "__main__":
     unittest.main()

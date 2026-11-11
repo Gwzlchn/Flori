@@ -1,9 +1,12 @@
-"""faster-whisper language detection and transcription, called by the video-transcribe step.
+"""faster-whisper language detection and transcription, called by the video-transcribe step,
+and the OpenCC conversion to simplified Chinese, called by video-fetch.
 
 Usage: python3 -I whisper.py detect|transcribe <audio> <out_json>
+       python3 -I whisper.py t2s <in_json> <out_json>
 The model directory comes from FLORI_WHISPER_MODEL. detect writes {language,
 language_probability}; transcribe writes transcript.json plus language_probability, which
-video-transcribe moves into the step meta. Chinese comes out in simplified characters.
+video-transcribe moves into the step meta. Chinese comes out in simplified characters. t2s reads
+a JSON array of strings and writes the same array converted with OpenCC t2s; it loads no model.
 """
 
 import json
@@ -94,16 +97,28 @@ def transcribe(model, audio) -> dict:
     }
 
 
+def t2s(in_json: str) -> list[str]:
+    """Every string of the array in simplified characters; anything else is refused."""
+    import opencc
+
+    with open(in_json, encoding="utf-8") as f:
+        texts = json.load(f)
+    if not isinstance(texts, list) or not all(isinstance(t, str) for t in texts):
+        raise ValueError("t2s takes a JSON array of strings")
+    convert = opencc.OpenCC("t2s").convert
+    return [convert(text) for text in texts]
+
+
 MODES = {"detect": detect, "transcribe": transcribe}
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 4 or argv[1] not in MODES:
-        print("usage: whisper.py detect|transcribe <audio> <out_json>", file=sys.stderr)
+    if len(argv) != 4 or argv[1] not in (*MODES, "t2s"):
+        print("usage: whisper.py detect|transcribe <audio> <out_json> | t2s <in_json> <out_json>", file=sys.stderr)
         return PERMANENT
-    mode, audio, out_json = argv[1:]
+    mode, source, out_json = argv[1:]
     try:
-        output = MODES[mode](load_model(), audio)
+        output = t2s(source) if mode == "t2s" else MODES[mode](load_model(), source)
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False)
     except Exception as err:  # a decoded WAV fails the same way on every attempt

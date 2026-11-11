@@ -158,6 +158,11 @@ impl Inner {
             .proxy
             .iter()
             .flat_map(|p| [("HTTPS_PROXY", p.into()), ("HTTP_PROXY", p.into())]);
+        // video-fetch runs whisper.py t2s to turn Chinese subtitles and titles into simplified
+        // characters.
+        if name == StepName::VideoFetch {
+            env.push(("FLORI_STEPS_DIR", self.steps_dir.clone().into()));
+        }
         match name {
             StepName::VideoFetch if job.source.platform == Platform::Youtube => env.extend(proxy),
             StepName::VideoFetch => {
