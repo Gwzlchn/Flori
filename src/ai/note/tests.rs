@@ -67,6 +67,15 @@ fn paper(fx: &Fixture, figures: &[(&str, &str, &[&str])], images: &[&str]) -> st
     dir
 }
 
+fn svg_fixture(name: &str) -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/note")
+            .join(name),
+    )
+    .unwrap()
+}
+
 fn read_note(out: &Path) -> String {
     fs::read_to_string(out.join("note.md")).unwrap()
 }
@@ -137,6 +146,7 @@ fn figure_paper(fx: &Fixture, extra: &str) {
     let dir = fx.step(2, StepName::ArxivConvert, None, &files, &assets, &[]);
     real_images(&dir, &["fig1.png", "fig3a.png", "logo.png"], "png");
     real_images(&dir, &["fig3b.jpg"], "jpg");
+    fs::write(dir.join("assets/fig2.svg"), svg_fixture("figure.svg")).unwrap();
     fs::write(dir.join("assets/big.png"), image_bytes("png", 3000, 2000)).unwrap();
 }
 
@@ -146,7 +156,7 @@ async fn a_paper_sends_its_captioned_figures_and_links_them() {
     // The fake echoes its input, so references written here come back as the model's.
     figure_paper(
         &fx,
-        "See ![总览 | 箭头指向 [路由器] \\ 输出](img:1) and ![](img:4 \"title\") \
+        "See ![总览 | 箭头指向 [路由器] \\ 输出](img:1) and ![](img:5 \"title\") \
          and ![bad](img:99) and ![none](img:) and ![kept](assets/fig1.png).",
     );
     // ffmpeg must not see credentials, only PATH, LANG and TMPDIR.
@@ -166,12 +176,14 @@ async fn a_paper_sends_its_captioned_figures_and_links_them() {
         .iter()
         .map(|i| i["media_type"].as_str().unwrap())
         .collect();
-    // fig2.svg cannot be sent and logo.png is in no figure.
-    assert_eq!(types, ["image/png", "image/png", "image/jpeg", "image/png"]);
+    // fig2.svg goes as a PNG drawing; logo.png is in no figure.
+    let png = "image/png";
+    assert_eq!(types, [png, png, png, "image/jpeg", png]);
     // big.png went through ffmpeg, which may only read a local PNG.
     let calls = ffmpeg_calls(&fx);
-    assert_eq!(calls.len(), 1);
-    let (call, env_names) = calls[0].split_once(" | env ").unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].contains(" -i pipe:0 "), "{}", calls[0]);
+    let (call, env_names) = calls[1].split_once(" | env ").unwrap();
     assert!(
         call.contains("-protocol_whitelist file -f png_pipe -i "),
         "{call}"
@@ -189,18 +201,18 @@ async fn a_paper_sends_its_captioned_figures_and_links_them() {
         assert!(!env_names.contains(&name), "{env_names:?}");
     }
     // The model got the 1568x1045 copy.
-    let head = images[3]["head"].as_str().unwrap();
+    let head = images[4]["head"].as_str().unwrap();
     assert!(head.ends_with("494844520000062000000415"), "{head}");
     let note = read_note(&out);
     assert!(
         note.contains(
             "图片(序号即消息末尾附图的顺序):\n\
-             [1] Figure 1: Overview of the model.\n[2] Figure 3: Ablations.\n\
-             [3] Figure 3: Ablations.\n[4] Table 1: Results.\n"
+             [1] Figure 1: Overview of the model.\n[2] Figure 2: A vector drawing.\n\
+             [3] Figure 3: Ablations.\n[4] Figure 3: Ablations.\n[5] Table 1: Results.\n"
         ),
         "{note}"
     );
-    // N=4 links the original big.png, not the shrunk copy; unknown and missing N are dropped.
+    // N=5 links the original big.png, not the shrunk copy; unknown and missing N are dropped.
     assert!(
         note.contains(
             "See ![总览 / 箭头指向 路由器 输出](assets/fig1.png) and ![](assets/big.png) \
@@ -224,7 +236,16 @@ async fn codex_gets_the_figures_as_image_files() {
             path.file_name().unwrap().to_string_lossy().into_owned()
         })
         .collect();
-    assert_eq!(names, ["fig1.png", "fig3a.png", "fig3b.jpg", "image-3.png"]);
+    assert_eq!(
+        names,
+        [
+            "fig1.png",
+            "image-1.png",
+            "fig3a.png",
+            "fig3b.jpg",
+            "image-4.png"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -480,7 +501,7 @@ async fn failures_keep_their_class_with_images_attached() {
     let (out, result) = run_note(&fx, "03-note").await;
     assert_eq!(result.unwrap_err().exit, StepExit::Auth);
     assert!(!out.join(pipeline::MANIFEST_FILE).exists());
-    assert_eq!(sent_images(&fx).len(), 4);
+    assert_eq!(sent_images(&fx).len(), 5);
 
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
     figure_paper(&fx, "FAKE_RATE_LIMIT");
@@ -653,6 +674,74 @@ async fn a_broken_figures_file_fails_the_note() {
 }
 
 #[tokio::test]
+async fn svg_figures_are_drawn_from_stdin_within_bounds() {
+    let figures: [(&str, &str, &[&str]); 6] = [
+        ("Figure 1", "A plot.", &["plot.svg"]),
+        // External, local and relative references, and a declared size of a million pixels.
+        ("Figure 2", "Hostile.", &["hostile.svg"]),
+        // Too thin to draw within twice side x side pixels either way.
+        ("Figure 3", "Thin.", &["thin.svg"]),
+        // An internal doctype subset can define entities that expand without end, or pull in
+        // external ones.
+        ("Figure 4", "Entities.", &["entities.svg"]),
+        ("Figure 5", "External entities.", &["external.svg"]),
+        ("Figure 6", "A web page.", &["page.svg"]),
+    ];
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let dir = paper(&fx, &figures, &[]);
+    let assets = dir.join("assets");
+    let thin = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="100000000"/>"#;
+    let entities = "<?xml version=\"1.0\"?>\n<!DOCTYPE svg [<!ENTITY a \"aaaa\">]>\n\
+                    <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\">&a;</svg>";
+    let external = "<!DOCTYPE svg [ %external; ]>\n<svg width=\"10\" height=\"10\"/>";
+    let page = "<!DOCTYPE html><html><body><svg width=\"10\" height=\"10\"></svg></body></html>";
+    for (name, text) in [
+        ("plot.svg", svg_fixture("figure.svg")),
+        ("hostile.svg", svg_fixture("hostile.svg")),
+        ("thin.svg", thin.to_owned()),
+        ("entities.svg", entities.to_owned()),
+        ("external.svg", external.to_owned()),
+        ("page.svg", page.to_owned()),
+    ] {
+        fs::write(assets.join(name), text).unwrap();
+    }
+    let mut manifest = pipeline::read_manifest(&dir).unwrap();
+    manifest.assets = figures.iter().map(|f| f.2[0].to_owned()).collect();
+    pipeline::write_manifest(&dir, &manifest).unwrap();
+
+    let (out, result) = run_note(&fx, "03-note").await;
+    result.unwrap();
+    assert_eq!(
+        listed(&read_note(&out)),
+        ["Figure 1: A plot.", "Figure 2: Hostile."]
+    );
+    let images = sent_images(&fx);
+    let sizes: Vec<Option<(u32, u32)>> = images.iter().map(sent_size).collect();
+    // 200pt x 100pt and a million square, both drawn 1568 wide.
+    assert_eq!(sizes, [Some((1568, 784)), Some((1568, 1568))]);
+    // The thin drawing is tried both ways; the other three never reach ffmpeg.
+    let calls = ffmpeg_calls(&fx);
+    assert_eq!(calls.len(), 4, "{calls:#?}");
+    for call in &calls {
+        let (call, env_names) = call.split_once(" | env ").unwrap();
+        assert!(
+            call.contains(" -protocol_whitelist pipe -f svg_pipe -frame_size "),
+            "{call}"
+        );
+        assert!(
+            call.contains(" -max_pixels 4917248 -i pipe:0 -vf "),
+            "{call}"
+        );
+        // The drawing has no file name: nothing it references can resolve next to it.
+        assert!(!call.contains("assets"), "{call}");
+        assert!(call.ends_with(".png"), "{call}");
+        let env_names: Vec<&str> = env_names.split(',').collect();
+        assert!(env_names.contains(&"PATH") && !env_names.contains(&"HOME"));
+    }
+    assert!(calls[2].contains(" -width 1568 ") && calls[3].contains(" -height 1568 "));
+}
+
+#[tokio::test]
 async fn image_type_comes_from_the_bytes_not_the_name() {
     let figures: [(&str, &str, &[&str]); 2] = [
         ("Figure 1", "A JPEG named png.", &["photo.png"]),
@@ -688,4 +777,59 @@ async fn an_image_still_too_large_after_shrinking_is_left_out() {
     assert!(ffmpeg_calls(&fx)[0].contains("-f jpeg_pipe -i "));
     assert_eq!(sent_images(&fx).len(), 1);
     assert_eq!(listed(&read_note(&out)), ["Figure 2: Fine."]);
+}
+
+/// Raw RGB bytes of an image, decoded by the real ffmpeg.
+fn rgb(path: &Path) -> Vec<u8> {
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    output.stdout
+}
+
+/// The image's ffmpeg with its librsvg decoder; run the ignored tests inside flori:local.
+#[tokio::test]
+#[ignore = "needs ffmpeg with librsvg"]
+async fn real_ffmpeg_draws_svg_on_white_without_its_references() {
+    let dir = tempfile::tempdir().unwrap();
+    // A red picture next to the drawing, where hostile.svg's relative references point.
+    let made = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i", "color=red:s=16x16"])
+        .args(["-frames:v", "1", "-update", "1"])
+        .arg(dir.path().join("secret.png"))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let env = crate::ai::inherited();
+    let draw = |name: &str, text: String| {
+        let path = dir.path().join(name);
+        fs::write(&path, text).unwrap();
+        let (env, dir) = (env.clone(), dir.path().to_owned());
+        async move { rasterize(&env, &path, FIGURE_SIDE, &dir, 0).await }
+    };
+
+    let png = draw("hostile.svg", svg_fixture("hostile.svg"))
+        .await
+        .unwrap();
+    assert_eq!(image_size(&fs::read(&png).unwrap()), Some((1568, 1568)));
+    // Nothing it references was drawn: every pixel is the white background.
+    assert!(rgb(&png).iter().all(|&b| b == 255));
+
+    let png = draw("figure.svg", svg_fixture("figure.svg")).await.unwrap();
+    assert_eq!(image_size(&fs::read(&png).unwrap()), Some((1568, 784)));
+    let pixels = rgb(&png);
+    // Transparent areas come out white, the drawing itself does not.
+    assert_eq!(pixels[..3], [255, 255, 255]);
+    assert!(pixels.iter().any(|&b| b < 128));
+
+    let thin = r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="100000000"/>"#;
+    let failure = draw("thin.svg", thin.to_owned())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(failure.contains("is invalid"), "{failure}");
 }

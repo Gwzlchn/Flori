@@ -13,7 +13,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt, process::Command};
 
 use super::{Env, INPUT_MARKER, Image, Scratch, complete, inherited, media_type, until_terminated};
 use crate::pipeline::{self, Manifest, Pipeline, Section, StepFailure, StepName, StepResult};
@@ -39,6 +39,9 @@ const MAX_IMAGE_BYTES: u64 = 1 << 20;
 const FRAME_SIDE: u32 = 768;
 const FIGURE_SIDE: u32 = 1568;
 const SHRINK_TIMEOUT: Duration = Duration::from_secs(120);
+/// How far into a file the SVG root element is looked for, past an XML declaration, comments and
+/// a doctype.
+const SVG_HEAD_BYTES: u64 = 4096;
 
 /// An image the note may show.
 #[derive(Debug)]
@@ -211,18 +214,50 @@ fn paper_figures(dir: &Path, converted: &Manifest) -> Result<Vec<Picture>, StepF
     Ok(spread(pictures, MAX_REQUEST_IMAGES))
 }
 
-/// The asset's path when it is a file whose bytes are an image the CLIs take; SVG, or an HTML
-/// page saved under an image name, is not.
+/// The asset's path when its bytes are an image the CLIs take, or an SVG drawing, which
+/// [`sendable`] turns into a PNG. An HTML page saved under an image name is neither.
 fn usable(dir: &Path, name: &str) -> Option<PathBuf> {
     let path = dir.join(name);
-    head(&path).ok().and_then(|h| media_type(&h)).map(|_| path)
+    let image = head(&path, 16).ok().and_then(|h| media_type(&h)).is_some();
+    (image || is_svg(&path)).then_some(path)
 }
 
-/// The first bytes of a file, enough for [`media_type`].
-fn head(path: &Path) -> io::Result<Vec<u8>> {
-    let mut head = Vec::with_capacity(16);
-    fs::File::open(path)?.take(16).read_to_end(&mut head)?;
+/// The first `len` bytes of a file, or fewer when it is shorter.
+fn head(path: &Path, len: u64) -> io::Result<Vec<u8>> {
+    let mut head = Vec::new();
+    fs::File::open(path)?.take(len).read_to_end(&mut head)?;
     Ok(head)
+}
+
+/// Whether the file is an SVG document: after an optional byte order mark, XML declaration,
+/// comments and doctype, the root element is `<svg`. A doctype with an internal subset is
+/// refused, since entity definitions are how XML documents blow up in a parser.
+fn is_svg(path: &Path) -> bool {
+    let Ok(bytes) = head(path, SVG_HEAD_BYTES) else {
+        return false;
+    };
+    let mut rest = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    loop {
+        rest = rest.trim_ascii_start();
+        let skip = |open: &[u8], close: &[u8]| {
+            let after = rest.strip_prefix(open)?;
+            let end = after.windows(close.len()).position(|w| w == close)?;
+            Some((&after[..end], &after[end + close.len()..]))
+        };
+        if let Some((_, after)) = skip(b"<?", b"?>").or_else(|| skip(b"<!--", b"-->")) {
+            rest = after;
+        } else if let Some((doctype, after)) = skip(b"<!DOCTYPE", b">") {
+            if doctype.contains(&b'[') {
+                return false;
+            }
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    rest.strip_prefix(b"<svg")
+        .and_then(|after| after.first())
+        .is_some_and(|b| b.is_ascii_whitespace() || matches!(b, b'>' | b'/'))
 }
 
 /// At most `k` items spread evenly over their keys (time or position), first and last included.
@@ -301,20 +336,28 @@ fn within_budget(pictures: Vec<Picture>, budget: u64) -> Vec<Picture> {
         .collect()
 }
 
-/// Pictures ready to send. One that is too large for `side` is shrunk by ffmpeg into `scratch`; one that
-/// cannot be read or shrunk, or is still too large afterwards, is left out, since a note without
-/// it is still a note and a rejected image would fail the whole call.
+/// Pictures ready to send. An SVG is drawn into a PNG and one that is too large for `side` is
+/// shrunk, both by ffmpeg into `scratch`; one that cannot be read, drawn or shrunk, or is still
+/// too large afterwards, is left out, since a note without it is still a note and a rejected
+/// image would fail the whole call.
 async fn sendable(env: &Env, pictures: Vec<Picture>, side: u32, scratch: &Path) -> Vec<Picture> {
     let mut out = Vec::with_capacity(pictures.len());
     for (i, mut picture) in pictures.into_iter().enumerate() {
-        let shrunk = match too_large(&picture.path, side) {
-            Ok(false) => Ok(None),
-            Ok(true) => match shrink(env, &picture.path, side, scratch, i).await {
-                Ok(copy) if too_large(&copy, side).unwrap_or(true) => {
-                    Err(io::Error::other("still too large after shrinking"))
-                }
-                result => result.map(Some),
-            },
+        let copy = if is_svg(&picture.path) {
+            Ok(Some(rasterize(env, &picture.path, side, scratch, i).await))
+        } else {
+            match too_large(&picture.path, side) {
+                Ok(false) => Ok(None),
+                Ok(true) => Ok(Some(shrink(env, &picture.path, side, scratch, i).await)),
+                Err(e) => Err(e),
+            }
+        };
+        let shrunk = match copy {
+            Ok(Some(Ok(copy))) if too_large(&copy, side).unwrap_or(true) => {
+                Err(io::Error::other("still too large after shrinking"))
+            }
+            Ok(Some(result)) => result.map(Some),
+            Ok(None) => Ok(None),
             Err(e) => Err(e),
         };
         match shrunk {
@@ -380,8 +423,7 @@ fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
 
 /// A copy within `side` x `side` for the model only. PNG stays PNG so transparency stays readable;
 /// everything else becomes JPEG. The image bytes come from the paper, so ffmpeg reads them with
-/// a demuxer fixed by their real type, may only open local files, and gets no credentials: of
-/// the step's environment only PATH, LANG and TMPDIR.
+/// a demuxer fixed by their real type, may only open local files, and gets no credentials.
 async fn shrink(
     env: &Env,
     source: &Path,
@@ -389,7 +431,7 @@ async fn shrink(
     scratch: &Path,
     n: usize,
 ) -> io::Result<PathBuf> {
-    let demuxer = match media_type(&head(source)?) {
+    let demuxer = match media_type(&head(source, 16)?) {
         Some("image/png") => "png_pipe",
         Some("image/jpeg") => "jpeg_pipe",
         Some("image/gif") => "gif",
@@ -398,12 +440,7 @@ async fn shrink(
     };
     let extension = if demuxer == "png_pipe" { "png" } else { "jpg" };
     let target = scratch.join(format!("image-{n}.{extension}"));
-    let scale =
-        format!("scale='min({side},iw)':'min({side},ih)':force_original_aspect_ratio=decrease");
-    let allowed = env
-        .iter()
-        .filter(|(k, _)| ["PATH", "LANG", "TMPDIR"].iter().any(|name| k == name));
-    let mut cmd = Command::new("ffmpeg");
+    let mut cmd = ffmpeg(env);
     cmd.args([
         "-nostdin",
         "-loglevel",
@@ -414,12 +451,9 @@ async fn shrink(
     ])
     .args(["-f", demuxer, "-i"])
     .arg(source)
-    .args(["-vf", &scale, "-frames:v", "1"])
+    .args(["-vf", &fit(side), "-frames:v", "1"])
     .arg(&target)
-    .env_clear()
-    .envs(allowed.map(|(k, v)| (k, v)))
-    .stdin(Stdio::null())
-    .kill_on_drop(true);
+    .stdin(Stdio::null());
     let status = tokio::time::timeout(SHRINK_TIMEOUT, cmd.status())
         .await
         .map_err(|_| io::Error::other("ffmpeg timed out"))??;
@@ -427,6 +461,84 @@ async fn shrink(
         return Err(io::Error::other(format!("ffmpeg failed ({status})")));
     }
     Ok(target)
+}
+
+/// A PNG of an SVG within `side` x `side`, on white, for the model only. ffmpeg's librsvg decoder
+/// reads the drawing from stdin, so it has no file name for relative references to resolve
+/// against, and only the pipe protocol is allowed. It draws `side` wide, or `side` high when
+/// that would take more than twice `side` x `side` pixels; the declared size only sets the
+/// aspect ratio, and a drawing too thin for both is left out.
+async fn rasterize(
+    env: &Env,
+    source: &Path,
+    side: u32,
+    scratch: &Path,
+    n: usize,
+) -> io::Result<PathBuf> {
+    let svg = fs::read(source)?;
+    // The demuxer takes the whole input as one frame only when told its size.
+    let frame_size = i32::try_from(svg.len()).map_err(|_| io::Error::other("SVG too large"))?;
+    let target = scratch.join(format!("image-{n}.png"));
+    // Cairo renders premultiplied alpha, so a pixel over white is its color plus 255 - alpha.
+    let white = ["r", "g", "b"].map(|c| format!("{c}='{c}(X,Y)+255-alpha(X,Y)'"));
+    let filter = format!("{},geq={},format=rgb24", fit(side), white.join(":"));
+    let max_pixels = (2 * u64::from(side) * u64::from(side)).to_string();
+    let mut failure = io::Error::other("ffmpeg did not run");
+    for axis in ["-width", "-height"] {
+        let mut cmd = ffmpeg(env);
+        cmd.args(["-nostdin", "-loglevel", "error", "-y"])
+            .args(["-protocol_whitelist", "pipe", "-f", "svg_pipe"])
+            .args(["-frame_size", &frame_size.to_string(), "-c:v", "librsvg"])
+            .args([axis, &side.to_string(), "-max_pixels", &max_pixels])
+            .args(["-i", "pipe:0", "-vf", &filter, "-frames:v", "1"])
+            .arg(&target)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            // Its errors go into the one line the caller logs.
+            .stderr(Stdio::piped());
+        let run = async {
+            let mut child = cmd.spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                // ffmpeg may stop reading when it gives up; its status tells.
+                let _ = stdin.write_all(&svg).await;
+            }
+            child.wait_with_output().await
+        };
+        let output = tokio::time::timeout(SHRINK_TIMEOUT, run)
+            .await
+            .map_err(|_| io::Error::other("ffmpeg timed out"))??;
+        if output.status.success() && target.is_file() {
+            return Ok(target);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason: String = stderr
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(200)
+            .collect();
+        failure = io::Error::other(format!("ffmpeg could not draw it: {reason}"));
+    }
+    Err(failure)
+}
+
+/// Scales into `side` x `side`, keeping the aspect ratio and never enlarging.
+fn fit(side: u32) -> String {
+    format!("scale='min({side},iw)':'min({side},ih)':force_original_aspect_ratio=decrease")
+}
+
+/// ffmpeg on image bytes that come from the paper or the video: of the step's environment only
+/// PATH, LANG and TMPDIR, so no credentials, and killed when its future is dropped.
+fn ffmpeg(env: &Env) -> Command {
+    let allowed = env
+        .iter()
+        .filter(|(k, _)| ["PATH", "LANG", "TMPDIR"].iter().any(|name| k == name));
+    let mut cmd = Command::new("ffmpeg");
+    cmd.env_clear()
+        .envs(allowed.map(|(k, v)| (k, v)))
+        .kill_on_drop(true);
+    cmd
 }
 
 /// Replaces each `![描述](img:N)` with `![描述](assets/<basename>)` when N names a sent image and

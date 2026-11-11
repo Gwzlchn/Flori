@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- A small plot as matplotlib writes it, transparent where nothing is drawn. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="200pt" height="100pt" viewBox="0 0 200 100">
+  <polyline points="10,90 60,40 110,55 190,10" fill="none" stroke="#1f77b4" stroke-width="2"/>
+  <line x1="10" y1="90" x2="190" y2="90" stroke="black" stroke-opacity="0.3"/>
+  <text x="20" y="20" font-size="14">Loss</text>
+</svg>

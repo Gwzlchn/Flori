@@ -130,7 +130,8 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - note:
   - 一次调用同时发原文与图,图按序号 [N] 列出,序号即附图顺序。视频按时间顺序发 sections 里的全部关键帧,每张写时间与该节文字前 150 字;笔记每个要点只要有能说明它的画面就配一张。论文按 figures.json 的顺序发每个图的全部图片,每张都写该图的 "label: caption" 前 300 字;只取 arxiv-convert 的 manifest.assets 里有的名字,同一张图只发一次。没有 figures.json(早于它转换的论文)时不发图。
   - 图数和总量不设固定上限,只受单次请求的两条上限约束:至多 600 张,超出时视频按时间、论文按位置均匀取;缩图之后所发图片的 base64 合计至多 20 MiB(API 单次请求体上限 32 MB,含正文,留出余量),超出时按序号位置均匀丢图,首尾保留,job.log 记一行。
-  - 只发内容确实是 jpeg、png、gif、webp 的图,media_type 按文件头判断,不看扩展名;SVG、扩展名是图片但内容不是的文件跳过。
+  - 只发内容确实是 jpeg、png、gif、webp 的图,media_type 按文件头判断,不看扩展名;扩展名是图片但内容不是的文件跳过。
+  - SVG(去掉 BOM、XML 声明、注释与 doctype 后根元素是 `<svg`;doctype 带内部子集 `[` 的不算)由 ffmpeg 的 librsvg 解码器画成 PNG 只送模型:SVG 经 stdin 送入(`-f svg_pipe -frame_size <字节数> -i pipe:0`,`-protocol_whitelist pipe`),没有文件名,相对引用与外部引用都解析不到;先画成长边上限那么宽,像素超过上限平方的两倍(`-max_pixels`)时改画成那么高,声明的尺寸只决定宽高比,两种都画不出的跳过;画好后按预乘 alpha 铺白底,再按下条的上限检查。超时与环境变量同下条的缩图;失败只在 job.log 记一行,ffmpeg 的报错并入这一行。
   - 送模型的图有长边上限:关键帧 768px,与源视频分辨率无关;论文图 1568px。大于 1 MiB 或长边超限的图用 ffmpeg 缩到上限以内只送模型(PNG 仍为 PNG,其余转 JPEG),笔记里仍引用原图;WebP 读不到尺寸,只按字节判断。缩完仍超限或缩不了的图不发。ffmpeg 按文件头固定 demuxer、只允许 file 协议,环境变量只给 PATH、LANG、TMPDIR。
   - 模型用 `![描述](img:N)` 插图,落盘时换成 `![描述](assets/<basename>)`;N 不在清单里时整条图片标记删除。`assets/` 下的图片原样保留,其它图片(http、data:、别的路径)整条删除。描述去掉 `[`、`]`、`\`,`|` 换成 `/`。
 - note 与 translate 失败时 publish 不执行,可手动 retry。
