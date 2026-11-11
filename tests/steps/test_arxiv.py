@@ -111,6 +111,9 @@ class FetchConvertTest(unittest.TestCase):
         self.assertTrue(meta["meta"]["abstract"].startswith("While large-scale"))
         self.assertEqual(meta["meta"]["published"], "2023-05-29")
         self.assertEqual(meta["meta"]["primary_category"], "cs.LG")
+        self.assertEqual(meta["meta"]["categories"], ["cs.LG", "cs.AI", "cs.CL"])
+        self.assertNotIn("comment", meta["meta"])
+        self.assertNotIn("journal_ref", meta["meta"])
         image = fetched / "res/html/2305.18290v3/figures/diagrams/teaser.png"
         self.assertTrue(image.is_file())
         self.assertIn('src="res/html/2305.18290v3/figures/diagrams/teaser.png"', (fetched / "page.html").read_text())
@@ -233,6 +236,31 @@ class FetchConvertTest(unittest.TestCase):
                 meta = manifest(job / "steps/01-arxiv-fetch")["meta"]
                 self.assertNotIn("published", meta)
                 self.assertNotIn("primary_category", meta)
+
+    def test_api_notes_are_bounded_plain_text(self) -> None:
+        page = "https://arxiv.org/html/2305.18290"
+        atom = fixture("2305.18290.atom.xml").decode()
+        notes = (
+            "<arxiv:comment>  NeurIPS 2023\n camera-ready;\x9f 9 pages </arxiv:comment>"
+            f"<arxiv:journal_ref>{'J. Mach. Learn. ' * 100}</arxiv:journal_ref>"
+            '<category term="cs.LG"/><category term=" cs.AI "/><category term=""/>'
+            f'<category term="{"x" * 65}"/>'
+        )
+        api = atom.replace("<published>", notes + "<published>", 1).encode()
+        web = FakeWeb({page: ok(page, "2305.18290.html"), API + "2305.18290": (200, "", api)})
+        job = make_job(pathlib.Path(tempfile.mkdtemp(dir=self.root)), "2305.18290")
+        self.assertEqual(arxiv.fetch(job, job / "steps/01-arxiv-fetch", web), 0)
+        meta = manifest(job / "steps/01-arxiv-fetch")["meta"]
+        self.assertEqual(meta["comment"], "NeurIPS 2023 camera-ready; 9 pages")
+        self.assertEqual(len(meta["journal_ref"]), arxiv.NOTE_CHARS)
+        self.assertTrue(meta["journal_ref"].startswith("J. Mach. Learn. J.") and meta["journal_ref"].endswith("…"))
+        self.assertEqual(meta["categories"], ["cs.LG", "cs.AI", "cs.CL", "x" * 63 + "…"])
+
+        no_categories = re.sub(r"<category [^>]*/>", "", atom).encode()
+        web = FakeWeb({page: ok(page, "2305.18290.html"), API + "2305.18290": (200, "", no_categories)})
+        job = make_job(pathlib.Path(tempfile.mkdtemp(dir=self.root)), "2305.18290")
+        self.assertEqual(arxiv.fetch(job, job / "steps/01-arxiv-fetch", web), 0)
+        self.assertNotIn("categories", manifest(job / "steps/01-arxiv-fetch")["meta"])
 
     def test_http_get_maps_server_errors_to_retry(self) -> None:
         error = urllib.error.HTTPError("https://arxiv.org/html/x", 503, "busy", {}, None)

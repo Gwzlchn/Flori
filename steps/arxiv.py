@@ -30,6 +30,9 @@ UA = "Mozilla/5.0 (X11; Linux x86_64) flori-arxiv/1"
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 ATOM = {"a": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 HOSTS = {"arxiv": "arxiv.org", "ar5iv": "ar5iv.labs.arxiv.org"}
+# The author's comment and journal reference are free text; categories are short terms. Real ones
+# stay well within these bounds.
+NOTE_CHARS, CATEGORY_CHARS, MAX_CATEGORIES = 1000, 64, 32
 
 
 class StepError(Exception):
@@ -114,6 +117,11 @@ def api_meta(arxiv_id: str, get) -> dict:
     published = re.match(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", entry.findtext("a:published", "", ATOM).strip())
     category = entry.find("arxiv:primary_category", ATOM)
     category = (category.get("term") or "").strip() if category is not None else ""
+    categories: list[str] = []
+    for node in entry.findall("a:category", ATOM):
+        term = plain(node.get("term") or "", CATEGORY_CHARS)
+        if term and term not in categories and len(categories) < MAX_CATEGORIES:
+            categories.append(term)
     return {
         "title": " ".join(entry.findtext("a:title", "", ATOM).split()),
         "authors": [n.strip() for n in (a.findtext("a:name", "", ATOM) for a in entry.findall("a:author", ATOM)) if n.strip()],
@@ -121,7 +129,16 @@ def api_meta(arxiv_id: str, get) -> dict:
         "version": f"v{version.group(1)}" if version else None,
         "published": published.group() if published else None,
         "primary_category": category or None,
+        "comment": plain(entry.findtext("arxiv:comment", "", ATOM), NOTE_CHARS) or None,
+        "journal_ref": plain(entry.findtext("arxiv:journal_ref", "", ATOM), NOTE_CHARS) or None,
+        "categories": categories or None,
     }
+
+
+def plain(text: str, limit: int) -> str:
+    """One line of text without control characters, cut to at most limit characters."""
+    text = " ".join("".join(c for c in text if c.isprintable() or c.isspace()).split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def local_path(url: str, used: set[str]) -> str:
@@ -184,6 +201,9 @@ def fetch(job_dir: pathlib.Path, out_dir: pathlib.Path, get=http_get) -> int:
         "html_source": source,
         "published": meta["published"],
         "primary_category": meta["primary_category"],
+        "categories": meta["categories"],
+        "comment": meta["comment"],
+        "journal_ref": meta["journal_ref"],
     }
     # manifest meta values cannot be null (MetaValue in src/pipeline.rs).
     meta = {key: value for key, value in meta.items() if value is not None}

@@ -663,7 +663,45 @@ async fn failed_subtitles_do_not_cost_the_video() {
         assert_eq!(meta["duration_ms"], MetaValue::Int(12_500));
         assert_eq!(meta["published"], MetaValue::Text("2024-01-02".into()));
         assert!(!meta.contains_key("subtitle_language"));
+        assert_eq!(meta["width"], MetaValue::Int(1280));
+        assert_eq!(meta["height"], MetaValue::Int(720));
+        assert_eq!(meta["fps"], MetaValue::Float(29.97));
+        assert_eq!(meta["vcodec"], MetaValue::Text("avc1.64001F".into()));
+        assert_eq!(meta["acodec"], MetaValue::Text("mp4a.40.2".into()));
+        let tags = MetaValue::List(vec!["talk".into(), "ted ed".into()]);
+        assert_eq!(meta["tags"], tags);
+        // The fake's video.mp4 is the 10 bytes "fake video".
+        assert_eq!(meta["filesize_bytes"], MetaValue::Int(10));
     }
+}
+
+#[test]
+fn media_values_are_checked_one_by_one() {
+    let meta = |value: serde_json::Value| {
+        let media: FetchedMedia = serde_json::from_value(value).unwrap();
+        media_meta(&media)
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let odd = meta(serde_json::json!({
+        "width": 0, "height": 1e9, "fps": -1, "vcodec": "none", "acodec": "<script>",
+        "tags": "talk",
+    }));
+    assert!(odd.is_empty(), "{odd:?}");
+    let odd = meta(serde_json::json!({
+        "width": "1280", "height": 70_000, "fps": 5000, "vcodec": "x".repeat(65),
+        "acodec": ["mp4a"], "tags": [1, null, "a\u{7}b", "x".repeat(101)],
+    }));
+    assert!(odd.is_empty(), "{odd:?}");
+    assert!(meta(serde_json::json!({})).is_empty());
+    // Tags stop before their text passes 500 characters; duplicates do not count.
+    let tags: Vec<String> = (0..10).map(|i| format!("{i}{}", "x".repeat(99))).collect();
+    let mut given = vec![tags[0].clone()];
+    given.extend(tags.iter().cloned());
+    let kept = meta(serde_json::json!({"tags": given, "width": 3840, "height": 2160, "fps": 60}));
+    assert_eq!(kept["tags"], MetaValue::List(tags[..5].to_vec()));
+    assert_eq!(kept["width"], MetaValue::Int(3840));
+    assert_eq!(kept["fps"], MetaValue::Float(60.0));
 }
 
 #[tokio::test]

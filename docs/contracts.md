@@ -68,10 +68,10 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | 资源 | 输出 | 超时 | 尝试 |
 |---|---|---|---|---|
-| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(转写用的人工字幕,选轨规则见下)、subtitle_zh.srt(中文人工字幕,作译文)与 ai_subtitle_<lang>.srt(B站 AI 字幕,待 video-transcribe 核对语言);meta: title, uploader, duration_ms, published,有 subtitle.srt 时另有 subtitle_language | 30m | 3 |
+| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(转写用的人工字幕,选轨规则见下)、subtitle_zh.srt(中文人工字幕,作译文)与 ai_subtitle_<lang>.srt(B站 AI 字幕,待 video-transcribe 核对语言);meta: title, uploader, duration_ms, published, width, height, fps, vcodec, acodec, tags(字符串数组), filesize_bytes(video.mp4 的字节数),有 subtitle.srt 时另有 subtitle_language;除 filesize_bytes 外取 yt-dlp 所报下载格式的值,逐项校验:宽高 1–65535 的整数,fps 在 (0, 1000],编码只含字母数字与 `._+-` 且不超过 64 字符,`none` 不写,标签去空白与重复,单个不超过 100 字符、合计不超过 500 字符;不合规、拿不到或标签为空时省略该项 | 30m | 3 |
 | video-transcribe | whisper | transcript.json;人工字幕优先,其次与音频语言相同的 B站 AI 字幕,最后 whisper;meta: origin(subtitle\|whisper), language, language_probability,origin 为 subtitle 时另有 subtitle_kind(manual\|ai) | 2h | 2 |
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节,去重后每节至多 2 张关键帧,全片不设总数上限)、由它渲染的 transcript.md | 1h | 2 |
-| arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv), published(arXiv API 的第一版日期 YYYY-MM-DD)与 primary_category(如 cs.LG),后两项拿不到时省略;官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
+| arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv), published(arXiv API 的第一版日期 YYYY-MM-DD)与 primary_category(如 cs.LG),后两项拿不到时省略;categories(API 列出的全部分类,字符串数组,去重,每项至多 64 字符、至多 32 项)、comment(作者备注)与 journal_ref(期刊引用)取自 API,压成一行、去掉控制字符,至多 1000 字符,没有时省略;官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
 | arxiv-convert | cpu | original.md、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$`,其中未转义的 `$`(`\text{}` 里的公式)依次换成 `\(`、`\)`,公式编号去掉 `$`,公式只在自己的定界符处结束;正文文字里的 `[`、`]`、`!` 一律转义,链接、图片与脚注只由 convert 写出,链接地址百分号编码 | 10m | 2 |
 | note | ai | note.md(读原文与全部关键帧或全部带图注的论文图,只受单次请求的上限约束;中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json,非中文写双语 transcript.md,中文写加标点的 transcript.md;每块调用超时 600s | 3h | 1 |

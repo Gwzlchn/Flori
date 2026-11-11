@@ -12,6 +12,7 @@ use std::{
 };
 
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::Command,
@@ -41,7 +42,30 @@ struct FetchedMeta {
     upload_date: Option<String>,
     /// The spoken language, e.g. `en` or `en-US`. yt-dlp's Bilibili extractor never sets it.
     language: Option<String>,
+    #[serde(flatten)]
+    media: FetchedMedia,
 }
+
+/// What yt-dlp reports about the downloaded formats and the video's tags. Kept as raw JSON:
+/// [`media_meta`] checks each value on its own, so a surprise in one leaves that value out
+/// instead of failing the download.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct FetchedMedia {
+    width: Option<Value>,
+    height: Option<Value>,
+    fps: Option<Value>,
+    vcodec: Option<Value>,
+    acodec: Option<Value>,
+    tags: Option<Value>,
+}
+
+/// MP4 stores the frame size in 16 bits. YouTube allows 500 characters of tags in all and
+/// Bilibili 10 tags, so the tag bounds never cut a real list.
+const MAX_SIDE: i64 = 65_535;
+const MAX_FPS: f64 = 1000.0;
+const MAX_CODEC_CHARS: usize = 64;
+const MAX_TAG_CHARS: usize = 100;
+const MAX_TAGS_CHARS: usize = 500;
 
 /// Throttling that yt-dlp words like a permanent error, e.g. YouTube's "Video unavailable. This
 /// content isn't available, try again later". Checked before [`PERMANENT_ERRORS`].
@@ -164,7 +188,10 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
         .args(["-f", "bv*+ba/b", "-S", "vcodec:h264,res:720,acodec:m4a"])
         .args(["--merge-output-format", "mp4", "--remux-video", "mp4"])
         .arg("--print-to-file")
-        .arg("after_move:%(.{title,playlist_title,uploader,duration,upload_date,language})j")
+        .arg(concat!(
+            "after_move:%(.{title,playlist_title,uploader,duration,upload_date,language,",
+            "width,height,fps,vcodec,acodec,tags})j"
+        ))
         .arg(&meta_file)
         .arg("--")
         .arg(&url);
@@ -250,11 +277,18 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
         ),
         text("subtitle_language", kept.language),
     ];
+    let size = fs::metadata(out_dir.join(VIDEO_FILE))?.len();
+    let mut meta: BTreeMap<String, MetaValue> = meta.into_iter().flatten().collect();
+    meta.extend(media_meta(&fetched.media));
+    meta.insert(
+        "filesize_bytes".into(),
+        MetaValue::Int(i64::try_from(size).unwrap_or(i64::MAX)),
+    );
     let manifest = Manifest {
         title,
         files,
         assets: Vec::new(),
-        meta: meta.into_iter().flatten().collect(),
+        meta,
     };
     write_manifest(out_dir, &manifest)?;
     Ok(())
@@ -389,6 +423,56 @@ pub(super) fn classify_ytdlp(success: bool, errors: &[String]) -> Option<StepFai
     } else {
         StepFailure::retry(error.clone())
     })
+}
+
+/// Frame size, frame rate, codec ids and tags as plain numbers and short strings. A value of
+/// the wrong type, out of range or with odd characters is left out; `none` codecs and an empty
+/// tag list too.
+pub(super) fn media_meta(media: &FetchedMedia) -> Vec<(String, MetaValue)> {
+    let side = |value: &Option<Value>| {
+        let side = value.as_ref()?.as_i64()?;
+        (1..=MAX_SIDE)
+            .contains(&side)
+            .then_some(MetaValue::Int(side))
+    };
+    let fps = media.fps.as_ref().and_then(Value::as_f64);
+    let fps = fps
+        .filter(|f| *f > 0.0 && *f <= MAX_FPS)
+        .map(MetaValue::Float);
+    let codec = |value: &Option<Value>| {
+        let codec = value.as_ref()?.as_str()?;
+        let plain = |c: char| c.is_ascii_alphanumeric() || "._+-".contains(c);
+        let ok = !codec.is_empty() && codec.len() <= MAX_CODEC_CHARS && codec.chars().all(plain);
+        (ok && codec != "none").then(|| MetaValue::Text(codec.to_owned()))
+    };
+    let mut tags: Vec<String> = Vec::new();
+    let mut total = 0;
+    for tag in media.tags.iter().filter_map(Value::as_array).flatten() {
+        let Some(tag) = tag.as_str() else { continue };
+        let tag = tag.split_whitespace().collect::<Vec<_>>().join(" ");
+        let chars = tag.chars().count();
+        let odd = tag.is_empty() || chars > MAX_TAG_CHARS || tag.chars().any(char::is_control);
+        if odd || tags.contains(&tag) {
+            continue;
+        }
+        if total + chars > MAX_TAGS_CHARS {
+            break;
+        }
+        total += chars;
+        tags.push(tag);
+    }
+    let tags = (!tags.is_empty()).then_some(MetaValue::List(tags));
+    [
+        ("width", side(&media.width)),
+        ("height", side(&media.height)),
+        ("fps", fps),
+        ("vcodec", codec(&media.vcodec)),
+        ("acodec", codec(&media.acodec)),
+        ("tags", tags),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| Some((key.to_owned(), value?)))
+    .collect()
 }
 
 /// `YYYYMMDD` from yt-dlp to `YYYY-MM-DD`.

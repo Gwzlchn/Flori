@@ -62,6 +62,11 @@ case $url in
         language=
         case $url in *lang-en*) language=en ;; *lang-fr*) language=fr-FR ;; esac
         case $template in *language*) ;; *) language= ;; esac
-        printf '{"title": "Title", "uploader": "U", "duration": 12.5, "upload_date": "20240102"%s}' \
-            "${language:+, \"language\": \"$language\"}" > "$meta" ;;
+        # The merged formats and tags, as yt-dlp reports them when the template asks.
+        media=
+        case $template in *vcodec*)
+            media=', "width": 1280, "height": 720, "fps": 29.97, "vcodec": "avc1.64001F", "acodec": "mp4a.40.2", "tags": ["talk", " ted  ed ", "talk", ""]' ;;
+        esac
+        printf '{"title": "Title", "uploader": "U", "duration": 12.5, "upload_date": "20240102"%s%s}' \
+            "${language:+, \"language\": \"$language\"}" "$media" > "$meta" ;;
 esac
