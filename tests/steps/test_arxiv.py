@@ -455,6 +455,50 @@ class ConvertMarkupTest(unittest.TestCase):
         self.assertIn("| \\#Params | Acc |", md)
         self.assertIn("We count \\#tokens and 50\\%\\% here, see \\[\\[x\\]\\] \\=\\=hl\\=\\= and C# 1.", md)
 
+    def test_rowspan_cells_keep_the_rows_below_in_their_columns(self) -> None:
+        # A fragment of Table 3 in 1706.03762: header cells and the (A) group label span two rows.
+        def row(*cells: str) -> str:
+            return '<tr class="ltx_tr">' + "".join(cells) + "</tr>"
+
+        def td(text: str = "", rowspan: int = 1, colspan: int = 1) -> str:
+            spans = (f' rowspan="{rowspan}"' if rowspan > 1 else "") + (f' colspan="{colspan}"' if colspan > 1 else "")
+            return f'<td class="ltx_td"{spans}>{text}</td>'
+
+        md = self.convert(
+            '<table class="ltx_tabular">'
+            + row(td(), td("N", rowspan=2), td("h", rowspan=2), td("train"), td("PPL"), td("BLEU"))
+            + row(td(), td("steps"), td("(dev)"), td("(dev)"))
+            + row(td("base"), td("6"), td("8"), td("100K"), td("4.92"), td("25.8"))
+            + row(td("(A)", rowspan=2), td(), td("1"), td(), td("5.29"), td("24.9"))
+            + row(td(), td("4"), td(), td("5.00"), td("25.5"))
+            + row(td("(E)"), td("positional embedding", colspan=2), td(), td("4.92"), td("25.7"))
+            + row(td("big"), td("6"), td("16"), td("300K"), td("4.33"), td("26.4"))
+            + "</table>"
+        )
+        self.assertIn(
+            "\n".join([
+                "|  | N | h | train | PPL | BLEU |",
+                "| --- | --- | --- | --- | --- | --- |",
+                "|  |  |  | steps | (dev) | (dev) |",
+                "| base | 6 | 8 | 100K | 4.92 | 25.8 |",
+                "| (A) |  | 1 |  | 5.29 | 24.9 |",
+                "|  |  | 4 |  | 5.00 | 25.5 |",
+                "| (E) | positional embedding |  |  | 4.92 | 25.7 |",
+                "| big | 6 | 16 | 300K | 4.33 | 26.4 |",
+            ]),
+            md,
+        )
+
+    def test_forged_spans_stay_small(self) -> None:
+        md = self.convert(
+            '<table class="ltx_tabular"><tr class="ltx_tr"><td class="ltx_td" rowspan="99999999">a</td>'
+            '<td class="ltx_td" colspan="²">b</td><td class="ltx_td" colspan="99999999">c</td></tr>'
+            '<tr class="ltx_tr"><td class="ltx_td">d</td></tr></table>'
+        )
+        self.assertIn("| a | b | c |", md)
+        self.assertIn("|  | d |", md)
+        self.assertLess(len(md), 100_000)
+
     def test_links_and_images_written_in_text_stay_text(self) -> None:
         text = 'See ![x](https://a/p.png), [t](obsidian://x) and C:\\[w](https://a/w) now.'
         md = self.convert(f'<div class="ltx_para"><p class="ltx_p">{text}</p></div>'

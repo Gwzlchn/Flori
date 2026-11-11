@@ -245,6 +245,14 @@ def fence(code: str) -> str:
     return f"{mark}\n{code}\n{mark}"
 
 
+def span(cell, attr: str, limit: int) -> int:
+    """A cell's colspan or rowspan: 1 when missing or malformed, never above limit, so a forged
+    span cannot make the grid huge (HTML itself caps colspan at 1000). str.isdigit would pass "²",
+    which int() rejects."""
+    value = cell.get(attr) or ""
+    return min(int(value), limit) if re.fullmatch(r"[0-9]{1,9}", value) and int(value) > 1 else 1
+
+
 def tex(math) -> str:
     """LaTeX source of a MathML element on one line, with % comments dropped, ready to sit
     between Markdown $ delimiters.
@@ -381,15 +389,21 @@ class Converter:
         return out
 
     def table(self, table) -> list[str]:
+        """A Markdown grid of the table. A cell spanning several columns or rows keeps its text in its
+        first slot and leaves the others empty, so the cells after it and the rows below stay in their
+        columns; ablation tables group rows under one rowspan label."""
         rows = []
-        for tr in table.find_all("tr"):
-            if tr.find_parent("table") is not table:
-                continue
-            cells = []
+        trs = [tr for tr in table.find_all("tr") if tr.find_parent("table") is table]
+        occupied: set[tuple[int, int]] = set()  # slots of later rows taken by a rowspan above
+        for r, tr in enumerate(trs):
+            cells: list[str] = []
             for cell in tr.find_all(["td", "th"], recursive=False):
+                while (r, len(cells)) in occupied:
+                    cells.append("")
+                width, height = span(cell, "colspan", 1000), span(cell, "rowspan", len(trs) - r)
+                occupied.update((r + dr, len(cells) + dc) for dr in range(1, height) for dc in range(width))
                 cells.append(" ".join(self.inline(cell).split()).replace("|", "\\|"))
-                span = cell.get("colspan", "1")
-                cells.extend([""] * (int(span) - 1 if span.isdigit() and int(span) > 1 else 0))
+                cells.extend([""] * (width - 1))
             if any(cells):
                 rows.append(cells)
         if not rows:
