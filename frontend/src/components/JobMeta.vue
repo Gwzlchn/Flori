@@ -67,7 +67,8 @@ const content = computed((): Row[] => {
   const fetched = stepMeta(video ? "video-fetch" : "arxiv-fetch");
   const transcribed = stepMeta("video-transcribe");
   const translated = stepMeta("translate");
-  const title = job.title || job.source_id;
+  // Trimmed like the meta values, so edge spaces alone never make an 原标题 row.
+  const title = job.title?.trim() || job.source_id;
   const original = text(fetched, "title");
   const ms = number(fetched, "duration_ms");
   const [width, height] = [number(fetched, "width"), number(fetched, "height")];
