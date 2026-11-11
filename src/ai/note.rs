@@ -1,5 +1,5 @@
-//! The note step: the source text and every video keyframe or captioned paper figure in one AI
-//! call, as many as one request takes. The model places images with `![描述](img:N)`; the note on
+//! The note step: the source text and every video keyframe or paper figure in one AI call, as
+//! many as one request takes. The model places images with `![描述](img:N)`; the note on
 //! disk links `assets/<basename>` instead, which publish resolves because it merges every step's
 //! assets.
 
@@ -7,29 +7,29 @@ use std::{
     fmt::Write as _,
     fs,
     io::{self, Read},
-    ops::Range,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
 
+use serde::Deserialize;
 use tokio::process::Command;
 
 use super::{Env, INPUT_MARKER, Image, Scratch, complete, inherited, media_type, until_terminated};
-use crate::pipeline::{self, Manifest, Pipeline, Section, StepName, StepResult};
+use crate::pipeline::{self, Manifest, Pipeline, Section, StepFailure, StepName, StepResult};
 
 const NOTE_TIMEOUT: Duration = Duration::from_secs(1800);
 const NOTE_ARXIV: &str = include_str!("../../prompts/note-arxiv.md");
 const NOTE_VIDEO: &str = include_str!("../../prompts/note-video.md");
 /// Appended only when images go along.
 const NOTE_IMAGES: &str = include_str!("../../prompts/note-images.md");
-/// A video sends every keyframe and a paper every captioned figure, so each key point can get
+/// A video sends every keyframe and a paper every figure, so each key point can get
 /// its image; video-frames bounds frames per section. Only one request's limits bound them here:
 /// the API's image count, and the base64 bytes of the images. The API takes at most 32 MB per
 /// request, prompt included, and base64 adds a third, so 20 MiB leaves room for the longest text.
 const MAX_REQUEST_IMAGES: usize = 600;
 const REQUEST_IMAGE_BYTES: u64 = 20 << 20;
-/// How much of a frame's section text, or of a figure caption, the image list shows.
+/// How much of a frame's section text, or of a figure's label and caption, the image list shows.
 const FRAME_TEXT_CHARS: usize = 150;
 const CAPTION_CHARS: usize = 300;
 /// Larger images are shrunk for the model; the vault keeps linking the original. Frames go as
@@ -53,6 +53,17 @@ struct Picture {
     label: String,
 }
 
+/// One entry of arxiv-convert's figures.json: a figure element of the page, in document order.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Figure {
+    /// "Figure 2", or empty.
+    label: String,
+    caption: String,
+    /// Asset basenames of all its images, nested panels included, in page order.
+    images: Vec<String>,
+}
+
 pub async fn note(job_dir: &Path, out_dir: &Path) -> StepResult {
     until_terminated(note_with(job_dir, out_dir, &inherited())).await
 }
@@ -61,13 +72,13 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
     let job = pipeline::read_job(job_dir)?;
     let (template, fetch, text, pictures, side) = match job.pipeline {
         Pipeline::Arxiv => {
-            let (dir, _) = pipeline::prior_step(job_dir, StepName::ArxivConvert)?;
+            let (dir, converted) = pipeline::prior_step(job_dir, StepName::ArxivConvert)?;
             let original = fs::read_to_string(pipeline::step_file(
                 job_dir,
                 StepName::ArxivConvert,
                 "original",
             )?)?;
-            let figures = paper_figures(&original, &dir.join("assets"));
+            let figures = paper_figures(&dir, &converted)?;
             (
                 NOTE_ARXIV,
                 StepName::ArxivFetch,
@@ -161,139 +172,43 @@ fn video_frames(sections: &[Section], dir: &Path) -> Vec<Picture> {
     spread(frames, MAX_REQUEST_IMAGES)
 }
 
-/// What a paragraph of original.md is when matching captions to images.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Part {
-    /// Has `![](assets/…)` images, alone or in a table of subfigures.
-    Image,
-    /// A subfigure label such as "(a) Loss" between the images of one figure.
-    Subcaption,
-    /// A Markdown table: an object that can own a caption but sends no image.
-    Table,
-    Caption,
-    Text,
-}
-
-/// Images of original.md that have a caption, in order of position. An object is a run
-/// of image paragraphs with subfigure labels between them, or a Markdown table; arxiv-convert
-/// gives every panel of a multi-panel figure its own paragraph. A caption owns the object right
-/// before it, as figures put it below; when that object is missing or already owned, the object
-/// right after it, as tables often put it above. Every image of an object gets its caption.
-fn paper_figures(original: &str, dir: &Path) -> Vec<Picture> {
-    let paragraphs: Vec<&str> = original
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-    let parts: Vec<Part> = paragraphs.iter().map(|p| part(p)).collect();
-    let mut owned: Vec<Range<usize>> = Vec::new();
-    let mut figures: Vec<(u64, Picture)> = Vec::new();
-    for (i, _) in parts
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| **p == Part::Caption)
-    {
-        let free = |object: &Range<usize>| {
-            !owned
-                .iter()
-                .any(|o| o.start < object.end && object.start < o.end)
-        };
-        let before = object_ending_at(&parts, i).filter(free);
-        let Some(object) = before.or_else(|| object_starting_at(&parts, i + 1).filter(free)) else {
-            continue;
-        };
-        let caption: String = paragraphs[i].chars().take(CAPTION_CHARS).collect();
-        for name in paragraphs[object.clone()]
-            .iter()
-            .flat_map(|p| asset_links(p))
-        {
-            let seen = figures.iter().any(|(_, f)| f.basename == name);
-            if let Some(path) = usable(dir, name).filter(|_| !seen) {
-                let position = figures.len() as u64;
-                let label = caption.clone();
-                figures.push((
+/// The images of figures.json in document order, every one with its figure's label and caption.
+/// Only assets arxiv-convert lists are taken, each once. A paper converted before figures.json
+/// existed sends none.
+fn paper_figures(dir: &Path, converted: &Manifest) -> Result<Vec<Picture>, StepFailure> {
+    let Some(file) = converted.files.get("figures") else {
+        return Ok(Vec::new());
+    };
+    let figures: Vec<Figure> =
+        pipeline::read_json(&dir.join(file)).map_err(|e| StepFailure::permanent(e.to_string()))?;
+    let mut pictures: Vec<(u64, Picture)> = Vec::new();
+    for figure in figures {
+        let label = [figure.label.trim(), figure.caption.trim()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(": ");
+        let label: String = label.chars().take(CAPTION_CHARS).collect();
+        for name in figure.images {
+            let seen = pictures.iter().any(|(_, p)| p.basename == name);
+            if seen || !converted.assets.contains(&name) {
+                continue;
+            }
+            if let Some(path) = usable(&dir.join("assets"), &name) {
+                let position = pictures.len() as u64;
+                pictures.push((
                     position,
                     Picture {
-                        basename: name.to_owned(),
+                        basename: name,
                         asset: path.clone(),
                         path,
-                        label,
+                        label: label.clone(),
                     },
                 ));
             }
         }
-        owned.push(object);
     }
-    spread(figures, MAX_REQUEST_IMAGES)
-}
-
-fn part(paragraph: &str) -> Part {
-    if !asset_links(paragraph).is_empty() {
-        Part::Image
-    } else if is_caption(paragraph) {
-        Part::Caption
-    } else if is_subcaption(paragraph) {
-        Part::Subcaption
-    } else if paragraph.lines().all(|l| l.trim_start().starts_with('|')) {
-        Part::Table
-    } else {
-        Part::Text
-    }
-}
-
-/// The object whose last paragraph is `end - 1`.
-fn object_ending_at(parts: &[Part], end: usize) -> Option<Range<usize>> {
-    let mut start = end;
-    while start > 0 && matches!(parts[start - 1], Part::Image | Part::Subcaption) {
-        start -= 1;
-    }
-    if parts[start..end].contains(&Part::Image) {
-        Some(start..end)
-    } else {
-        (end > 0 && parts[end - 1] == Part::Table).then(|| end - 1..end)
-    }
-}
-
-/// The object whose first paragraph is `start`.
-fn object_starting_at(parts: &[Part], start: usize) -> Option<Range<usize>> {
-    let mut end = start;
-    while end < parts.len() && matches!(parts[end], Part::Image | Part::Subcaption) {
-        end += 1;
-    }
-    if parts[start..end].contains(&Part::Image) {
-        Some(start..end)
-    } else {
-        (parts.get(start) == Some(&Part::Table)).then(|| start..start + 1)
-    }
-}
-
-/// A subfigure label paragraph: "(a) …" or "a) …", short.
-fn is_subcaption(paragraph: &str) -> bool {
-    let text = paragraph.trim_start_matches(['*', '_', '\\', ' ']);
-    let text = text.strip_prefix('(').unwrap_or(text);
-    let mut chars = text.chars();
-    let label =
-        matches!((chars.next(), chars.next()), (Some(c), Some(')')) if c.is_ascii_lowercase());
-    label && paragraph.chars().count() <= CAPTION_CHARS
-}
-
-/// Basenames of the `![…](assets/<name>)` links in a paragraph.
-fn asset_links(paragraph: &str) -> Vec<&str> {
-    paragraph
-        .split("](assets/")
-        .skip(1)
-        .filter_map(|rest| rest.split_once(')').map(|(name, _)| name))
-        .filter(|name| !name.is_empty() && !name.contains(['/', '\\']))
-        .collect()
-}
-
-fn is_caption(paragraph: &str) -> bool {
-    let text = paragraph
-        .trim_start_matches(['*', '_', '\\', ' '])
-        .to_lowercase();
-    ["figure", "fig.", "fig ", "table", "图", "表"]
-        .iter()
-        .any(|word| text.starts_with(word))
+    Ok(spread(pictures, MAX_REQUEST_IMAGES))
 }
 
 /// The asset's path when it is a file whose bytes are an image the CLIs take; SVG, or an HTML

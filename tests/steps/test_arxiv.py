@@ -120,7 +120,13 @@ class FetchConvertTest(unittest.TestCase):
         self.assertNotIn("https://arxiv.org/static", " ".join(web.seen))
 
         out = manifest(converted)
-        self.assertEqual(out["files"], {"original": "original.md"})
+        self.assertEqual(out["files"], {"original": "original.md", "figures": "figures.json"})
+        figures = json.loads((converted / "figures.json").read_text())
+        self.assertEqual([(f["label"], f["images"]) for f in figures], [
+            ("Figure 1", ["teaser.png"]),
+            ("Figure 2", ["frontier.svg", "tldr_winrate_vs_temp.svg"]),
+        ])
+        self.assertTrue(figures[0]["caption"].startswith("DPO optimizes for human preferences"), figures[0])
         self.assertEqual(out["assets"], ["frontier.svg", "teaser.png", "tldr_winrate_vs_temp.svg"])
         for name in out["assets"]:
             self.assertTrue((converted / "assets" / name).is_file())
@@ -162,6 +168,11 @@ class FetchConvertTest(unittest.TestCase):
                 self.assertIn("\n1. A *conditional generative* model $p(\\bm{x}\\mid\\bm{c})$", md)
                 self.assertIn("**for** number of training iterations **do**  \n", md)
                 self.assertIn("| ![](assets/mnist_samples.png) | ![](assets/tfd_samples.png) |", md)
+                figures = json.loads((converted / "figures.json").read_text())
+                self.assertEqual([(f["label"], f["images"]) for f in figures], [
+                    ("Figure 2", ["mnist_samples.png", "tfd_samples.png", "cifar_full_samples.png", "cifar_conv_samples.png"]),
+                    ("Figure 3", ["1dsubspace.png", "1dsubspace2.png"]),
+                ])
                 self.assertLess(md.index("\n[^1]: All code and hyperparameters"), md.index("\n## References\n"))
 
     def test_no_html_anywhere_is_permanent(self) -> None:
@@ -302,6 +313,47 @@ class FetchConvertTest(unittest.TestCase):
             "# T\n\nA. Author\n\nCost \\$5 and a\\_b \\*x\\* \\<eos>.\n\n- (1) A. Author. *Venue*, 2023.\n\n- first\n- second\n\n"
             "![](assets/fig.png)![](assets/fig-2.png)![](assets/fig.png)\n",
         )
+
+
+    def test_figures_group_panels_by_the_page(self) -> None:
+        job = make_job(self.root, "2401.00001")
+        fetched = job / "steps/01-arxiv-fetch"
+        (fetched / "res").mkdir()
+        for name in ("a.png", "b.png", "c.svg", "t.png", "x.png"):
+            (fetched / "res" / name).write_bytes(name.encode())
+        panel = '<figure class="ltx_figure ltx_figure_panel"><img src="res/{}"/><figcaption>({}) panel</figcaption></figure>'
+        caption = '<figcaption class="ltx_caption"><span class="ltx_tag ltx_tag_{}">{}: </span>{}</figcaption>'
+        (fetched / "page.html").write_text(
+            '<html><body><article class="ltx_document">'
+            '<div class="ltx_para"><p class="ltx_p">Body <img src="res/x.png"/></p></div>'
+            # Panels in nested figures, the left one between text, and an object image.
+            '<figure class="ltx_figure"><div class="ltx_flex_figure"><p class="ltx_p">Left</p>'
+            + panel.format("a.png", "a") + '<p class="ltx_p">Right</p>' + panel.format("b.png", "b")
+            + '<object data="res/c.svg"></object></div>'
+            + caption.format("figure", "Figure 1", 'Loss <math alttext="\\alpha=1"><mi>α</mi></math>'
+                             '<span class="ltx_note"><span class="ltx_note_content">a note</span></span> curves.')
+            + '</figure>'
+            # A table with an image is a figure; one without is not; nor is a figure in a skipped
+            # element, though its image appears in the text.
+            '<figure class="ltx_table">' + caption.format("table", "Table 1", "Rendered.") + '<img src="res/t.png"/></figure>'
+            '<figure class="ltx_table">' + caption.format("table", "Table 2", "Numbers.")
+            + '<table><tr><td>1</td></tr></table></figure>'
+            '<div class="ltx_ERROR"><figure class="ltx_figure"><img src="res/x.png"/></figure></div>'
+            f'<figure class="ltx_figure"><img src="res/a.png"/><figcaption>{"x" * 1200}</figcaption></figure>'
+            '</article></body></html>'
+        )
+        arxiv.write_manifest(fetched, "T", {"page": "page.html"}, [], {})
+        converted = job / "steps/02-arxiv-convert"
+        self.assertEqual(arxiv.convert(job, converted), 0)
+        figures = json.loads((converted / "figures.json").read_text())
+        self.assertEqual(figures[:2], [
+            {"label": "Figure 1", "caption": "Loss $\\alpha=1$ curves.", "images": ["a.png", "b.png", "c.svg"]},
+            {"label": "Table 1", "caption": "Rendered.", "images": ["t.png"]},
+        ])
+        self.assertEqual(figures[2]["label"], "")
+        self.assertEqual(len(figures[2]["caption"]), arxiv.FIGURE_CAPTION_CHARS)
+        self.assertEqual(len(figures), 3)
+        self.assertEqual(manifest(converted)["files"]["figures"], "figures.json")
 
 
 def raw_brackets(md: str) -> list[int]:

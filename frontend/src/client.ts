@@ -22,7 +22,7 @@ export const platformText: Record<Schemas["Platform"], string> = { bilibili: "B�
 export const fileText: Record<string, string> = {
   note: "AI 笔记", translation: "译文", original: "原文", transcript: "转写稿", video: "视频",
   subtitle: "转写字幕", subtitle_zh: "中文字幕", ai_subtitle_zh: "B站 AI 字幕(中文)", ai_subtitle_en: "B站 AI 字幕(英文)",
-  transcript_json: "转写数据", sections: "分节数据", page: "论文网页",
+  transcript_json: "转写数据", sections: "分节数据", page: "论文网页", figures: "论文图注数据",
 };
 export const feedKindText: Record<Schemas["FeedKind"], string> = {
   bili_up: "B站 UP 主投稿", bili_season: "B站合集", bili_series: "B站系列", bili_fav: "B站收藏夹",

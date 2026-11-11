@@ -72,8 +72,8 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-transcribe | whisper | transcript.json;人工字幕优先,其次与音频语言相同的 B站 AI 字幕,最后 whisper;meta: origin(subtitle\|whisper), language, language_probability,origin 为 subtitle 时另有 subtitle_kind(manual\|ai) | 2h | 2 |
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节,去重后每节至多 2 张关键帧,全片不设总数上限)、由它渲染的 transcript.md | 1h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv), published(arXiv API 的第一版日期 YYYY-MM-DD)与 primary_category(如 cs.LG),后两项拿不到时省略;categories(API 列出的全部分类,字符串数组,去重,每项至多 64 字符、至多 32 项)、comment(作者备注)与 journal_ref(期刊引用)取自 API,压成一行、去掉控制字符,至多 1000 字符,没有时省略;官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
-| arxiv-convert | cpu | original.md、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$`,其中未转义的 `$`(`\text{}` 里的公式)依次换成 `\(`、`\)`,公式编号去掉 `$`,公式只在自己的定界符处结束;正文文字里的 `[`、`]`、`!` 一律转义,链接、图片与脚注只由 convert 写出,链接地址百分号编码 | 10m | 2 |
-| note | ai | note.md(读原文与全部关键帧或全部带图注的论文图,只受单次请求的上限约束;中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
+| arxiv-convert | cpu | original.md、figures.json、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$`,其中未转义的 `$`(`\text{}` 里的公式)依次换成 `\(`、`\)`,公式编号去掉 `$`,公式只在自己的定界符处结束;正文文字里的 `[`、`]`、`!` 一律转义,链接、图片与脚注只由 convert 写出,链接地址百分号编码;figures.json 见下 | 10m | 2 |
+| note | ai | note.md(读原文与全部关键帧或 figures.json 里的全部论文图,只受单次请求的上限约束;中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json,非中文写双语 transcript.md,中文写加标点的 transcript.md;每块调用超时 600s | 3h | 1 |
 | publish | local | meta: vault_path(相对 FLORI_VAULT_DIR,含 vault 名), note_file(主笔记文件名) | 5m | 2 |
 
@@ -89,7 +89,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-transcribe | transcript_json | 无 |
 | video-frames | transcript、sections | frame-<ms>.jpg |
 | arxiv-fetch | page | 无;资源原件只作为普通文件留在步骤目录 |
-| arxiv-convert | original | 正文图片 |
+| arxiv-convert | original、figures | 正文图片 |
 | note | note | 无;正文引用 video-frames 或 arxiv-convert 的 assets |
 | translate | arXiv:translation;视频:transcript(覆盖 video-frames 的) | 无 |
 | publish | 无 | 无 |
@@ -97,6 +97,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - 进 vault 的逻辑名只有 note、transcript、original、translation:note 写成 `<标题>.md`,其余写成 `<逻辑名>.md`;合并后的 assets 放进 `assets/`。其余逻辑名只留在 job 目录。
 - 标题取步骤顺序中第一个非 null 的 manifest.title。
 - transcript.json:`{"language": str|null, "segments": [{"start_ms": int, "end_ms": int, "text": str}]}`。
+- figures.json:`[{"label": str, "caption": str, "images": [basename]}]`,按页面顺序,每个最外层的 figure 元素一项(ltx_figure、ltx_table 等,不在跳过的元素里)。label 是图注的编号标签去掉冒号,如 "Figure 2",没有时为空串;caption 是图注其余的纯文本,公式写成 `$TeX$`,脚注不算,压成一行、去掉控制字符,至多 1000 字符;images 是它里面所有图片(含嵌套面板与 object)在 assets 里的名字,按页面顺序去重。没有图片的不算,所以纯表格不在其中。
 - sections.json 的 text 是未转义的原文;写进 Markdown 的一方(video-frames 的 transcript.md、translate 的双语版与加标点版)统一用 `pipeline::escape_markdown` 转义。Section 类型、取前序文件(`pipeline::step_file`)与节时间格式(`pipeline::clock`)只在 src/pipeline.rs 定义一次。
 - translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long;chinese 只出现在 arXiv),too_long 时另有 chunks(int)。译出时另有 translation_source:ai(调用 AI)或 subtitle(视频用 video-fetch 的 subtitle_zh)。中文视频加了标点时 translated 为 false,另有 punctuated(true)、sections(送去加标点的有文字的节数,int)、kept_original(回复用不上、保留原文的节数,int)、corrected(采用的同音替换处数,int)与 reverted(还原的其它改动处数,int)。
 
@@ -127,9 +128,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
   - 串行;每块结果按 sha256(prompt‖model‖payload) 缓存,手动重试只补未缓存的块;校验失败时带反馈再问 1 次,仍失败退出 10。
   - 超过 25 块不调用 AI:只写 meta.skipped_reason=too_long 与块数,退出 0;笔记与原文照常发布,详情页显示原因。加标点按它自己的块大小计;用 subtitle_zh 翻译的视频不受此限。
 - note:
-  - 一次调用同时发原文与图,图按序号 [N] 列出,序号即附图顺序。视频按时间顺序发 sections 里的全部关键帧,每张写时间与该节文字前 150 字;笔记每个要点只要有能说明它的画面就配一张。论文按出现位置发 original.md 里全部有图注的图:
-    - 对象是一串相邻的图片段(中间可夹 "(a) …"、"b) …" 这类子图注段),或一个 Markdown 表格;arxiv-convert 把多面板图的每个面板写成单独一段。
-    - 图注段以 "Figure"、"Fig."、"Table"、"图"、"表" 开头。图注归紧挨在它前面的对象(图注在下);前面没有对象或已被别的图注占用时,归紧挨在它后面的对象(图注在上,表格常见)。对象里每张图都用这条图注;正文段把对象隔开。
+  - 一次调用同时发原文与图,图按序号 [N] 列出,序号即附图顺序。视频按时间顺序发 sections 里的全部关键帧,每张写时间与该节文字前 150 字;笔记每个要点只要有能说明它的画面就配一张。论文按 figures.json 的顺序发每个图的全部图片,每张都写该图的 "label: caption" 前 300 字;只取 arxiv-convert 的 manifest.assets 里有的名字,同一张图只发一次。没有 figures.json(早于它转换的论文)时不发图。
   - 图数和总量不设固定上限,只受单次请求的两条上限约束:至多 600 张,超出时视频按时间、论文按位置均匀取;缩图之后所发图片的 base64 合计至多 20 MiB(API 单次请求体上限 32 MB,含正文,留出余量),超出时按序号位置均匀丢图,首尾保留,job.log 记一行。
   - 只发内容确实是 jpeg、png、gif、webp 的图,media_type 按文件头判断,不看扩展名;SVG、扩展名是图片但内容不是的文件跳过。
   - 送模型的图有长边上限:关键帧 768px,与源视频分辨率无关;论文图 1568px。大于 1 MiB 或长边超限的图用 ffmpeg 缩到上限以内只送模型(PNG 仍为 PNG,其余转 JPEG),笔记里仍引用原图;WebP 读不到尺寸,只按字节判断。缩完仍超限或缩不了的图不发。ffmpeg 按文件头固定 demuxer、只允许 file 协议,环境变量只给 PATH、LANG、TMPDIR。

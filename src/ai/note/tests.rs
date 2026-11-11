@@ -43,10 +43,25 @@ fn listed(note: &str) -> Vec<String> {
         .collect()
 }
 
-/// A paper with the given original.md and these image assets, all real PNG headers.
-fn paper(fx: &Fixture, original: &str, images: &[&str]) -> std::path::PathBuf {
+/// figures.json from `(label, caption, images)` entries, as arxiv-convert writes it.
+fn figures_json(figures: &[(&str, &str, &[&str])]) -> String {
+    let entries: Vec<serde_json::Value> = figures
+        .iter()
+        .map(|(label, caption, images)| {
+            serde_json::json!({"label": label, "caption": caption, "images": images})
+        })
+        .collect();
+    serde_json::to_string_pretty(&entries).unwrap()
+}
+
+/// A paper with these figures and image assets, all real PNG headers.
+fn paper(fx: &Fixture, figures: &[(&str, &str, &[&str])], images: &[&str]) -> std::path::PathBuf {
     fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
-    let files = [("original", "original.md", original)];
+    let figures = figures_json(figures);
+    let files = [
+        ("original", "original.md", "# Paper\n"),
+        ("figures", "figures.json", figures.as_str()),
+    ];
     let dir = fx.step(2, StepName::ArxivConvert, None, &files, images, &[]);
     real_images(&dir, images, "png");
     dir
@@ -68,9 +83,11 @@ async fn a_paper_without_figures_sends_no_images() {
             &[],
             &[],
         );
-        let original = "# Mixtral\n\nWe introduce Mixtral 8x7B.\n";
+        // Converted before figures.json existed: a captioned image of original.md is not sent.
+        let original = "# Mixtral\n\n![](assets/moe.png)\n\nFigure 1: Mixture of experts.\n";
         let files = [("original", "original.md", original)];
-        fx.step(2, StepName::ArxivConvert, None, &files, &[], &[]);
+        let dir = fx.step(2, StepName::ArxivConvert, None, &files, &["moe.png"], &[]);
+        real_images(&dir, &["moe.png"], "png");
         let (out, result) = run_note(&fx, "03-note").await;
         result.unwrap();
         assert_eq!(
@@ -91,17 +108,20 @@ async fn a_paper_without_figures_sends_no_images() {
     }
 }
 
-/// A paper whose figures exercise every rule: captions, a subfigure pair, SVG, an image without
-/// a caption, and one too large to send as is.
+/// A paper whose figures exercise every rule: a two-panel figure, SVG, an image in no figure,
+/// and one too large to send as is.
 fn figure_paper(fx: &Fixture, extra: &str) {
     fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
     let original = format!(
         "# Paper\n\n![](assets/fig1.png)\n\nFigure 1: Overview of the model.\n\n\
-         ![](assets/fig2.svg)\n\nFigure 2: A vector drawing.\n\n\
-         ![](assets/fig3a.png) ![](assets/fig3b.jpg)\n\n**Figure 3**: Ablations.\n\n\
-         ![](assets/logo.png)\n\nOur method works.\n\n\
-         ![](assets/big.png)\n\nTable 1: Results.\n\n{extra}\n"
+         ![](assets/logo.png)\n\nOur method works.\n\n{extra}\n"
     );
+    let figures = figures_json(&[
+        ("Figure 1", "Overview of the model.", &["fig1.png"]),
+        ("Figure 2", "A vector drawing.", &["fig2.svg"]),
+        ("Figure 3", "Ablations.", &["fig3a.png", "fig3b.jpg"]),
+        ("Table 1", "Results.", &["big.png"]),
+    ]);
     let assets = [
         "fig1.png",
         "fig2.svg",
@@ -110,14 +130,11 @@ fn figure_paper(fx: &Fixture, extra: &str) {
         "logo.png",
         "big.png",
     ];
-    let dir = fx.step(
-        2,
-        StepName::ArxivConvert,
-        None,
-        &[("original", "original.md", original.as_str())],
-        &assets,
-        &[],
-    );
+    let files = [
+        ("original", "original.md", original.as_str()),
+        ("figures", "figures.json", figures.as_str()),
+    ];
+    let dir = fx.step(2, StepName::ArxivConvert, None, &files, &assets, &[]);
     real_images(&dir, &["fig1.png", "fig3a.png", "logo.png"], "png");
     real_images(&dir, &["fig3b.jpg"], "jpg");
     fs::write(dir.join("assets/big.png"), image_bytes("png", 3000, 2000)).unwrap();
@@ -149,7 +166,7 @@ async fn a_paper_sends_its_captioned_figures_and_links_them() {
         .iter()
         .map(|i| i["media_type"].as_str().unwrap())
         .collect();
-    // fig2.svg cannot be sent and logo.png has no caption.
+    // fig2.svg cannot be sent and logo.png is in no figure.
     assert_eq!(types, ["image/png", "image/png", "image/jpeg", "image/png"]);
     // big.png went through ffmpeg, which may only read a local PNG.
     let calls = ffmpeg_calls(&fx);
@@ -178,8 +195,8 @@ async fn a_paper_sends_its_captioned_figures_and_links_them() {
     assert!(
         note.contains(
             "图片(序号即消息末尾附图的顺序):\n\
-             [1] Figure 1: Overview of the model.\n[2] **Figure 3**: Ablations.\n\
-             [3] **Figure 3**: Ablations.\n[4] Table 1: Results.\n"
+             [1] Figure 1: Overview of the model.\n[2] Figure 3: Ablations.\n\
+             [3] Figure 3: Ablations.\n[4] Table 1: Results.\n"
         ),
         "{note}"
     );
@@ -213,12 +230,11 @@ async fn codex_gets_the_figures_as_image_files() {
 #[tokio::test]
 async fn a_figure_ffmpeg_cannot_shrink_is_left_out() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
-    let original = "![](assets/UNDECODABLE.jpg)\n\nFigure 1: Too big.\n\n\
-                    ![](assets/small.png)\n\nFigure 2: Fine.\n";
-    let files = [("original", "original.md", original)];
-    let assets = ["UNDECODABLE.jpg", "small.png"];
-    let dir = fx.step(2, StepName::ArxivConvert, None, &files, &assets, &[]);
+    let figures: [(&str, &str, &[&str]); 2] = [
+        ("Figure 1", "Too big.", &["UNDECODABLE.jpg"]),
+        ("Figure 2", "Fine.", &["small.png"]),
+    ];
+    let dir = paper(&fx, &figures, &["UNDECODABLE.jpg", "small.png"]);
     // Over 1 MiB, whatever its pixel size.
     let mut big = image_bytes("jpg", 100, 100);
     big.resize(1_100_000, 0);
@@ -231,23 +247,30 @@ async fn a_figure_ffmpeg_cannot_shrink_is_left_out() {
     assert!(read_note(&out).contains("[1] Figure 2: Fine.\n"));
 }
 
-/// original.md with one captioned figure `f<n>.png` per paragraph pair, and their names.
-fn many_figures(count: usize) -> (String, Vec<String>) {
-    let names: Vec<String> = (1..=count).map(|n| format!("f{n}.png")).collect();
-    let original = names
+/// `count` figures `Figure <n>` with one image `f<n>.png` each: their labels and the names.
+fn many_figures(count: usize) -> (Vec<String>, Vec<String>) {
+    let labels = (1..=count).map(|n| format!("Figure {n}")).collect();
+    let names = (1..=count).map(|n| format!("f{n}.png")).collect();
+    (labels, names)
+}
+
+/// A paper with the figures of [`many_figures`].
+fn many_figure_paper(fx: &Fixture, count: usize) -> (std::path::PathBuf, Vec<String>) {
+    let (labels, names) = many_figures(count);
+    let images: Vec<[&str; 1]> = names.iter().map(|n| [n.as_str()]).collect();
+    let figures: Vec<(&str, &str, &[&str])> = labels
         .iter()
-        .enumerate()
-        .map(|(i, name)| format!("![](assets/{name})\n\nFigure {}: Plot.\n\n", i + 1))
+        .zip(&images)
+        .map(|(label, image)| (label.as_str(), "Plot.", image.as_slice()))
         .collect();
-    (original, names)
+    let assets: Vec<&str> = names.iter().map(String::as_str).collect();
+    (paper(fx, &figures, &assets), names)
 }
 
 #[tokio::test]
-async fn every_captioned_figure_is_sent() {
+async fn every_figure_is_sent() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    let (original, names) = many_figures(30);
-    let assets: Vec<&str> = names.iter().map(String::as_str).collect();
-    paper(&fx, &original, &assets);
+    many_figure_paper(&fx, 30);
     let (out, result) = run_note(&fx, "03-note").await;
     result.unwrap();
     assert_eq!(sent_images(&fx).len(), 30);
@@ -259,10 +282,8 @@ async fn every_captioned_figure_is_sent() {
 async fn figures_over_the_request_budget_are_dropped_evenly() {
     // Sixteen figures of 1 MiB, the most sent without shrinking: 22.4 MB as base64.
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    let (original, names) = many_figures(16);
-    let assets: Vec<&str> = names.iter().map(String::as_str).collect();
-    let dir = paper(&fx, &original, &assets);
-    for name in &assets {
+    let (dir, names) = many_figure_paper(&fx, 16);
+    for name in &names {
         let mut bytes = image_bytes("png", 100, 100);
         bytes.resize(MAX_IMAGE_BYTES as usize, 0);
         fs::write(dir.join("assets").join(name), bytes).unwrap();
@@ -550,84 +571,95 @@ fn large_images_are_shrunk_by_size_or_pixels() {
 }
 
 #[tokio::test]
-async fn every_panel_of_a_real_multi_panel_figure_is_sent() {
-    // arxiv.py's conversion of the GAN paper (tests/fixtures/arxiv/1406.2661.ar5iv.html): Figure 2
-    // is a table of four panels, Figure 3 two image paragraphs in a row.
-    let original = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/note/1406.2661.original.md"),
-    )
-    .unwrap();
-    let images = [
-        "mnist_samples.png",
-        "tfd_samples.png",
-        "cifar_full_samples.png",
-        "cifar_conv_samples.png",
-        "1dsubspace.png",
-        "1dsubspace2.png",
+async fn every_image_of_a_figure_gets_its_caption_in_page_order() {
+    // Figure 2 of the Transformer paper: two panels, the left one between two text paragraphs,
+    // which the old paragraph matching lost.
+    let figures: [(&str, &str, &[&str]); 5] = [
+        (
+            "Figure 1",
+            "The Transformer - model architecture.",
+            &["ModalNet-21.png"],
+        ),
+        (
+            "Figure 2",
+            "(left) Scaled Dot-Product Attention. (right) Multi-Head Attention.",
+            &["ModalNet-19.png", "ModalNet-20.png"],
+        ),
+        // A name convert did not list and one sent already are skipped; so is a figure without
+        // a usable image.
+        ("Figure 3", "Outside.", &["unlisted.png", "ModalNet-21.png"]),
+        ("", "A caption without a tag.", &["panel.png"]),
+        ("Table 1", "", &["table.png"]),
     ];
-    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    paper(&fx, &original, &images);
-    let (out, result) = run_note(&fx, "03-note").await;
-    result.unwrap();
-    assert_eq!(sent_images(&fx).len(), 6);
-    let labels = listed(&read_note(&out));
-    assert_eq!(labels.len(), 6);
-    for label in &labels[..4] {
-        assert!(
-            label.starts_with("Figure 2: Visualization of samples"),
-            "{label}"
-        );
-    }
-    for label in &labels[4..] {
-        assert!(label.starts_with("Figure 3: Digits obtained"), "{label}");
-    }
-}
-
-#[tokio::test]
-async fn subfigure_labels_join_the_panels_and_body_text_stops_them() {
-    let original = "Body text before.\n\n![](assets/x.png)\n\nMore body text.\n\n\
-                    ![](assets/a.png)\n\n(a) Loss\n\n![](assets/b.png)\n\nb) Accuracy\n\n\
-                    Figure 1: Training curves.\n";
-    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    paper(&fx, original, &["x.png", "a.png", "b.png"]);
-    let (out, result) = run_note(&fx, "03-note").await;
-    result.unwrap();
-    // x.png sits behind body text, so Figure 1 is not its caption.
-    assert_eq!(
-        listed(&read_note(&out)),
-        ["Figure 1: Training curves.", "Figure 1: Training curves."]
-    );
-    assert_eq!(sent_images(&fx).len(), 2);
-}
-
-#[tokio::test]
-async fn captions_above_and_below_go_to_the_right_object() {
-    // Figures put the caption below; the tables here put theirs above an image or a table.
-    let original = "![](assets/f1.png)\n\nFigure 1: First.\n\n![](assets/f2.png)\n\n\
-                    Figure 2: Second.\n\nTable 1: Above its image.\n\n![](assets/t1.png)\n\n\
-                    Table 2: Above another image.\n\n![](assets/t2.png)\n\n\
-                    Table 3: Above a table.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n";
-    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    paper(&fx, original, &["f1.png", "f2.png", "t1.png", "t2.png"]);
+    let images = [
+        "ModalNet-19.png",
+        "ModalNet-20.png",
+        "ModalNet-21.png",
+        "panel.png",
+        "table.png",
+    ];
+    // The codex fake records image paths.
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Codex);
+    let dir = paper(&fx, &figures, &images);
+    fs::write(dir.join("assets/unlisted.png"), image_bytes("png", 10, 10)).unwrap();
     let (out, result) = run_note(&fx, "03-note").await;
     result.unwrap();
     assert_eq!(
         listed(&read_note(&out)),
         [
-            "Figure 1: First.",
-            "Figure 2: Second.",
-            "Table 1: Above its image.",
-            "Table 2: Above another image."
+            "Figure 1: The Transformer - model architecture.",
+            "Figure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention.",
+            "Figure 2: (left) Scaled Dot-Product Attention. (right) Multi-Head Attention.",
+            "A caption without a tag.",
+            "Table 1",
+        ]
+    );
+    let sent: Vec<String> = sent_images(&fx)
+        .iter()
+        .map(|i| {
+            i["path"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            "ModalNet-21.png",
+            "ModalNet-19.png",
+            "ModalNet-20.png",
+            "panel.png",
+            "table.png"
         ]
     );
 }
 
 #[tokio::test]
-async fn image_type_comes_from_the_bytes_not_the_name() {
-    let original = "![](assets/photo.png)\n\nFigure 1: A JPEG named png.\n\n\
-                    ![](assets/page.png)\n\nFigure 2: An HTML page named png.\n";
+async fn a_broken_figures_file_fails_the_note() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    let dir = paper(&fx, original, &["photo.png", "page.png"]);
+    fx.step(1, StepName::ArxivFetch, Some("Paper"), &[], &[], &[]);
+    let files = [
+        ("original", "original.md", "# Paper\n"),
+        ("figures", "figures.json", "[{\"label\": 1}]"),
+    ];
+    fx.step(2, StepName::ArxivConvert, None, &files, &[], &[]);
+    let failure = run_note(&fx, "03-note").await.1.unwrap_err();
+    assert_eq!(failure.exit, StepExit::Permanent);
+    assert!(fx.calls().is_empty());
+}
+
+#[tokio::test]
+async fn image_type_comes_from_the_bytes_not_the_name() {
+    let figures: [(&str, &str, &[&str]); 2] = [
+        ("Figure 1", "A JPEG named png.", &["photo.png"]),
+        ("Figure 2", "An HTML page named png.", &["page.png"]),
+    ];
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let dir = paper(&fx, &figures, &["photo.png", "page.png"]);
     real_images(&dir, &["photo.png"], "jpg");
     fs::write(dir.join("assets/page.png"), "<!DOCTYPE html><html></html>").unwrap();
     let (out, result) = run_note(&fx, "03-note").await;
@@ -641,10 +673,12 @@ async fn image_type_comes_from_the_bytes_not_the_name() {
 #[tokio::test]
 async fn an_image_still_too_large_after_shrinking_is_left_out() {
     // 1.1 MB at 100x100: ffmpeg keeps the size, so the copy is just as heavy.
-    let original = "![](assets/heavy.jpg)\n\nFigure 1: Heavy.\n\n\
-                    ![](assets/small.png)\n\nFigure 2: Fine.\n";
+    let figures: [(&str, &str, &[&str]); 2] = [
+        ("Figure 1", "Heavy.", &["heavy.jpg"]),
+        ("Figure 2", "Fine.", &["small.png"]),
+    ];
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
-    let dir = paper(&fx, original, &["heavy.jpg", "small.png"]);
+    let dir = paper(&fx, &figures, &["heavy.jpg", "small.png"]);
     let mut heavy = image_bytes("jpg", 100, 100);
     heavy.resize(1_100_000, 0);
     fs::write(dir.join("assets/heavy.jpg"), heavy).unwrap();

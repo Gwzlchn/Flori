@@ -3,7 +3,8 @@
 Usage: python3 -I arxiv.py fetch|convert <job_dir> <out_dir>
 
 fetch stores the paper HTML as page.html with its images under res/, img src rewritten to
-those local paths. convert reads page.html by its logical name and writes original.md.
+those local paths. convert reads page.html by its logical name and writes original.md and
+figures.json, the figures as the page groups them.
 Requests go out directly: the contract gives arXiv steps no proxy.
 """
 
@@ -33,6 +34,8 @@ HOSTS = {"arxiv": "arxiv.org", "ar5iv": "ar5iv.labs.arxiv.org"}
 # The author's comment and journal reference are free text; categories are short terms. Real ones
 # stay well within these bounds.
 NOTE_CHARS, CATEGORY_CHARS, MAX_CATEGORIES = 1000, 64, 32
+# A figure caption in figures.json; the note's image list shows less of it.
+FIGURE_CAPTION_CHARS = 1000
 
 
 class StepError(Exception):
@@ -553,12 +556,20 @@ class Converter:
         self.notes.append(text)
         return f"[^{len(self.notes)}]"
 
-    def image(self, node) -> str:
+    def image_path(self, node) -> pathlib.Path | None:
+        """The fetched file an img or object shows; None for other sites, data: URIs and paths
+        outside the fetch step."""
         ref = node.get("src") if node.name == "img" else node.get("data")
         if not ref or urllib.parse.urlsplit(ref).scheme:
-            return ""
+            return None
         path = (self.step_dir / ref).resolve()
         if not path.is_relative_to(self.step_dir) or not path.is_file():
+            return None
+        return path
+
+    def image(self, node) -> str:
+        path = self.image_path(node)
+        if path is None:
             return ""
         if path not in self.assets:
             stem, suffix = path.stem, path.suffix
@@ -570,6 +581,44 @@ class Converter:
             shutil.copyfile(path, self.out_dir / "assets" / name)
             self.assets[path] = name
         return f"![](assets/{self.assets[path]})"
+
+    def figures(self, article) -> list[dict]:
+        """Every outermost figure element that shows an image of original.md, in document order:
+        its label ("Figure 2"), its own caption as plain text with formulas as $TeX$, and the
+        asset names of all its images, those of nested panels included. A table without images
+        is no figure. Runs after document(), which names the assets."""
+        out = []
+        for figure in article.find_all("figure"):
+            if any(isinstance(p, Tag) and (p.name == "figure" or self.skipped(p)) for p in figure.parents):
+                continue
+            images: list[str] = []
+            for node in figure.find_all(["img", "object"]):
+                name = self.assets.get(self.image_path(node))
+                if name and name not in images:
+                    images.append(name)
+            if not images:
+                continue
+            caption = next((c for c in figure.find_all("figcaption") if c.find_parent("figure") is figure), None)
+            tag = caption.find(class_="ltx_tag") if caption else None
+            label = plain(tag.get_text(), FIGURE_CAPTION_CHARS).rstrip(":：. ") if tag else ""
+            text = plain(self.caption_text(caption), FIGURE_CAPTION_CHARS) if caption else ""
+            out.append({"label": label, "caption": text, "images": images})
+        return out
+
+    def caption_text(self, node) -> str:
+        """Text of a caption without its "Figure n:" tag or footnotes; formulas as $TeX$."""
+        parts = []
+        for child in node.children:
+            if isinstance(child, Tag):
+                classes = set(child.get("class") or ())
+                if child.name == "math":
+                    source = tex(child)
+                    parts.append(f"${source}$" if source else "")
+                elif not (self.skipped(child) or classes & {"ltx_tag", "ltx_note"}):
+                    parts.append(self.caption_text(child))
+            elif isinstance(child, NavigableString) and not isinstance(child, Comment):
+                parts.append(str(child))
+        return "".join(parts)
 
 
 def find_step(job_dir: pathlib.Path, name: str) -> pathlib.Path:
@@ -592,8 +641,11 @@ def convert(job_dir: pathlib.Path, out_dir: pathlib.Path) -> int:
     if article.select_one(".ltx_title_document") is None and manifest["title"]:
         text = f"# {manifest['title']}\n\n{text}"
     (out_dir / "original.md").write_text(text, encoding="utf-8")
-    write_manifest(out_dir, None, {"original": "original.md"}, sorted(converter.assets.values()), {})
-    print(f"original.md {len(text)} chars, {len(converter.assets)} images", flush=True)
+    figures = converter.figures(article)
+    (out_dir / "figures.json").write_text(json.dumps(figures, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    files = {"original": "original.md", "figures": "figures.json"}
+    write_manifest(out_dir, None, files, sorted(converter.assets.values()), {})
+    print(f"original.md {len(text)} chars, {len(converter.assets)} images, {len(figures)} figures", flush=True)
     return 0
 
 
