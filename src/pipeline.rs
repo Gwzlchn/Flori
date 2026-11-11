@@ -286,7 +286,8 @@ pub struct Source {
     pub url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Also what `GET /api/jobs/{id}` reports as the job's AI settings (contract 3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AiSpec {
     pub tool: AiTool,

@@ -201,7 +201,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | POST /api/collections/{id}/feed/jobs | {items:[{platform,source_id}], translate?};每批 1–20 条,超出 400 invalid_request;服务端校验 ID 并自己拼 URL;一个事务内插入;返回 {created, skipped},每项带 job |
 | POST /api/jobs | {url, domain_id, collection_id?, translate?};识别不了 400 invalid_url;领域或集合不存在 404;重复 409 conflict 并带 job_id;成功 201 |
 | GET /api/jobs?limit= | 按 id 倒序,默认 200 条;筛选在前端做 |
-| GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url;files 是各步 manifest.files 按 publish 规则合并的结果;每步带 meta(成功步骤的 manifest.meta 原样,其余为空对象)与 files(本步自己的 manifest.files,不受后续步骤覆盖,路径相对 job 目录),以及 manifest 的 skipped_reason,translate 给中文视频加了标点时另有 punctuation{sections, kept_original, corrected, reverted}(早于同音纠错的任务后两项为 0);每步另带 ai_calls[{name, attempt, index, files}],即 ai/ 里本步各次尝试的调用记录,按尝试与序号排序,files 是 job 内相对路径,按 prompt.md、call.json、out.json\|out.txt、err.txt 排列,失败的步骤也列出;记录里是不可信的转写与模型文字,前端只按纯文本显示,经 files 端点按需读取;obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
+| GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url、ai(job.json 的 ai,读不到时为 null);files 是各步 manifest.files 按 publish 规则合并的结果;每步带 meta(成功步骤的 manifest.meta 原样,其余为空对象)与 files(本步自己的 manifest.files,不受后续步骤覆盖,路径相对 job 目录),以及 manifest 的 skipped_reason,translate 给中文视频加了标点时另有 punctuation{sections, kept_original, corrected, reverted}(早于同音纠错的任务后两项为 0);每步另带 ai_calls[{name, attempt, index, files}],即 ai/ 里本步各次尝试的调用记录,按尝试与序号排序,files 是 job 内相对路径,按 prompt.md、call.json、out.json\|out.txt、err.txt 排列,失败的步骤也列出;记录里是不可信的转写与模型文字,前端只按纯文本显示,经 files 端点按需读取;obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB;单行超过上限时按字符边界切开)与 next_offset;offset 超出文件末尾 400 invalid_request;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
 | GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range;所有响应只带一个 `Content-Security-Policy: sandbox allow-same-origin; frame-ancestors 'none'` 与 `X-Content-Type-Options: nosniff`:外部 HTML 不能运行脚本或提交表单,它引用的图片仍按同源加载 |
@@ -233,7 +233,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
   - running 只由执行器写。retry 与 cancel 由 HTTP 层在一个事务里改状态,再调用 `ExecHandle::wake()` 或 `cancel(job_id)`。
   - 服务启动时把 running 的 job 改回 queued、running 的步改回 pending,并删除残留的 `.tmp` 目录。
 - 时间字段都是 RFC 3339,时区 +08:00。
-- 非 /api 路径返回静态文件,找不到时返回 index.html;前端手工解析 pathname,不用 vue-router。/api 下没有的端点(含 /api 与 /api/ 本身)返回 404 not_found,页面不会在 /api 的 CSP 下打开。
+- 非 /api 路径返回静态文件,找不到时返回 index.html;前端手工解析 pathname,不用 vue-router。详情页的标签页是真实链接:`/jobs/<id>` 是 AI 笔记,`/jobs/<id>/<逻辑名>` 是该 .md 文件,`/jobs/<id>/meta` 是元信息;不认识的名字显示 AI 笔记,地址不变。/api 下没有的端点(含 /api 与 /api/ 本身)返回 404 not_found,页面不会在 /api 的 CSP 下打开。
 - feed.py:`python3 -I $FLORI_STEPS_DIR/feed.py list <kind> <normalized_url> --limit N`,超时 60s。stdout `{"title":str,"items":[{"platform":"bilibili"|"youtube","source_id":str,"title":str,"published":"YYYY-MM-DD"|null,"duration_s":int|null}]}`;退出码沿用契约 1。
   - kind 封闭,规范 URL 由服务端解析投递链接后生成,feed.py 只接受下表形式(整串匹配),其它一律退出 20:
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 
-import { isActive, jobStatusText, platformText, shortTime, stepText, type Schemas } from "../client";
+import { failedAt, isActive, jobStatusText, platformText, shortTime, stepText, type Schemas } from "../client";
 
 const props = defineProps<{
   jobs: Schemas["JobSummary"][]; domains: Schemas["Domain"][]; collections: Schemas["Collection"][];
@@ -58,7 +58,7 @@ function place(job: Schemas["JobSummary"]): string {
           <small class="meta">
             #{{ job.id }} · {{ platformText[job.platform] }} · {{ place(job) }} · {{ shortTime(job.created) }}
             <template v-if="job.status === 'running' && job.current_step"> · {{ stepText[job.current_step] }}</template>
-            <template v-if="job.status === 'failed' && job.current_step"> · 失败于{{ stepText[job.current_step] }}</template>
+            <template v-if="job.status === 'failed' && job.current_step"> · {{ failedAt(job.current_step) }}</template>
           </small>
         </a>
       </li>

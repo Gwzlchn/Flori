@@ -143,6 +143,8 @@ async fn auth_guards_everything_but_health() {
     for (uri, content) in [
         ("/", "index"),
         ("/jobs/12", "index"),
+        ("/jobs/12/meta", "index"),
+        ("/jobs/12/transcript", "index"),
         ("/app.js", "console.log(1)"),
     ] {
         let (status, _, body) = app.send(plain(uri, Some(&ok))).await;
@@ -726,6 +728,8 @@ async fn detail_merges_manifests_and_builds_the_obsidian_link() {
     assert_eq!(detail["steps"][4]["punctuation"], Value::Null);
     assert_eq!(detail["preview_base"], "/api/jobs/1/files/");
     assert_eq!(detail["job_url"], "http://nas.lan:8780/jobs/1");
+    assert_eq!(detail["ai"]["tool"], "claude");
+    assert_eq!(detail["ai"]["model_note"], app.state.config.ai_model_note);
     assert_eq!(
         detail["vault_path"],
         "flori/ml/unsorted/2026-11-08-yt-dQw4w9WgXcQ/"

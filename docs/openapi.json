@@ -855,6 +855,38 @@
           }
         }
       },
+      "AiSpec": {
+        "type": "object",
+        "description": "Also what `GET /api/jobs/{id}` reports as the job's AI settings (contract 3).",
+        "required": [
+          "tool",
+          "model_note",
+          "model_translate",
+          "cli_version"
+        ],
+        "properties": {
+          "cli_version": {
+            "type": "string"
+          },
+          "model_note": {
+            "type": "string"
+          },
+          "model_translate": {
+            "type": "string"
+          },
+          "tool": {
+            "$ref": "#/components/schemas/AiTool"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AiTool": {
+        "type": "string",
+        "enum": [
+          "claude",
+          "codex"
+        ]
+      },
       "ApiError": {
         "type": "object",
         "description": "Every non-2xx JSON body.",
@@ -1141,6 +1173,17 @@
           "job_url"
         ],
         "properties": {
+          "ai": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AiSpec",
+                "description": "job.json's `ai`: the tool, the models for note and translate, and the CLI version."
+              }
+            ]
+          },
           "assets": {
             "type": "object",
             "description": "Basename -> job-relative path, for rewriting `assets/<basename>` in previews.",

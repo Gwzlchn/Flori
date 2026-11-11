@@ -18,10 +18,22 @@ export const stepText: Record<Schemas["StepName"], string> = {
   "arxiv-fetch": "获取论文", "arxiv-convert": "转换正文", note: "AI 笔记", translate: "翻译", publish: "发布",
 };
 export const platformText: Record<Schemas["Platform"], string> = { bilibili: "B站", youtube: "YouTube", arxiv: "arXiv" };
+// Logical file names from the manifests (contract 1); other names show as they are.
+export const fileText: Record<string, string> = {
+  note: "AI 笔记", translation: "译文", original: "原文", transcript: "转写稿", video: "视频",
+  subtitle: "转写字幕", subtitle_zh: "中文字幕", ai_subtitle_zh: "B站 AI 字幕(中文)", ai_subtitle_en: "B站 AI 字幕(英文)",
+  transcript_json: "转写数据", sections: "分节数据", page: "论文网页",
+};
 export const feedKindText: Record<Schemas["FeedKind"], string> = {
   bili_up: "B站 UP 主投稿", bili_season: "B站合集", bili_series: "B站系列", bili_fav: "B站收藏夹",
   yt_channel: "YouTube 频道", yt_playlist: "YouTube 播放列表",
 };
+
+// A Latin step name such as "AI 笔记" gets a space after the Chinese words before it.
+export function failedAt(step: Schemas["StepName"]): string {
+  const name = stepText[step];
+  return /^[A-Za-z0-9]/.test(name) ? `失败于 ${name}` : `失败于${name}`;
+}
 
 export function isActive(status: Schemas["JobStatus"]): boolean {
   return status === "queued" || status === "running";

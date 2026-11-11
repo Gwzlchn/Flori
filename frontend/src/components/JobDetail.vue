@@ -2,18 +2,18 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import {
-  api, duration, failure, fileUrl, isActive, jobStatusText, platformText, seconds, shortTime, stepStatusText, stepText, type Schemas,
+  api, duration, failedAt, failure, fileText, fileUrl, isActive, jobStatusText, platformText, seconds, shortTime, stepStatusText,
+  stepText, type Schemas,
 } from "../client";
+import JobMeta from "./JobMeta.vue";
 import MarkdownView from "./MarkdownView.vue";
 
-const props = defineProps<{ id: number; domains: Schemas["Domain"][]; collections: Schemas["Collection"][] }>();
+// `tab` is the path segment after /jobs/<id>/: a logical .md file name or "meta"; empty or
+// unknown shows the note. App keeps this component mounted while only the tab changes.
+const props = defineProps<{ id: number; tab: string; domains: Schemas["Domain"][]; collections: Schemas["Collection"][] }>();
 
 const docOrder = ["note", "translation", "original", "transcript"];
-const fileText: Record<string, string> = {
-  note: "AI 笔记", translation: "译文", original: "原文", transcript: "转写", video: "视频",
-  subtitle: "转写字幕", subtitle_zh: "中文字幕", ai_subtitle_zh: "B站 AI 字幕(中文)", ai_subtitle_en: "B站 AI 字幕(英文)",
-  transcript_json: "转写数据", sections: "分节数据", page: "论文网页",
-};
+const META_TAB = "meta";
 // The executor opens each attempt's part of job.log with this line (contract 1).
 const LOG_HEADER = /^== (\d{2}-[a-z-]+) attempt \d+ ==$/;
 const skipText: Record<string, string> = { chinese: "原文是中文,不需要翻译", unknown: "无法判断语言,未翻译", too_long: "篇幅过长,未翻译" };
@@ -68,7 +68,6 @@ const log = ref("");
 const logBox = ref<HTMLPreElement>();
 const message = ref("");
 const busy = ref(false);
-const tab = ref("");
 // Job-relative path -> Markdown text; null when loading failed. Finished step files never change.
 const texts = ref(new Map<string, string | null>());
 // AI call records by job-relative path; null when loading failed. They hold untrusted transcript
@@ -82,16 +81,23 @@ let polling = false;
 let timer: number | undefined;
 
 const job = computed(() => detail.value?.job);
-const place = computed(() => {
-  const domain = props.domains.find((item) => item.id === job.value?.domain_id)?.name;
-  const collection = props.collections.find((item) => item.id === job.value?.collection_id)?.name;
-  return [domain, collection].filter(Boolean).join(" / ");
-});
+const domainName = computed(() => props.domains.find((item) => item.id === job.value?.domain_id)?.name);
+const collectionName = computed(() => props.collections.find((item) => item.id === job.value?.collection_id)?.name);
+const place = computed(() => [domainName.value, collectionName.value].filter(Boolean).join(" / "));
 const docs = computed(() => (detail.value?.files ?? [])
   .filter((file) => file.path.endsWith(".md"))
   .sort((a, b) => rank(a.name) - rank(b.name)));
-const current = computed(() => docs.value.find((file) => file.name === tab.value) ?? docs.value[0]);
+// Real links, so back, forward and copying the address work; App navigates them in place.
+const tabs = computed(() => [
+  { name: "note", label: fileText.note, href: `/jobs/${props.id}` },
+  ...docs.value.filter((file) => file.name !== "note")
+    .map((file) => ({ name: file.name, label: fileText[file.name] ?? file.name, href: `/jobs/${props.id}/${file.name}` })),
+  { name: META_TAB, label: "元信息", href: `/jobs/${props.id}/${META_TAB}` },
+]);
+const active = computed(() => (tabs.value.some((item) => item.name === props.tab) ? props.tab : "note"));
+const current = computed(() => (active.value === META_TAB ? undefined : docs.value.find((file) => file.name === active.value)));
 const video = computed(() => detail.value?.files.find((file) => file.name === "video"));
+const showVideo = computed(() => active.value === "note" || active.value === "transcript");
 // job.log by step directory name (`<nn>-<name>`); all attempts of a step, headers included.
 const stepLogs = computed(() => {
   const parts = new Map<string, string[]>();
@@ -253,7 +259,7 @@ onBeforeUnmount(() => {
         <p v-if="total > 0 || failedStep" class="meta">
           <template v-if="total > 0">各步共用时 {{ duration(total) }}</template>
           <template v-if="total > 0 && failedStep"> · </template>
-          <span v-if="failedStep" class="danger">失败于{{ stepText[failedStep.name] }}</span>
+          <span v-if="failedStep" class="danger">{{ failedAt(failedStep.name) }}</span>
         </p>
         <p v-if="detail.vault_path" class="meta">已发布到 {{ detail.vault_path }}</p>
       </div>
@@ -268,13 +274,16 @@ onBeforeUnmount(() => {
 
     <div class="detail">
       <div class="stack">
-        <video v-if="video" class="card video" controls preload="metadata" :src="fileUrl(detail.preview_base, video.path)" />
-        <section class="card">
-          <nav v-if="docs.length > 1" class="tabs">
-            <button v-for="file in docs" :key="file.name" type="button" :aria-pressed="current?.name === file.name" @click="tab = file.name">
-              {{ fileText[file.name] ?? file.name }}
-            </button>
-          </nav>
+        <nav class="tabs">
+          <a v-for="item in tabs" :key="item.name" :href="item.href" :aria-current="active === item.name ? 'page' : undefined">{{ item.label }}</a>
+        </nav>
+        <!-- v-show keeps the playback position when 元信息 is opened and closed. -->
+        <video
+          v-if="video" v-show="showVideo" class="card video" controls preload="metadata"
+          :src="fileUrl(detail.preview_base, video.path)"
+        />
+        <JobMeta v-if="active === META_TAB" :detail :domain="domainName" :collection="collectionName" :spent="total" />
+        <section v-else class="card">
           <p v-if="!current" class="empty">笔记生成后在这里预览。</p>
           <p v-else-if="!texts.has(current.path)" class="empty">加载中…</p>
           <p v-else-if="texts.get(current.path) === null" class="error">文件加载失败。</p>
@@ -338,15 +347,6 @@ onBeforeUnmount(() => {
               </details>
             </li>
           </ol>
-        </section>
-        <section v-if="detail.files.length" class="card">
-          <h2>文件</h2>
-          <ul class="files">
-            <li v-for="file in detail.files" :key="file.name">
-              <a :href="fileUrl(detail.preview_base, file.path)" target="_blank" rel="noopener">{{ fileText[file.name] ?? file.name }}</a>
-              <small class="meta">{{ file.path.split("/").pop() }}</small>
-            </li>
-          </ul>
         </section>
       </aside>
     </div>

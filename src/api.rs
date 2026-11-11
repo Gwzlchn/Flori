@@ -11,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::pipeline::{FeedKind, MetaValue, Pipeline, Platform, StepName, TranslateMode};
+use crate::pipeline::{AiSpec, FeedKind, MetaValue, Pipeline, Platform, StepName, TranslateMode};
 
 /// Only the drift test builds the document; the server never serves it.
 #[cfg(test)]
@@ -282,6 +282,8 @@ pub struct JobDetail {
     /// `obsidian://open?vault=...&file=...` for the main note, after publish.
     pub obsidian_uri: Option<String>,
     pub job_url: String,
+    /// job.json's `ai`: the tool, the models for note and translate, and the CLI version.
+    pub ai: Option<AiSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, sqlx::FromRow)]

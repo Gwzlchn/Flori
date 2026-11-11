@@ -8,7 +8,7 @@ import JobList from "./components/JobList.vue";
 import SubmitBar from "./components/SubmitBar.vue";
 import TaxonomyPanel from "./components/TaxonomyPanel.vue";
 
-type Route = { view: "home" | "taxonomy" | "missing" } | { view: "job" | "feed"; id: number };
+type Route = { view: "home" | "taxonomy" | "missing" } | { view: "job"; id: number; tab: string } | { view: "feed"; id: number };
 
 const path = ref(location.pathname);
 const ready = ref(false);
@@ -19,8 +19,9 @@ const jobs = ref<Schemas["JobSummary"][]>([]);
 let timer: number | undefined;
 
 const route = computed((): Route => {
-  const job = /^\/jobs\/(\d+)\/?$/.exec(path.value);
-  if (job) return { view: "job", id: Number(job[1]) };
+  // /jobs/<id> is the note, /jobs/<id>/<tab> another document or the 元信息 tab.
+  const job = /^\/jobs\/(\d+)(?:\/([^/]+))?\/?$/.exec(path.value);
+  if (job) return { view: "job", id: Number(job[1]), tab: job[2] ?? "" };
   const feed = /^\/collections\/(\d+)\/feed\/?$/.exec(path.value);
   if (feed) return { view: "feed", id: Number(feed[1]) };
   if (path.value === "/") return { view: "home" };
@@ -34,8 +35,11 @@ function follow(event: MouseEvent): void {
   if (!link || link.target || link.origin !== location.origin || link.pathname.startsWith("/api/")) return;
   event.preventDefault();
   if (link.pathname !== location.pathname) history.pushState(null, "", link.pathname);
+  const before = route.value;
   path.value = link.pathname;
-  window.scrollTo(0, 0);
+  const after = route.value;
+  // Switching tabs of one job keeps the reader where they are.
+  if (!(before.view === "job" && after.view === "job" && before.id === after.id)) window.scrollTo(0, 0);
 }
 
 function popped(): void {
@@ -88,7 +92,7 @@ onBeforeUnmount(() => {
         <SubmitBar :domains :collections @submitted="loadJobs" />
         <JobList :jobs :domains :collections />
       </template>
-      <JobDetail v-else-if="route.view === 'job'" :id="route.id" :key="route.id" :domains :collections />
+      <JobDetail v-else-if="route.view === 'job'" :id="route.id" :key="route.id" :tab="route.tab" :domains :collections />
       <TaxonomyPanel v-else-if="route.view === 'taxonomy'" :domains :collections @changed="loadTaxonomy" />
       <FeedPanel v-else-if="route.view === 'feed'" :id="route.id" :key="route.id" :domains :collections @changed="loadTaxonomy" />
       <p v-else class="empty">页面不存在。<a href="/">回到任务列表</a></p>

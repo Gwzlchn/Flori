@@ -48,7 +48,7 @@ use crate::{
     exec::{self, ExecHandle, Stop},
     pipeline::{
         FeedKind, MetaValue, StepName, TranslateMode, feed_kind_arg, parse_feed, parse_source,
-        read_manifest, step_dir_name, video_source,
+        read_job, read_manifest, step_dir_name, video_source,
     },
 };
 
@@ -741,6 +741,7 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
         vault_path,
         obsidian_uri,
         job_url: format!("{}/jobs/{id}", s.config.public_url),
+        ai: read_job(&dir).ok().map(|spec| spec.ai),
         job,
     }))
 }

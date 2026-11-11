@@ -234,6 +234,15 @@ export interface components {
             /** @description `<step>-a<attempt>-<k>`. */
             name: string;
         };
+        /** @description Also what `GET /api/jobs/{id}` reports as the job's AI settings (contract 3). */
+        AiSpec: {
+            cli_version: string;
+            model_note: string;
+            model_translate: string;
+            tool: components["schemas"]["AiTool"];
+        };
+        /** @enum {string} */
+        AiTool: "claude" | "codex";
         /** @description Every non-2xx JSON body. */
         ApiError: {
             code: components["schemas"]["ErrorCode"];
@@ -309,6 +318,7 @@ export interface components {
             version: string;
         };
         JobDetail: {
+            ai?: null | components["schemas"]["AiSpec"];
             /** @description Basename -> job-relative path, for rewriting `assets/<basename>` in previews. */
             assets: {
                 [key: string]: string;
