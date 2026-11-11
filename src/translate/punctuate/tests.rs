@@ -137,11 +137,16 @@ fn other_changes_are_put_back_and_punctuation_stays() {
             "然后，我们去吧。",
             "然后那个，我们去吧。",
         ),
-        // A replacement of another length.
+        // A replacement of another length; a mark inside it goes to its end.
         (
             "这部分复仇出清到了",
             "这部分浮动筹码出清，到了",
             "这部分复仇出清，到了",
+        ),
+        (
+            "这部分复仇出清到了",
+            "这部分浮动，筹码出清，到了",
+            "这部分复仇，出清，到了",
         ),
         // ASCII: case, a term, an English name for a Chinese one.
         ("ai模型很火", "AI模型很火。", "ai模型很火。"),
@@ -155,8 +160,25 @@ fn other_changes_are_put_back_and_punctuation_stays() {
         ("今天菜很好", "今天，拆。很好", "今天，菜。很好"),
         // A run is kept or put back whole: a fix next to a changed digit goes back with it.
         ("一度扶赢3个亿", "一度浮盈4个亿。", "一度扶赢3个亿。"),
-        // A mark on both sides of an inserted word lands once.
+        // A mark on both sides of an inserted word lands once. Of different marks the first
+        // stays, later quotes and brackets join it so that pairs stay whole, and a pair that
+        // encloses nothing any more goes.
         ("我们走吧", "我们，那个，走吧。", "我们，走吧。"),
+        ("我们走吧", "我们走吧（笑）。", "我们走吧。"),
+        ("我们走吧", "我们走吧，“好吧”", "我们走吧，"),
+        (
+            "股市大跌我们走吧",
+            "股市大跌。真是可怕！我们走吧。",
+            "股市大跌。我们走吧。",
+        ),
+        (
+            "我们现在走吧",
+            "我们，那个，就是说。现在走吧",
+            "我们，现在走吧",
+        ),
+        ("他说好走吧", "他说“好，就这样”走吧", "他说“好，”走吧"),
+        ("他说好走吧", "他说“好”，就这样（吧）走吧", "他说“好”，走吧"),
+        ("他说好走吧", "他说“好（就这样”走吧", "他说“好（”走吧"),
         // Two words merged, or one split: the break between ASCII words is content.
         (
             "machine learning",

@@ -26,6 +26,28 @@ const PUNCTUATION: &[char] = &[
     '―', '·', '・',
 ];
 
+/// The quotes and brackets of [`PUNCTUATION`], each opening mark with its closing one.
+const PAIRS: &[(char, char)] = &[
+    ('"', '"'),
+    ('\'', '\''),
+    ('(', ')'),
+    ('[', ']'),
+    ('{', '}'),
+    ('“', '”'),
+    ('‘', '’'),
+    ('＂', '＂'),
+    ('＇', '＇'),
+    ('「', '」'),
+    ('『', '』'),
+    ('（', '）'),
+    ('［', '］'),
+    ('｛', '｝'),
+    ('《', '》'),
+    ('〈', '〉'),
+    ('【', '】'),
+    ('〔', '〕'),
+];
+
 /// Ideographs a reply may neither replace nor bring in, though another sounds the same, because
 /// the swap changes what is said: numerals and other number words, as 十一 and 十亿 sound the
 /// same; negations, as 不 and 部 do; and 买 and 卖, which differ only in tone.
@@ -128,10 +150,12 @@ pub(super) struct Merged {
 /// to the original, a break the reply added with its marks. A gap between two units that stay
 /// neighbours goes between them; one that touches a run put back goes to the end of that run, or
 /// after the unit before it when that unit stays and the unit after it does not. A gap that
-/// would change how a number or word reads is dropped, and one equal to the mark already there
-/// is not repeated. So without punctuation and whitespace, the result is the original but for
-/// the replacements kept. Whitespace runs collapse to one space: a line break or indent from the
-/// AI would become Markdown structure, and video-frames' text has none either.
+/// would change how a number or word reads is dropped. Where gaps moved to one place meet, an
+/// opening and a closing mark with nothing left between them are dropped, and once the place has
+/// a mark, later gaps add only their quotes and brackets: the gaps around an inserted clause
+/// would leave （） or 。！ behind. So without punctuation and whitespace, the result is the
+/// original but for the replacements kept. Whitespace runs collapse to one space: a line break
+/// or indent from the AI would become Markdown structure, and video-frames' text has none either.
 pub(super) fn merge(original: &str, reply: &str) -> Option<Merged> {
     let (ours, theirs) = (units(original), units(reply));
     let (a, b) = (keys(&ours.units), keys(&theirs.units));
@@ -208,15 +232,22 @@ pub(super) fn merge(original: &str, reply: &str) -> Option<Merged> {
     if !fits(&gaps) {
         return None;
     }
-    for (at, gap) in moved {
-        let mark = gap.trim();
-        if !mark.is_empty() && gaps[at].trim_end().ends_with(mark) {
-            continue;
+    let paired = |c: char| PAIRS.iter().any(|&(open, close)| c == open || c == close);
+    for (at, mut gap) in moved {
+        let before = gaps[at].clone();
+        while let Some(open) = gaps[at].trim_end().chars().next_back()
+            && let Some(close) = gap.trim_start().chars().next()
+            && PAIRS.contains(&(open, close))
+        {
+            let end = gaps[at].trim_end().len() - open.len_utf8();
+            gaps[at].truncate(end);
+            gap = &gap.trim_start()[close.len_utf8()..];
         }
-        let len = gaps[at].len();
-        gaps[at].push_str(gap);
+        let marked = gaps[at].chars().any(|c| !c.is_whitespace());
+        let gap: String = gap.chars().filter(|&c| !marked || paired(c)).collect();
+        gaps[at].push_str(&gap);
         if !fits(&gaps) {
-            gaps[at].truncate(len);
+            gaps[at] = before;
         }
     }
     Some(Merged {
