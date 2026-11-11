@@ -121,8 +121,13 @@ fn other_changes_are_put_back_and_punctuation_stays() {
             "2017年，股灾修复期间。",
         ),
         ("到了14.33分", "到了14:33分。", "到了14.33分。"),
-        // A numeral is a digit even when it sounds the same.
+        // A numeral is a digit even when it sounds the same, and so is a number word.
         ("涨了十一个点", "涨了十亿个点。", "涨了十一个点。"),
+        ("涨了一半", "涨了一板。", "涨了一半。"),
+        // A negation stays and does not come in, and 买 does not become 卖.
+        ("公司今年不分红", "公司今年部分红。", "公司今年不分红。"),
+        ("这个布太好", "这个不太好。", "这个布太好。"),
+        ("他今天买了", "他今天卖了。", "他今天买了。"),
         // An inserted word; the mark before it stays where it was.
         ("今天聊股市", "今天，我们聊股市。", "今天，聊股市。"),
         ("今天聊股市", "今天聊股市吧。", "今天聊股市。"),
@@ -263,17 +268,25 @@ fn readings_decide_strictly_without_tones() {
         ('肯', '根'),
         ('盘', '庞'),
         ('林', '宁'),
-        // Numerals, letters, digits and marks are never ideographs that sound alike.
+        // Numerals and number words, negations and 买卖, letters, digits and marks are never
+        // ideographs that sound alike.
         ('一', '亿'),
         ('十', '是'),
         ('〇', '零'),
+        ('半', '板'),
+        ('兆', '照'),
+        ('不', '布'),
+        ('不', '复'),
+        ('没', '美'),
+        ('未', '为'),
+        ('买', '卖'),
         ('a', 'a'),
         ('3', '3'),
         ('。', '。'),
         // The pinyin data also reads private-use characters of old GB fonts.
         ('\u{E815}', '\u{E815}'),
     ] {
-        assert!(!same_sound(a, b), "{a} {b}");
+        assert!(!same_sound(a, b) && !same_sound(b, a), "{a} {b}");
     }
 }
 

@@ -26,8 +26,11 @@ const PUNCTUATION: &[char] = &[
     '―', '·', '・',
 ];
 
-/// Ideographs that write numbers. They count as digits: 十一 and 十亿 sound the same.
-const NUMERALS: &str = "〇零一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟萬億兩";
+/// Ideographs a reply may neither replace nor bring in, though another sounds the same, because
+/// the swap changes what is said: numerals and other number words, as 十一 and 十亿 sound the
+/// same; negations, as 不 and 部 do; and 买 and 卖, which differ only in tone.
+const FIXED: &str = "〇零一二两三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟萬億兩半兆廿卅仨俩幺\
+                     不没沒无無非未别別莫勿否毋甭买卖買賣";
 
 /// One unit of what punctuation and whitespace may not change.
 #[derive(Debug, Clone, Copy)]
@@ -91,12 +94,12 @@ fn keys(units: &[Unit]) -> Vec<char> {
 }
 
 /// Two ideographs that share a reading, tones aside: any reading of a heteronym counts, and
-/// initials and finals must match exactly (c is not ch, n is not l). Numerals never match.
+/// initials and finals must match exactly (c is not ch, n is not l). [`FIXED`] never matches.
 fn same_sound(a: char, b: char) -> bool {
     let readings = |c: char| {
         let multi = c
             .to_pinyin_multi()
-            .filter(|_| is_han(c) && !NUMERALS.contains(c));
+            .filter(|_| is_han(c) && !FIXED.contains(c));
         multi.map(|m| m.into_iter().map(|p| p.plain()).collect::<Vec<_>>())
     };
     match (readings(a), readings(b)) {
