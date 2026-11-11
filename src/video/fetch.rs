@@ -27,6 +27,9 @@ use crate::pipeline::{
 pub(super) const VIDEO_FILE: &str = "video.mp4";
 pub(super) const SUBTITLE_FILE: &str = "subtitle.srt";
 pub(super) const SUBTITLE_ZH_FILE: &str = "subtitle_zh.srt";
+/// Logical name prefix of a manual track kept while the spoken language is unknown,
+/// `manual_subtitle_<lang>`; its file adds `.srt`.
+pub(super) const MANUAL_SUBTITLE: &str = "manual_subtitle_";
 /// Logical name prefix of a Bilibili AI track, `ai_subtitle_<lang>`; its file adds `.srt`.
 pub(super) const AI_SUBTITLE: &str = "ai_subtitle_";
 
@@ -207,7 +210,9 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     let fetched: FetchedMeta = read_json(&meta_file)?;
     fs::remove_file(&meta_file)?;
     // The language becomes a --sub-langs regex, so anything but a plain tag counts as unknown.
-    // yt-dlp's Bilibili extractor never sets it; the unknown order takes Chinese first.
+    // yt-dlp takes it from YouTube's audio track or original-language captions (the ones it also
+    // lists as `<lang>-orig`), so no other field knows more. Its Bilibili extractor never sets
+    // it. Unknown, video-transcribe decides from the audio.
     let plain_tag = |o: &String| o.len() >= 2 && o.bytes().all(|b| b.is_ascii_lowercase());
     let original = fetched.language.as_deref().map(primary).filter(plain_tag);
     // Only tracks keep_subtitles can use: a third original language never needs English, and
@@ -247,7 +252,7 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     }
     drop(cookies);
 
-    let kept = keep_subtitles(out_dir, original.as_deref(), ai_langs)?;
+    let kept = keep_subtitles(out_dir, original.as_deref(), &langs, ai_langs)?;
     let mut files = BTreeMap::from([("video".into(), VIDEO_FILE.into())]);
     if kept.language.is_some() {
         files.insert("subtitle".into(), SUBTITLE_FILE.into());
@@ -255,8 +260,8 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     if kept.chinese {
         files.insert("subtitle_zh".into(), SUBTITLE_ZH_FILE.into());
     }
-    for lang in &kept.ai {
-        let name = format!("{AI_SUBTITLE}{lang}");
+    let candidates = kept.manual.iter().map(|l| format!("{MANUAL_SUBTITLE}{l}"));
+    for name in candidates.chain(kept.ai.iter().map(|l| format!("{AI_SUBTITLE}{l}"))) {
         files.insert(name.clone(), format!("{name}.srt"));
     }
     let title = fetched.playlist_title.or(fetched.title);
@@ -483,9 +488,10 @@ pub(super) fn published_date(value: &str) -> Option<String> {
 
 /// A usable downloaded `subtitle.<lang>.srt`.
 struct Track {
-    rank: (u8, u8),
     /// Lowercased primary subtag, e.g. `zh` for `zh-Hans`.
     primary: String,
+    /// Order within its language, see [`variant_rank`].
+    variant: u8,
     path: PathBuf,
 }
 
@@ -496,14 +502,19 @@ pub(super) struct Kept {
     pub(super) language: Option<String>,
     /// Whether `subtitle_zh.srt` was written.
     pub(super) chinese: bool,
+    /// Languages of the `manual_subtitle_<lang>.srt` files written.
+    pub(super) manual: Vec<String>,
     /// Languages of the `ai_subtitle_<lang>.srt` files written.
     pub(super) ai: Vec<String>,
 }
 
-/// Keeps the best usable manual track as `subtitle.srt` (see [`subtitle_rank`]) and, when the
-/// original is known and not Chinese, the best Chinese manual track as `subtitle_zh.srt`: a
-/// human translation translate uses instead of the AI. With the original unknown a Chinese track
-/// may be the original itself, so it is never taken for a translation.
+/// With the original known, keeps its best usable manual track as `subtitle.srt`, a Chinese
+/// original falling back to English, and, when the original is not Chinese, the best Chinese
+/// manual track as `subtitle_zh.srt`: a human translation translate uses instead of the AI.
+///
+/// With the original unknown any track may be the original or a translation of it, so the best
+/// track of each language in `langs` is kept as `manual_subtitle_<lang>.srt` and video-transcribe
+/// picks by the language it hears in the audio.
 ///
 /// Bilibili AI tracks `ai-<lang>` for a language in `ai_langs` are kept as
 /// `ai_subtitle_<lang>.srt` only when no manual track made `subtitle.srt`. Each is speech
@@ -516,6 +527,7 @@ pub(super) struct Kept {
 pub(super) fn keep_subtitles(
     out_dir: &Path,
     original: Option<&str>,
+    langs: &[&str],
     ai_langs: &[&str],
 ) -> io::Result<Kept> {
     let mut tracks = Vec::new();
@@ -536,8 +548,8 @@ pub(super) fn keep_subtitles(
             (Some(_), Some(ai_lang)) => ai.push((ai_lang.to_owned(), path.clone())),
             (Some(lang), None) => {
                 tracks.push(Track {
-                    rank: subtitle_rank(lang, original),
                     primary: primary(lang),
+                    variant: variant_rank(lang),
                     path: path.clone(),
                 });
             }
@@ -545,22 +557,43 @@ pub(super) fn keep_subtitles(
             (None, _) => fs::remove_file(&path)?,
         }
     }
-    tracks.sort_by(|a, b| (a.rank, &a.path).cmp(&(b.rank, &b.path)));
-    let main = tracks.first().filter(|t| t.rank.0 < u8::MAX);
-    let translated = original.is_some_and(|o| o != "zh");
-    let chinese = tracks
-        .iter()
-        .find(|t| t.primary == "zh")
-        .filter(|_| translated);
-    for (file, track) in [(SUBTITLE_FILE, main), (SUBTITLE_ZH_FILE, chinese)] {
-        if let Some(track) = track {
-            fs::rename(&track.path, out_dir.join(file))?;
+    tracks.sort_by(|a, b| (a.variant, &a.path).cmp(&(b.variant, &b.path)));
+    let best = |lang: &str| tracks.iter().find(|t| t.primary == lang);
+    let mut kept: Vec<(&Track, String)> = Vec::new();
+    let mut result = Kept {
+        language: None,
+        chinese: false,
+        manual: Vec::new(),
+        ai: Vec::new(),
+    };
+    match original {
+        Some(o) => {
+            let fallback = if o == "zh" { best("en") } else { None };
+            if let Some(main) = best(o).or(fallback) {
+                result.language = Some(main.primary.clone());
+                kept.push((main, SUBTITLE_FILE.into()));
+            }
+            if let Some(chinese) = best("zh").filter(|_| o != "zh") {
+                result.chinese = true;
+                kept.push((chinese, SUBTITLE_ZH_FILE.into()));
+            }
         }
+        None => {
+            for lang in langs {
+                if let Some(track) = best(lang) {
+                    result.manual.push((*lang).to_owned());
+                    kept.push((track, format!("{MANUAL_SUBTITLE}{lang}.srt")));
+                }
+            }
+        }
+    }
+    for (track, file) in &kept {
+        fs::rename(&track.path, out_dir.join(file))?;
     }
     for track in tracks.iter().filter(|t| t.path.exists()) {
         fs::remove_file(&track.path)?;
     }
-    if main.is_some() {
+    if result.language.is_some() {
         for (_, path) in ai.drain(..) {
             fs::remove_file(path)?;
         }
@@ -569,11 +602,8 @@ pub(super) fn keep_subtitles(
     for (lang, path) in &ai {
         fs::rename(path, out_dir.join(format!("{AI_SUBTITLE}{lang}.srt")))?;
     }
-    Ok(Kept {
-        language: main.map(|t| t.primary.clone()),
-        chinese: chinese.is_some(),
-        ai: ai.into_iter().map(|(lang, _)| lang).collect(),
-    })
+    result.ai = ai.into_iter().map(|(lang, _)| lang).collect();
+    Ok(result)
 }
 
 /// Lowercased primary subtag: `en-US` is `en`, `zh-Hans` is `zh`.
@@ -581,22 +611,11 @@ fn primary(lang: &str) -> String {
     lang.split('-').next().unwrap_or(lang).to_ascii_lowercase()
 }
 
-/// Sort key of a track for `subtitle.srt`; `u8::MAX` is never chosen. A known original takes
-/// only its own language, except that a Chinese original falls back to English. An unknown
-/// original takes Chinese, then English: YouTube leaves the language unset mostly on videos
-/// without speech recognition, which are often Chinese. Within a language, simplified Chinese
-/// before traditional, a bare tag before regional ones.
-pub(super) fn subtitle_rank(lang: &str, original: Option<&str>) -> (u8, u8) {
-    let lang = lang.to_ascii_lowercase();
-    let main = match (original, primary(&lang).as_str()) {
-        (Some(o), p) if p == o => 0,
-        (None, "zh") => 1,
-        (Some("zh") | None, "en") => 2,
-        _ => u8::MAX,
-    };
-    let variant = match lang.as_str() {
+/// Order of the tracks of one language: simplified Chinese before traditional, a bare tag before
+/// regional ones.
+pub(super) fn variant_rank(lang: &str) -> u8 {
+    match lang.to_ascii_lowercase().as_str() {
         "zh-hans" | "zh-cn" | "zh-sg" => 0,
         l => u8::from(l.contains('-')),
-    };
-    (main, variant)
+    }
 }

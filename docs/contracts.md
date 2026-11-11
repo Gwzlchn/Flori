@@ -68,8 +68,8 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | 资源 | 输出 | 超时 | 尝试 |
 |---|---|---|---|---|
-| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(转写用的人工字幕,选轨规则见下)、subtitle_zh.srt(中文人工字幕,作译文)与 ai_subtitle_<lang>.srt(B站 AI 字幕,待 video-transcribe 核对语言);meta: title, uploader, duration_ms, published, width, height, fps, vcodec, acodec, tags(字符串数组), filesize_bytes(video.mp4 的字节数),有 subtitle.srt 时另有 subtitle_language;除 filesize_bytes 外取 yt-dlp 所报下载格式的值,逐项校验:宽高 1–65535 的整数,fps 在 (0, 1000],编码只含字母数字与 `._+-` 且不超过 64 字符,`none` 不写,标签去空白与重复,单个不超过 100 字符、合计不超过 500 字符;不合规、拿不到或标签为空时省略该项 | 30m | 3 |
-| video-transcribe | whisper | transcript.json;人工字幕优先,其次与音频语言相同的 B站 AI 字幕,最后 whisper;meta: origin(subtitle\|whisper), language, language_probability,origin 为 subtitle 时另有 subtitle_kind(manual\|ai) | 2h | 2 |
+| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(转写用的人工字幕,选轨规则见下)、subtitle_zh.srt(中文人工字幕,作译文)、manual_subtitle_<lang>.srt(原声未知时的人工字幕)与 ai_subtitle_<lang>.srt(B站 AI 字幕),后两种待 video-transcribe 核对语言;meta: title, uploader, duration_ms, published, width, height, fps, vcodec, acodec, tags(字符串数组), filesize_bytes(video.mp4 的字节数),有 subtitle.srt 时另有 subtitle_language;除 filesize_bytes 外取 yt-dlp 所报下载格式的值,逐项校验:宽高 1–65535 的整数,fps 在 (0, 1000],编码只含字母数字与 `._+-` 且不超过 64 字符,`none` 不写,标签去空白与重复,单个不超过 100 字符、合计不超过 500 字符;不合规、拿不到或标签为空时省略该项 | 30m | 3 |
+| video-transcribe | whisper | transcript.json、可选 subtitle_zh.srt;人工字幕优先(subtitle,或与音频语言相同的 manual_subtitle_<lang>),其次与音频语言相同的 B站 AI 字幕,最后 whisper;meta: origin(subtitle\|whisper), language, language_probability,origin 为 subtitle 时另有 subtitle_kind(manual\|ai) | 2h | 2 |
 | video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节,去重后每节至多 2 张关键帧,全片不设总数上限)、由它渲染的 transcript.md | 1h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv), published(arXiv API 的第一版日期 YYYY-MM-DD)与 primary_category(如 cs.LG),后两项拿不到时省略;categories(API 列出的全部分类,字符串数组,去重,每项至多 64 字符、至多 32 项)、comment(作者备注)与 journal_ref(期刊引用)取自 API,压成一行、去掉控制字符,至多 1000 字符,没有时省略;官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
 | arxiv-convert | cpu | original.md、figures.json、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$`,其中未转义的 `$`(`\text{}` 里的公式)依次换成 `\(`、`\)`,公式编号去掉 `$`,公式只在自己的定界符处结束;正文文字里的 `[`、`]`、`!` 一律转义,链接、图片与脚注只由 convert 写出,链接地址百分号编码;figures.json 见下 | 10m | 2 |
@@ -85,8 +85,8 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | files | assets |
 |---|---|---|
-| video-fetch | video、subtitle(有可用于转写的人工字幕时,选轨规则见下)、subtitle_zh(原声确定不是中文且有中文人工字幕时)、ai_subtitle_<lang>(B站没有 subtitle 而有该语言的 AI 字幕时) | 无 |
-| video-transcribe | transcript_json | 无 |
+| video-fetch | video、subtitle(有可用于转写的人工字幕时,选轨规则见下)、subtitle_zh(原声确定不是中文且有中文人工字幕时)、manual_subtitle_<lang>(原声未知时该语言最好的人工字幕)、ai_subtitle_<lang>(B站没有 subtitle 而有该语言的 AI 字幕时) | 无 |
+| video-transcribe | transcript_json、subtitle_zh(音频判定不是中文且有 manual_subtitle_zh 时) | 无 |
 | video-frames | transcript、sections | frame-<ms>.jpg |
 | arxiv-fetch | page | 无;资源原件只作为普通文件留在步骤目录 |
 | arxiv-convert | original、figures | 正文图片 |
@@ -102,21 +102,22 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - translate 的 meta 总有 language 与 translated(bool)。language 在视频路径沿用 video-transcribe 的 meta.language(为 unknown 时改用判定值);arXiv 取判定值:zh、ja、ko、en(拉丁字母为主;arXiv 论文几乎都是英文,与视频的 en 保持一致)、other(其它文字)或 unknown。跳过时另有 skipped_reason(chinese、unknown、too_long;chinese 只出现在 arXiv),too_long 时另有 chunks(int)。译出时另有 translation_source:ai(调用 AI)或 subtitle(视频用 video-fetch 的 subtitle_zh)。中文视频加了标点时 translated 为 false,另有 punctuated(true)、sections(送去加标点的有文字的节数,int)、kept_original(回复用不上、保留原文的节数,int)、corrected(采用的同音替换处数,int)与 reverted(还原的其它改动处数,int)。
 
 - video-fetch 的字幕:取人工字幕与 B站 AI 字幕,不取 YouTube 自动字幕;尽力而为,失败只记日志,由 whisper 转写。
-  - 原声语言取 yt-dlp 的 language 的主子标签(`en-US` 记 en);不是纯小写字母标签时按未知处理。yt-dlp 的 B站提取器不给 language,B站总按未知处理,即中文优先。
-  - subtitle.srt:原声已知时只取原声语言的轨,原声为中文时没有中文轨再用英文;原声未知时中文优先,其次英文。同一语言内简体先于繁体,不带地区的标签先于带地区的。
-  - subtitle_zh.srt:只在原声确定不是中文时写,取最好的中文轨。原声未知时中文轨可能就是原话,不当译文。
+  - 原声语言取 yt-dlp 的 language 的主子标签(`en-US` 记 en);不是纯小写字母标签时按未知处理。YouTube 的 language 来自音轨或原声自动字幕(yt-dlp 同时把后者列为 `<lang>-orig`),没有别的字段知道更多。yt-dlp 的 B站提取器不给 language,B站总按未知处理。
+  - subtitle.srt:只在原声已知时写,只取原声语言的轨,原声为中文时没有中文轨再用英文。同一语言内简体先于繁体,不带地区的标签先于带地区的。
+  - subtitle_zh.srt:只在原声确定不是中文时写,取最好的中文轨。
+  - manual_subtitle_<lang>.srt:原声未知时,`--sub-langs` 里每种语言取最好的一条人工字幕,不写 subtitle.srt 与 subtitle_zh.srt:中文轨可能是原话,也可能是社区译文。
   - `--sub-langs`:原声是 zh、en 以外的已知语言时为 `<原声>.*,zh.*`(英文轨用不上,而任一语言下载失败会中止整次字幕下载);其余情况为 `zh.*,en.*`。B站另按同样的语言加 `ai-<lang>`,即 `zh.*,en.*,ai-zh,ai-en`。
-  - B站 AI 字幕 `ai-<lang>`:只对登录的 SESSDATA 列出,没有 SESSDATA 时照旧只有人工字幕。<lang> 是原声时它是语音识别,否则是机器翻译,B站不标明是哪种。没有 subtitle.srt 时才保留为 ai_subtitle_<lang>.srt,有人工字幕时删除;从不作 subtitle.srt 或 subtitle_zh.srt。
-- video-transcribe 的来源:有 subtitle 时直接用,subtitle_kind=manual,language_probability 为 1。否则有 ai_subtitle_<lang> 时先用 `whisper.py detect` 判定音频语言(与 whisper 转写时的判定相同,不解码文字):有该语言的 AI 字幕就原样用它,subtitle_kind=ai,language 与 language_probability 取判定值;没有则 whisper 转写。
+  - B站 AI 字幕 `ai-<lang>`:只对登录的 SESSDATA 列出,没有 SESSDATA 时照旧只有人工字幕。<lang> 是原声时它是语音识别,否则是机器翻译,B站不标明是哪种。没有 subtitle.srt 时才保留为 ai_subtitle_<lang>.srt(与 manual_subtitle_<lang>.srt 并存),有 subtitle.srt 时删除;从不作 subtitle.srt 或 subtitle_zh.srt。
+- video-transcribe 的来源:有 subtitle 时直接用,subtitle_kind=manual,language_probability 为 1。否则有 manual_subtitle_<lang> 或 ai_subtitle_<lang> 时先用 `whisper.py detect` 判定音频语言(与 whisper 转写时的判定相同,不解码文字):有该语言的人工字幕就原样用它(subtitle_kind=manual),否则有该语言的 AI 字幕就用它(subtitle_kind=ai),language 与 language_probability 取判定值;都没有则 whisper 转写。判定不是中文且有 manual_subtitle_zh 时,把它复制成本步的 subtitle_zh.srt,作人工译文。
   - whisper 判定为 zh 时,每个窗口都带一句简体、带标点的中文提示(hotwords),输出再经 OpenCC t2s 转成简体;其它语言不带提示,不转换。
   - 带提示时 whisper 常把整个 30s 窗口出成一段,而 video-frames 按段起点分节,所以 zh 的段在后面紧跟汉字的 `。！？；，,!?;` 处切开,各片按字数比例分时间。切点后是汉字,`push_text` 拼回时不加空格,文字不变。
 - arxiv-fetch:官方 HTML 偶尔返回 200 但内容被截断,必须检查完整闭合;ar5iv 对没有 HTML 的论文返回 200 落地页,必须识别;两者都不可用时退出 20,不回退 PDF。
 - translate:
   - 判定:去掉公式、代码、URL、时间戳后,汉字/(汉字+字母) ≥ 0.3 且几乎没有假名和谚文 → 中文:arXiv 跳过,视频加标点;可比较的字母不足 200 个 → unknown,跳过。判定函数只在 Rust 里实现一次。
-  - 跳过:判为中文的 arXiv 总是跳过;判为 unknown 或超过 25 块时跳过,但非中文视频有 video-fetch 的 subtitle_zh 时不跳过,因为不调用 AI。
+  - 跳过:判为中文的 arXiv 总是跳过;判为 unknown 或超过 25 块时跳过,但非中文视频有 subtitle_zh 时不跳过,因为不调用 AI。
   - arXiv:按空行切块,每块约 12k 字符;`$$…$$`、代码、表格、图片行、References 原样保留(文末的脚注定义 `[^n]:` 不算 References,照常翻译);行内公式、代码、URL、引用号(`[12]`,或 arxiv-convert 转义后的 `\[12\]`)与脚注标记 `[^n]` 换成占位符,译完还原;原文里字面的 `⟦` 也作为占位符保护;脚注定义行首的 `[^label]: ` 不送翻译,原样保留;列表项首块不是段落时 arxiv-convert 把标记单独写一行(如 `10.`、`4. -`),下一行缩进到该项内容列时,标记行连同下一行的缩进不送翻译,原样写在该块前且不隔空行;只有列表标记的块原样保留;表格和只含图片的行在最后一个同类行结束,列表里紧跟的下一项不并入;代码围栏按 CommonMark 识别(开围栏的缩进从列表项内容列算起,不设绝对上限;关闭行最多比开围栏深 3 格,同字符、长度不短于开围栏、只含围栏字符);不校验数字。
   - 非中文视频:按 sections.json 的节翻译,每节写成"关键帧 + 中文 + 折叠的原文"(`> [!quote]- 原文`);没有中文的节只写原文,不折叠。译文与原文每行用 `pipeline::escape_markdown` 转义。
-    - 有 subtitle_zh 时不调用 AI:每条中文 cue 按起点归入 `start_ms / SECTION_MS * SECTION_MS` 那个 30s 窗口的节(`pipeline::SECTION_MS`,与 video-frames 分节相同)。窗口没有节、或该节没有原文时丢弃这条 cue,第一节之前的 cue 同样丢弃;没有 cue 的节只写原文。
+    - 有 subtitle_zh(video-transcribe 的优先,其次 video-fetch 的;两者不会同时存在)时不调用 AI:每条中文 cue 按起点归入 `start_ms / SECTION_MS * SECTION_MS` 那个 30s 窗口的节(`pipeline::SECTION_MS`,与 video-frames 分节相同)。窗口没有节、或该节没有原文时丢弃这条 cue,第一节之前的 cue 同样丢弃;没有 cue 的节只写原文。
     - 没有 subtitle_zh 时由 AI 逐块翻译,转写不做占位符(只保护字面 `⟦`)。
   - 中文视频:不翻译,也不用 subtitle_zh;按节由 AI 加标点并改正同音错字(`prompts/punctuate.md`),模型、CLI、分节协议、缓存、重问与失败分类都与翻译相同。转写原本带标点时同样处理,字幕和 whisper 的标点都不可靠。
     - 回复要把每个字写回来,所以每块约 6k 字符,是翻译的一半。

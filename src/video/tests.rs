@@ -110,33 +110,22 @@ fn text_join_spaces_only_between_latin_words() {
 }
 
 #[test]
-fn subtitle_rank_puts_the_original_first() {
-    let sorted = |original: Option<&str>| {
-        let mut langs = [
-            "en", "zh-Hant", "de", "zh-Hans", "en-US", "ai-zh", "zh-TW", "zh",
-        ];
-        langs.sort_by_key(|lang| (subtitle_rank(lang, original), *lang));
-        langs
-    };
-    // An unknown or a Chinese original: Chinese, then English.
-    let chinese_first = [
-        "zh", "zh-Hans", "zh-Hant", "zh-TW", "en", "en-US", "de", "ai-zh",
-    ];
-    assert_eq!(sorted(None), chinese_first);
-    assert_eq!(sorted(Some("zh")), chinese_first);
-    assert_eq!(subtitle_rank("de", Some("de")).0, 0);
-    // Any other known original takes only its own language: neither Chinese nor English.
-    assert_eq!(subtitle_rank("zh-Hans", Some("en")).0, u8::MAX);
-    assert_eq!(subtitle_rank("en", Some("de")).0, u8::MAX);
-    assert_eq!(subtitle_rank("ai-zh", None).0, u8::MAX);
+fn variant_rank_orders_tracks_of_one_language() {
+    let mut langs = ["zh-TW", "zh-Hant", "zh", "zh-Hans", "zh-CN", "en-US", "en"];
+    langs.sort_by_key(|lang| (variant_rank(lang), *lang));
+    assert_eq!(
+        langs,
+        ["en", "zh", "zh-CN", "zh-Hans", "en-US", "zh-Hant", "zh-TW"]
+    );
 }
 
 /// Writes one-cue `subtitle.<lang>.srt` files (an empty text makes an unusable track) and runs
-/// keep_subtitles without AI tracks; returns what it reported and the files left behind.
-fn keep(original: Option<&str>, tracks: &[(&str, &str)]) -> ((Option<String>, bool), Vec<String>) {
+/// keep_subtitles for `zh` and `en` without AI tracks; returns what it reported and the files
+/// left behind.
+fn keep(original: Option<&str>, tracks: &[(&str, &str)]) -> (Kept, Vec<String>) {
     let (kept, left) = keep_with(original, &[], tracks);
     assert!(kept.ai.is_empty());
-    ((kept.language, kept.chinese), left)
+    (kept, left)
 }
 
 /// [`keep`] with Bilibili AI tracks in `ai_langs` allowed. Kept files show as `<file>=<cue>`.
@@ -153,13 +142,32 @@ fn keep_with(
     fs::write(dir.path().join("video.mp4"), "x").unwrap();
     // Left by a subtitle run that failed before converting.
     fs::write(dir.path().join("video.en.vtt"), "partial").unwrap();
-    let kept = keep_subtitles(dir.path(), original, ai_langs).unwrap();
+    let langs = match original {
+        Some(o) if o != "zh" && o != "en" => vec![o, "zh"],
+        _ => vec!["zh", "en"],
+    };
+    let kept = keep_subtitles(dir.path(), original, &langs, ai_langs).unwrap();
     let mut left = names(dir.path());
     for name in left.iter_mut().filter(|n| n.ends_with(".srt")) {
         let text = fs::read_to_string(dir.path().join(&*name)).unwrap();
         *name = format!("{name}={}", text.lines().nth(2).unwrap());
     }
     (kept, left)
+}
+
+/// What keep_subtitles reports.
+fn kept(language: Option<&str>, chinese: bool, manual: &[&str], ai: &[&str]) -> Kept {
+    let strings = |langs: &[&str]| langs.iter().map(|l| l.to_string()).collect();
+    Kept {
+        language: language.map(Into::into),
+        chinese,
+        manual: strings(manual),
+        ai: strings(ai),
+    }
+}
+
+fn files(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| n.to_string()).collect()
 }
 
 #[test]
@@ -170,114 +178,143 @@ fn subtitles_follow_the_original_language() {
         ("en", "hello"),
         ("de", "hallo"),
     ];
-    let en_and_zh = (
-        (Some("en".to_owned()), true),
-        vec![
-            "subtitle.srt=hello".to_owned(),
-            "subtitle_zh.srt=你好".to_owned(),
-            "video.mp4".to_owned(),
-        ],
-    );
     // An English original: Chinese is the translation, not the transcript.
-    assert_eq!(keep(Some("en"), &both), en_and_zh);
-    // A Chinese or an unknown original takes the Chinese track and has no translation.
+    assert_eq!(
+        keep(Some("en"), &both),
+        (
+            kept(Some("en"), true, &[], &[]),
+            files(&["subtitle.srt=hello", "subtitle_zh.srt=你好", "video.mp4"])
+        )
+    );
+    // A Chinese original takes the Chinese track and has no translation.
     let zh_only = (
-        (Some("zh".to_owned()), false),
-        vec!["subtitle.srt=你好".to_owned(), "video.mp4".to_owned()],
+        kept(Some("zh"), false, &[], &[]),
+        files(&["subtitle.srt=你好", "video.mp4"]),
     );
     assert_eq!(keep(Some("zh"), &both), zh_only);
-    assert_eq!(keep(None, &both), zh_only);
-    // An unknown original with only English takes it.
-    let en_only = (
-        (Some("en".to_owned()), false),
-        vec!["subtitle.srt=hello".to_owned(), "video.mp4".to_owned()],
+    // A Chinese original without a Chinese track falls back to English.
+    assert_eq!(
+        keep(Some("zh"), &[("en", "hello")]),
+        (
+            kept(Some("en"), false, &[], &[]),
+            files(&["subtitle.srt=hello", "video.mp4"])
+        )
     );
-    assert_eq!(keep(None, &[("en", "hello")]), en_only);
     // Only a Chinese track of an English video: whisper transcribes, the track translates.
     let translation_only = (
-        (None, true),
-        vec!["subtitle_zh.srt=你好".to_owned(), "video.mp4".to_owned()],
+        kept(None, true, &[], &[]),
+        files(&["subtitle_zh.srt=你好", "video.mp4"]),
     );
     assert_eq!(keep(Some("en"), &[("zh-Hans", "你好")]), translation_only);
-    // Unknown original with only Chinese: it is the transcript.
-    assert_eq!(keep(None, &[("zh-Hans", "你好")]), zh_only);
     // A German original without a German track: English is not a fallback, whisper transcribes.
     let de = [("en", "hello"), ("zh-Hans", "你好")];
     assert_eq!(keep(Some("de"), &de), translation_only);
-    // A German original takes its own track; an unusable track never wins.
-    let german = (
-        (Some("de".to_owned()), true),
-        vec![
-            "subtitle.srt=hallo".to_owned(),
-            "subtitle_zh.srt=你好".to_owned(),
-            "video.mp4".to_owned(),
-        ],
-    );
-    assert_eq!(keep(Some("de"), &both), german);
-    // An unusable track never wins, neither as the transcript nor as the translation.
+    // A German original takes its own track.
     assert_eq!(
-        keep(None, &[("zh-Hans", ""), ("en", "hello")]),
-        en_only,
-        "an empty Chinese track is skipped"
+        keep(Some("de"), &both),
+        (
+            kept(Some("de"), true, &[], &[]),
+            files(&["subtitle.srt=hallo", "subtitle_zh.srt=你好", "video.mp4"])
+        )
     );
-    let traditional = (
-        (Some("en".to_owned()), true),
-        vec![
-            "subtitle.srt=hello".to_owned(),
-            "subtitle_zh.srt=哈囉".to_owned(),
-            "video.mp4".to_owned(),
-        ],
-    );
+    // An unusable track never wins, neither as the transcript nor as the translation.
     let tracks = [("en", "hello"), ("zh-Hans", ""), ("zh-Hant", "哈囉")];
     assert_eq!(
         keep(Some("en"), &tracks),
-        traditional,
+        (
+            kept(Some("en"), true, &[], &[]),
+            files(&["subtitle.srt=hello", "subtitle_zh.srt=哈囉", "video.mp4"])
+        ),
         "an empty simplified track gives way to traditional"
     );
     assert_eq!(
         keep(None, &[]),
-        ((None, false), vec!["video.mp4".to_owned()])
+        (kept(None, false, &[], &[]), files(&["video.mp4"]))
     );
 }
 
 #[test]
-fn ai_tracks_wait_for_video_transcribe_only_without_a_manual_track() {
+fn an_unknown_original_keeps_one_candidate_per_language_for_the_audio_to_pick() {
+    // TED-Ed (job 12): yt-dlp reported no language, the tracks are English and a community
+    // translation into traditional Chinese. Neither becomes subtitle.srt here.
+    assert_eq!(
+        keep(None, &[("en", "hello"), ("zh-TW", "哈囉")]),
+        (
+            kept(None, false, &["zh", "en"], &[]),
+            files(&[
+                "manual_subtitle_en.srt=hello",
+                "manual_subtitle_zh.srt=哈囉",
+                "video.mp4"
+            ])
+        )
+    );
+    // A Chinese video with only a Chinese track; simplified wins over traditional, and a
+    // language that was not asked for goes.
+    let tracks = [("zh-Hant", "哈囉"), ("zh-Hans", "你好"), ("de", "hallo")];
+    assert_eq!(
+        keep(None, &tracks),
+        (
+            kept(None, false, &["zh"], &[]),
+            files(&["manual_subtitle_zh.srt=你好", "video.mp4"])
+        )
+    );
+    // An unusable track is no candidate.
+    assert_eq!(
+        keep(None, &[("zh-Hans", ""), ("en", "hello")]),
+        (
+            kept(None, false, &["en"], &[]),
+            files(&["manual_subtitle_en.srt=hello", "video.mp4"])
+        )
+    );
+}
+
+#[test]
+fn ai_tracks_wait_for_video_transcribe_only_without_a_manual_transcript() {
     let ai = [
         ("ai-zh", "一度浮盈3个亿"),
         ("ai-en", "once up 300 million"),
         ("ai-ja", "一時は3億の含み益"),
     ];
-    let kept = |language: Option<&str>, ai: &[&str]| Kept {
-        language: language.map(Into::into),
-        chinese: false,
-        ai: ai.iter().map(|l| l.to_string()).collect(),
-    };
     // Bilibili without a manual track: the AI tracks of the requested languages stay as
     // candidates; ai-ja was not requested.
     assert_eq!(
         keep_with(None, &["zh", "en"], &ai),
         (
-            kept(None, &["en", "zh"]),
-            vec![
-                "ai_subtitle_en.srt=once up 300 million".to_owned(),
-                "ai_subtitle_zh.srt=一度浮盈3个亿".to_owned(),
-                "video.mp4".to_owned(),
-            ]
+            kept(None, false, &[], &["en", "zh"]),
+            files(&[
+                "ai_subtitle_en.srt=once up 300 million",
+                "ai_subtitle_zh.srt=一度浮盈3个亿",
+                "video.mp4",
+            ])
         )
     );
-    // A manual track wins, even one the AI tracks would outrank by language.
+    // With the original unknown, manual tracks are candidates too and the AI tracks stay: the
+    // audio may be in a language only an AI track has.
     let mut with_manual = ai.to_vec();
     with_manual.push(("en", "hello"));
-    let manual_en = (
-        kept(Some("en"), &[]),
-        vec!["subtitle.srt=hello".to_owned(), "video.mp4".to_owned()],
+    assert_eq!(
+        keep_with(None, &["zh", "en"], &with_manual),
+        (
+            kept(None, false, &["en"], &["en", "zh"]),
+            files(&[
+                "ai_subtitle_en.srt=once up 300 million",
+                "ai_subtitle_zh.srt=一度浮盈3个亿",
+                "manual_subtitle_en.srt=hello",
+                "video.mp4",
+            ])
+        )
     );
-    assert_eq!(keep_with(None, &["zh", "en"], &with_manual), manual_en);
-    // An AI Chinese track is never the translation of a non-Chinese original.
+    // A manual transcript wins; an AI Chinese track is never the translation.
     let tracks = [("en", "hello"), ("ai-zh", "你好")];
-    assert_eq!(keep_with(Some("en"), &["en", "zh"], &tracks), manual_en);
+    assert_eq!(
+        keep_with(Some("en"), &["en", "zh"], &tracks),
+        (
+            kept(Some("en"), false, &[], &[]),
+            files(&["subtitle.srt=hello", "video.mp4"])
+        )
+    );
     // Without AI languages, as on YouTube, ai- tracks are never kept; nor is an empty one.
-    let none = (kept(None, &[]), vec!["video.mp4".to_owned()]);
+    let none = (kept(None, false, &[], &[]), files(&["video.mp4"]));
     assert_eq!(keep_with(None, &[], &ai), none);
     assert_eq!(keep_with(None, &["zh"], &[("ai-zh", "")]), none);
 }
@@ -706,7 +743,7 @@ fn media_values_are_checked_one_by_one() {
 
 #[tokio::test]
 async fn subtitle_is_kept_and_both_runs_skip_live_streams() {
-    let run = FetchRun::new("youtube", "video-subs-ok", None);
+    let run = FetchRun::new("youtube", "video-lang-en-subs-ok", None);
     run.run().await.unwrap();
     assert_eq!(
         names(&run.out()),
@@ -724,7 +761,7 @@ async fn subtitle_is_kept_and_both_runs_skip_live_streams() {
         assert!(line.contains(" --match-filter !is_live "), "{line}");
         assert!(line.contains("--playlist-items 1 "), "{line}");
         assert!(
-            line.ends_with("-- https://www.youtube.com/watch?v=video-subs-ok"),
+            line.ends_with("-- https://www.youtube.com/watch?v=video-lang-en-subs-ok"),
             "{line}"
         );
     }
@@ -739,71 +776,77 @@ async fn original_language_picks_the_transcript_and_chinese_becomes_the_translat
         subtitle: Option<(&'static str, &'static str)>,
         /// The cue in subtitle_zh.srt.
         chinese: Option<&'static str>,
+        /// `(lang, cue)` of each manual_subtitle_<lang>.srt, then the ai_subtitle_<lang> kept.
+        candidates: (
+            &'static [(&'static str, &'static str)],
+            &'static [&'static str],
+        ),
         sub_langs: &'static str,
     }
-    let case = |platform, id, subtitle, chinese, sub_langs| Case {
-        platform,
-        id,
-        subtitle,
-        chinese,
-        sub_langs,
-    };
+    let none: (&[(&str, &str)], &[&str]) = (&[], &[]);
     let cases = [
-        case(
-            "youtube",
-            "video-lang-en-subs-both",
-            Some(("hello", "en")),
-            Some("你好"),
-            "zh.*,en.*",
-        ),
-        // Unknown original: the Chinese track may be the original, so it is the transcript.
-        case(
-            "youtube",
-            "video-subs-both",
-            Some(("你好", "zh")),
-            None,
-            "zh.*,en.*",
-        ),
+        Case {
+            platform: "youtube",
+            id: "video-lang-en-subs-both",
+            subtitle: Some(("hello", "en")),
+            chinese: Some("你好"),
+            candidates: none,
+            sub_langs: "zh.*,en.*",
+        },
+        // Unknown original: any track may be a translation, so the audio decides later.
+        Case {
+            platform: "youtube",
+            id: "video-subs-both",
+            subtitle: None,
+            chinese: None,
+            candidates: (&[("en", "hello"), ("zh", "你好")], &[]),
+            sub_langs: "zh.*,en.*",
+        },
         // No English track: whisper transcribes, the Chinese track is still the translation.
-        case(
-            "youtube",
-            "video-lang-en-subs-zh",
-            None,
-            Some("你好"),
-            "zh.*,en.*",
-        ),
-        case(
-            "youtube",
-            "video-lang-fr-subs-fr",
-            Some(("bonjour", "fr")),
-            Some("你好"),
-            "fr.*,zh.*",
-        ),
+        Case {
+            platform: "youtube",
+            id: "video-lang-en-subs-zh",
+            subtitle: None,
+            chinese: Some("你好"),
+            candidates: none,
+            sub_langs: "zh.*,en.*",
+        },
+        Case {
+            platform: "youtube",
+            id: "video-lang-fr-subs-fr",
+            subtitle: Some(("bonjour", "fr")),
+            chinese: Some("你好"),
+            candidates: none,
+            sub_langs: "fr.*,zh.*",
+        },
         // A French original with only English and Chinese tracks: English is never the
         // transcript, so it is not even requested.
-        case(
-            "youtube",
-            "video-lang-fr-subs-both",
-            None,
-            Some("你好"),
-            "fr.*,zh.*",
-        ),
-        // yt-dlp's Bilibili extractor sets no language; the unknown order takes Chinese. A
-        // manual track wins over the AI tracks of the same languages.
-        case(
-            "bilibili",
-            "BV-subs-both",
-            Some(("你好", "zh")),
-            None,
-            "zh.*,en.*,ai-zh,ai-en",
-        ),
-        case(
-            "bilibili",
-            "BV-subs-ai-manual",
-            Some(("你好", "zh")),
-            None,
-            "zh.*,en.*,ai-zh,ai-en",
-        ),
+        Case {
+            platform: "youtube",
+            id: "video-lang-fr-subs-both",
+            subtitle: None,
+            chinese: Some("你好"),
+            candidates: none,
+            sub_langs: "fr.*,zh.*",
+        },
+        // yt-dlp's Bilibili extractor sets no language, so every Bilibili track is a candidate,
+        // the AI ones of the requested languages too.
+        Case {
+            platform: "bilibili",
+            id: "BV-subs-both",
+            subtitle: None,
+            chinese: None,
+            candidates: (&[("en", "hello"), ("zh", "你好")], &[]),
+            sub_langs: "zh.*,en.*,ai-zh,ai-en",
+        },
+        Case {
+            platform: "bilibili",
+            id: "BV-subs-ai-manual",
+            subtitle: None,
+            chinese: None,
+            candidates: (&[("zh", "你好")], &["en", "zh"]),
+            sub_langs: "zh.*,en.*,ai-zh,ai-en",
+        },
     ];
     for case in cases {
         let id = case.id;
@@ -837,10 +880,19 @@ async fn original_language_picks_the_transcript_and_chinese_becomes_the_translat
             language.as_ref(),
             "{id}"
         );
-        assert!(
-            !manifest.files.keys().any(|k| k.starts_with(AI_SUBTITLE)),
-            "{id}"
-        );
+        let (manual, ai) = case.candidates;
+        for (lang, text) in manual {
+            let name = format!("{MANUAL_SUBTITLE}{lang}");
+            assert_eq!(file(&name), Some(format!("{name}.srt").as_str()), "{id}");
+            assert_eq!(cue(&format!("{name}.srt")).as_deref(), Some(*text), "{id}");
+        }
+        let prefixed = |prefix: &str| -> Vec<String> {
+            let names = manifest.files.keys().filter_map(|k| k.strip_prefix(prefix));
+            names.map(str::to_owned).collect()
+        };
+        let manual: Vec<String> = manual.iter().map(|(l, _)| l.to_string()).collect();
+        assert_eq!(prefixed(MANUAL_SUBTITLE), manual, "{id}");
+        assert_eq!(prefixed(AI_SUBTITLE), ai.to_vec(), "{id}");
         let subtitle_run = run.log().lines().nth(1).unwrap().to_owned();
         let sub_langs = format!("--sub-langs {} ", case.sub_langs);
         assert!(subtitle_run.contains(&sub_langs), "{id}: {subtitle_run}");
@@ -1119,7 +1171,13 @@ async fn transcribe_fake(job: &Path) -> (Manifest, Transcript, String) {
     if let Err(failure) = transcribe_with(job, &out, &env).await {
         panic!("{:?} {}", failure.exit, failure.message);
     }
-    assert_eq!(names(&out), ["manifest.json", "transcript.json"]);
+    // No scratch audio or whisper output is left behind.
+    let left = names(&out);
+    let outputs = ["manifest.json", "subtitle_zh.srt", "transcript.json"];
+    assert!(
+        left.iter().all(|n| outputs.contains(&n.as_str())),
+        "{left:?}"
+    );
     let log = fs::read_to_string(job.join("steps/fake-whisper.log")).unwrap_or_default();
     let transcript = read_json(&out.join(TRANSCRIPT_JSON)).unwrap();
     (pipeline::read_manifest(&out).unwrap(), transcript, log)
@@ -1175,6 +1233,67 @@ async fn an_ai_subtitle_is_the_transcript_only_in_the_spoken_language() {
     assert_eq!(manifest.meta["origin"], text("whisper"));
     assert!(!manifest.meta.contains_key("subtitle_kind"));
     assert_eq!(manifest.meta["language"], text("ja"));
+}
+
+#[tokio::test]
+async fn the_audio_picks_the_manual_track_when_yt_dlp_did_not_know_the_language() {
+    let en = "1\n00:00:06,586 --> 00:00:09,630\nIn 2016, a group of researchers\n";
+    let tw = "1\n00:00:06,586 --> 00:00:09,630\n2016 年，一群研究人員——\n";
+    let manual = [
+        ("manual_subtitle_en", "manual_subtitle_en.srt", en),
+        ("manual_subtitle_zh", "manual_subtitle_zh.srt", tw),
+    ];
+    let translation = |job: &Path| {
+        fs::read_to_string(job.join("steps/02-video-transcribe.tmp/subtitle_zh.srt")).ok()
+    };
+
+    // TED-Ed (job 12): English audio. The English track is the transcript and the Chinese
+    // community translation the human translation, not the other way round.
+    let job = fetched_job("en", &manual, &[]);
+    let (manifest, transcript, log) = transcribe_fake(job.path()).await;
+    assert_eq!(log, "detect\n");
+    assert_eq!(transcript.language.as_deref(), Some("en"));
+    let researchers = segment(6586, 9630, "In 2016, a group of researchers");
+    assert_eq!(transcript.segments, [researchers]);
+    assert_eq!(manifest.meta["origin"], text("subtitle"));
+    assert_eq!(manifest.meta["subtitle_kind"], text("manual"));
+    assert_eq!(manifest.meta["language"], text("en"));
+    assert_eq!(manifest.files["subtitle_zh"], "subtitle_zh.srt");
+    assert_eq!(translation(job.path()).as_deref(), Some(tw));
+
+    // A Chinese video with only a Chinese track: it is the transcript and nothing translates it.
+    let job = fetched_job("zh", &manual[1..], &[]);
+    let (manifest, transcript, log) = transcribe_fake(job.path()).await;
+    assert_eq!(log, "detect\n");
+    assert_eq!(
+        transcript.segments,
+        [segment(6586, 9630, "2016 年，一群研究人員——")]
+    );
+    assert_eq!(manifest.meta["subtitle_kind"], text("manual"));
+    assert_eq!(manifest.meta["language"], text("zh"));
+    assert!(!manifest.files.contains_key("subtitle_zh"));
+    assert_eq!(translation(job.path()), None);
+
+    // A manual track in the spoken language comes before the AI one.
+    let mut both = manual.to_vec();
+    both.push((
+        "ai_subtitle_zh",
+        "ai_subtitle_zh.srt",
+        "1\n00:00:00,000 --> 00:00:01,000\nAI\n",
+    ));
+    let job = fetched_job("zh", &both, &[]);
+    let (manifest, transcript, _) = transcribe_fake(job.path()).await;
+    assert_eq!(manifest.meta["subtitle_kind"], text("manual"));
+    assert_eq!(transcript.segments[0].text, "2016 年，一群研究人員——");
+
+    // Japanese audio: neither track is the original, whisper transcribes, and the Chinese one
+    // still translates it.
+    let job = fetched_job("ja", &manual, &[]);
+    let (manifest, transcript, log) = transcribe_fake(job.path()).await;
+    assert_eq!(log, "detect\ntranscribe\n");
+    assert_eq!(transcript.segments, [segment(0, 1000, "whisper ja")]);
+    assert_eq!(manifest.meta["origin"], text("whisper"));
+    assert_eq!(translation(job.path()).as_deref(), Some(tw));
 }
 
 #[tokio::test]

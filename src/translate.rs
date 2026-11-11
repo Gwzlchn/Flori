@@ -178,20 +178,28 @@ fn transcribed_language(job_dir: &Path) -> Result<Option<String>, StepFailure> {
     })
 }
 
-/// video-fetch's Chinese manual subtitle as the translation of each section with text, empty
-/// where no cue falls. A cue belongs to the 30s window of its start, as transcript text does in
+/// The Chinese manual subtitle as the translation of each section with text, empty where no cue
+/// falls. video-transcribe keeps it when the audio told the original language, video-fetch when
+/// yt-dlp did. A cue belongs to the 30s window of its start, as transcript text does in
 /// video-frames. A cue whose window has no section, or whose section has no text, is dropped:
 /// there is no original to pair it with, also before the first section.
 fn chinese_subtitle(
     job_dir: &Path,
     sections: &[Section],
 ) -> Result<Option<Vec<String>>, StepFailure> {
-    let (dir, fetched) = pipeline::prior_step(job_dir, StepName::VideoFetch)?;
-    let Some(file) = fetched.files.get("subtitle_zh") else {
+    let mut path = None;
+    for step in [StepName::VideoTranscribe, StepName::VideoFetch] {
+        let (dir, manifest) = pipeline::prior_step(job_dir, step)?;
+        if let Some(file) = manifest.files.get("subtitle_zh") {
+            path = Some(dir.join(file));
+            break;
+        }
+    }
+    let Some(path) = path else {
         return Ok(None);
     };
     let mut texts = vec![String::new(); sections.len()];
-    for cue in crate::video::parse_srt(&fs::read_to_string(dir.join(file))?) {
+    for cue in crate::video::parse_srt(&fs::read_to_string(path)?) {
         let window = cue.start_ms / pipeline::SECTION_MS * pipeline::SECTION_MS;
         if let Ok(i) = sections.binary_search_by_key(&window, |s| s.start_ms) {
             crate::video::push_text(&mut texts[i], &cue.text);

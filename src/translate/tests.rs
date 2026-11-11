@@ -725,14 +725,34 @@ fn video_with_subtitle(
     language: &str,
     subtitle_zh: Option<&str>,
 ) -> Fixture {
+    video_with_subtitle_from(sections, language, subtitle_zh, StepName::VideoFetch)
+}
+
+/// The same, with the Chinese manual subtitle kept by `holder`: video-fetch when yt-dlp told
+/// the original language, video-transcribe when the audio did.
+fn video_with_subtitle_from(
+    sections: &serde_json::Value,
+    language: &str,
+    subtitle_zh: Option<&str>,
+    holder: StepName,
+) -> Fixture {
     let fx = Fixture::new(Pipeline::Video, AiTool::Claude);
-    let fetched: Vec<_> = subtitle_zh
+    let subtitle: Vec<_> = subtitle_zh
         .map(|srt| ("subtitle_zh", "subtitle_zh.srt", srt))
         .into_iter()
         .collect();
-    fx.step(1, StepName::VideoFetch, Some("Talk"), &fetched, &[], &[]);
+    let files = |step| {
+        if step == holder {
+            subtitle.as_slice()
+        } else {
+            &[]
+        }
+    };
+    let fetch = StepName::VideoFetch;
+    fx.step(1, fetch, Some("Talk"), files(fetch), &[], &[]);
     let meta = [("language", MetaValue::Text(language.into()))];
-    fx.step(2, StepName::VideoTranscribe, None, &[], &[], &meta);
+    let transcribe = StepName::VideoTranscribe;
+    fx.step(2, transcribe, None, files(transcribe), &[], &meta);
     let sections = sections.to_string();
     let files = [
         ("sections", "sections.json", sections.as_str()),
@@ -1206,6 +1226,22 @@ async fn a_chinese_manual_subtitle_is_the_translation_without_any_ai_call() {
     assert_eq!(manifest.meta["translation_source"], text("subtitle"));
     assert_eq!(manifest.meta["language"], text("en"));
     assert!(!manifest.meta.contains_key("skipped_reason"));
+    assert!(fx.calls().is_empty());
+}
+
+#[tokio::test]
+async fn the_human_translation_video_transcribe_kept_is_used_too() {
+    // TED-Ed: yt-dlp gave no language, the audio was English, so video-transcribe kept the
+    // Chinese track as the translation.
+    let sections =
+        serde_json::json!([{"start_ms": 0, "frames": [], "text": "Imagine a tiny robot."}]);
+    let srt = "1\n00:00:01,000 --> 00:00:05,000\n想象一个小机器人。\n";
+    let fx = video_with_subtitle_from(&sections, "en", Some(srt), StepName::VideoTranscribe);
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let transcript = fs::read_to_string(out.join("transcript.md")).unwrap();
+    assert!(transcript.contains("想象一个小机器人。"), "{transcript}");
+    assert_eq!(meta(&out)["translation_source"], text("subtitle"));
     assert!(fx.calls().is_empty());
 }
 

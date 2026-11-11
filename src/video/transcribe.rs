@@ -1,11 +1,20 @@
 //! video-transcribe: a subtitle normalized into transcript.json, or whisper on the audio.
 
-use std::{collections::BTreeMap, ffi::OsString, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, de::DeserializeOwned};
 use tokio::process::Command;
 
-use super::{Segment, Transcript, env_value, fetch::AI_SUBTITLE, push_text, run_checked};
+use super::{
+    Segment, Transcript, env_value,
+    fetch::{AI_SUBTITLE, MANUAL_SUBTITLE, SUBTITLE_ZH_FILE},
+    push_text, run_checked,
+};
 use crate::pipeline::{
     Manifest, MetaValue, StepFailure, StepName, StepResult, prior_step, read_json, step_file,
     write_json, write_manifest,
@@ -53,6 +62,8 @@ struct Chosen {
     origin: &'static str,
     subtitle_kind: Option<&'static str>,
     probability: f64,
+    /// A Chinese manual track of a video the audio shows is not Chinese: its human translation.
+    translation: Option<PathBuf>,
 }
 
 pub async fn transcribe(job_dir: &Path, out_dir: &Path) -> StepResult {
@@ -79,19 +90,30 @@ pub(super) async fn transcribe_with(
                 origin: "subtitle",
                 subtitle_kind: Some("manual"),
                 probability: 1.0,
+                translation: None,
             }
         }
         None => {
-            let ai_tracks: BTreeMap<&str, &String> = fetched
-                .files
-                .iter()
-                .filter_map(|(name, file)| Some((name.strip_prefix(AI_SUBTITLE)?, file)))
-                .collect();
+            let tracks = |prefix: &str| -> BTreeMap<String, PathBuf> {
+                let languages = fetched.files.iter().filter_map(|(name, file)| {
+                    Some((name.strip_prefix(prefix)?.to_owned(), fetch_dir.join(file)))
+                });
+                languages.collect()
+            };
+            let candidates = Candidates {
+                manual: tracks(MANUAL_SUBTITLE),
+                ai: tracks(AI_SUBTITLE),
+            };
             let video = step_file(job_dir, StepName::VideoFetch, "video")?;
-            from_audio(&video, &fetch_dir, &ai_tracks, out_dir, env).await?
+            from_audio(&video, &candidates, out_dir, env).await?
         }
     };
     write_json(&out_dir.join(TRANSCRIPT_JSON), &chosen.transcript)?;
+    let mut files = BTreeMap::from([("transcript_json".into(), TRANSCRIPT_JSON.into())]);
+    if let Some(translation) = &chosen.translation {
+        fs::copy(translation, out_dir.join(SUBTITLE_ZH_FILE))?;
+        files.insert("subtitle_zh".into(), SUBTITLE_ZH_FILE.into());
+    }
     let language = chosen
         .transcript
         .language
@@ -109,7 +131,7 @@ pub(super) async fn transcribe_with(
     }
     let manifest = Manifest {
         title: None,
-        files: BTreeMap::from([("transcript_json".into(), TRANSCRIPT_JSON.into())]),
+        files,
         assets: Vec::new(),
         meta,
     };
@@ -117,14 +139,22 @@ pub(super) async fn transcribe_with(
     Ok(())
 }
 
-/// 16 kHz mono WAV through ffmpeg, then the Bilibili AI track in the language whisper detects in
-/// it, or else whisper's own transcription. An AI track in any other language is a machine
-/// translation of the speech. The scratch files live in out_dir so a failed attempt is cleaned
-/// up with it.
+/// Subtitle tracks video-fetch kept for the audio to decide between, by language.
+struct Candidates {
+    /// Manual tracks of a video whose spoken language yt-dlp did not report.
+    manual: BTreeMap<String, PathBuf>,
+    /// Bilibili AI tracks.
+    ai: BTreeMap<String, PathBuf>,
+}
+
+/// 16 kHz mono WAV through ffmpeg, then the subtitle track in the language whisper detects in
+/// it, a manual one before a Bilibili AI one, or else whisper's own transcription. A track in
+/// any other language is a translation of the speech; a Chinese manual one is kept as the human
+/// translation when the audio is not Chinese. The scratch files live in out_dir so a failed
+/// attempt is cleaned up with it.
 async fn from_audio(
     video: &Path,
-    fetch_dir: &Path,
-    ai_tracks: &BTreeMap<&str, &String>,
+    candidates: &Candidates,
     out_dir: &Path,
     env: &TranscribeEnv,
 ) -> Result<Chosen, StepFailure> {
@@ -137,12 +167,17 @@ async fn from_audio(
         .args(["-c:a", "pcm_s16le", "-y"])
         .arg(&audio);
     run_checked(ffmpeg, "ffmpeg").await?;
-    if !ai_tracks.is_empty() {
+    let mut translation = None;
+    if !candidates.manual.is_empty() || !candidates.ai.is_empty() {
         let detected: Detected = run_whisper(env, "detect", &audio, out_dir).await?;
         let (language, p) = (detected.language, detected.language_probability);
-        if let Some(file) = ai_tracks.get(language.as_str()) {
-            eprintln!("video-transcribe: audio is {language} p={p:.2}, using the AI subtitle");
-            let segments = read_subtitle(&fetch_dir.join(file))?;
+        if language != "zh" {
+            translation = candidates.manual.get("zh").cloned();
+        }
+        let manual = candidates.manual.get(&language).map(|f| (f, "manual"));
+        if let Some((file, kind)) = manual.or(candidates.ai.get(&language).map(|f| (f, "ai"))) {
+            eprintln!("video-transcribe: audio is {language} p={p:.2}, using the {kind} subtitle");
+            let segments = read_subtitle(file)?;
             fs::remove_file(&audio)?;
             return Ok(Chosen {
                 transcript: Transcript {
@@ -150,11 +185,12 @@ async fn from_audio(
                     segments,
                 },
                 origin: "subtitle",
-                subtitle_kind: Some("ai"),
+                subtitle_kind: Some(kind),
                 probability: p,
+                translation,
             });
         }
-        eprintln!("video-transcribe: audio is {language} p={p:.2}, no AI subtitle in it");
+        eprintln!("video-transcribe: audio is {language} p={p:.2}, no subtitle in it");
     }
     let whisper: WhisperOutput = run_whisper(env, "transcribe", &audio, out_dir).await?;
     fs::remove_file(&audio)?;
@@ -166,6 +202,7 @@ async fn from_audio(
         origin: "whisper",
         subtitle_kind: None,
         probability: whisper.language_probability,
+        translation,
     })
 }
 
