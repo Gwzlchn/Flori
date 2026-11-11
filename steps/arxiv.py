@@ -583,22 +583,35 @@ class Converter:
         return f"![](assets/{self.assets[path]})"
 
     def figures(self, article) -> list[dict]:
-        """Every outermost figure element that shows an image of original.md, in document order:
-        its label ("Figure 2"), its own caption as plain text with formulas as $TeX$, and the
-        asset names of all its images, those of nested panels included. A table without images
-        is no figure. Runs after document(), which names the assets."""
-        out = []
+        """The figures that show images of original.md, in document order: every outermost
+        figure element, and inside one without a caption of its own every figure that has one,
+        as LaTeXML nests minipages that sit side by side in one float. Each has its label
+        ("Figure 2"), its own caption as plain text with formulas as $TeX$, and the asset names
+        of its images, those of nested panels included and those of nested figures listed on
+        their own left out. A table without images is no figure. Runs after document(), which
+        names the assets."""
+        entries = []
         for figure in article.find_all("figure"):
-            if any(isinstance(p, Tag) and (p.name == "figure" or self.skipped(p)) for p in figure.parents):
+            parents = [p for p in figure.parents if isinstance(p, Tag)]
+            if any(self.skipped(p) for p in parents):
                 continue
+            outer = [p for p in parents if p.name == "figure"]
+            if not outer or (own_caption(figure) is not None and all(own_caption(p) is None for p in outer)):
+                entries.append(figure)
+        # bs4 compares tags by content, so entries are told apart by identity.
+        ids = {id(figure) for figure in entries}
+        out = []
+        for figure in entries:
             images: list[str] = []
             for node in figure.find_all(["img", "object"]):
+                if next(p for p in node.parents if id(p) in ids) is not figure:
+                    continue
                 name = self.assets.get(self.image_path(node))
                 if name and name not in images:
                     images.append(name)
             if not images:
                 continue
-            caption = next((c for c in figure.find_all("figcaption") if c.find_parent("figure") is figure), None)
+            caption = own_caption(figure)
             tag = caption.find(class_="ltx_tag") if caption else None
             label = plain(tag.get_text(), FIGURE_CAPTION_CHARS).rstrip(":：. ") if tag else ""
             text = plain(self.caption_text(caption), FIGURE_CAPTION_CHARS) if caption else ""
@@ -619,6 +632,11 @@ class Converter:
             elif isinstance(child, NavigableString) and not isinstance(child, Comment):
                 parts.append(str(child))
         return "".join(parts)
+
+
+def own_caption(figure):
+    """The figcaption of this figure element, not one of a figure nested in it; None without."""
+    return next((c for c in figure.find_all("figcaption") if c.find_parent("figure") is figure), None)
 
 
 def find_step(job_dir: pathlib.Path, name: str) -> pathlib.Path:

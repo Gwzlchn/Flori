@@ -355,6 +355,41 @@ class FetchConvertTest(unittest.TestCase):
         self.assertEqual(len(figures), 3)
         self.assertEqual(manifest(converted)["files"]["figures"], "figures.json")
 
+    def test_figures_side_by_side_in_one_float_keep_their_captions(self) -> None:
+        # As in 1910.02054: minipages with a caption each inside a float without one, a figure
+        # float or a table float. A captioned figure's own panels stay its panels.
+        job = make_job(self.root, "2401.00001")
+        fetched = job / "steps/01-arxiv-fetch"
+        (fetched / "res").mkdir()
+        for name in ("p.png", "q.png", "r.png", "s.png", "t.png"):
+            (fetched / "res" / name).write_bytes(name.encode())
+        caption = '<figcaption class="ltx_caption"><span class="ltx_tag ltx_tag_figure">{}: </span>{}</figcaption>'
+        cell = '<div class="ltx_flex_cell"><figure class="ltx_figure ltx_figure_panel ltx_minipage">{}</figure></div>'
+        (fetched / "page.html").write_text(
+            '<html><body><article class="ltx_document">'
+            '<figure class="ltx_figure"><div class="ltx_flex_figure">'
+            + cell.format('<img src="res/p.png"/>' + caption.format("Figure 4", "Left."))
+            + cell.format('<figure class="ltx_figure ltx_figure_panel"><img src="res/q.png"/>'
+                          + caption.format("(a)", "Top") + '</figure><img src="res/r.png"/>'
+                          + caption.format("Figure 5", "Right."))
+            + '</div></figure>'
+            '<figure class="ltx_table"><div class="ltx_flex_figure">'
+            + cell.format('<img src="res/s.png"/>' + caption.format("Figure 6", "One."))
+            + cell.format('<img src="res/t.png"/>' + caption.format("Figure 7", "Two."))
+            + '</div></figure>'
+            '</article></body></html>'
+        )
+        arxiv.write_manifest(fetched, "T", {"page": "page.html"}, [], {})
+        converted = job / "steps/02-arxiv-convert"
+        self.assertEqual(arxiv.convert(job, converted), 0)
+        figures = json.loads((converted / "figures.json").read_text())
+        self.assertEqual(figures, [
+            {"label": "Figure 4", "caption": "Left.", "images": ["p.png"]},
+            {"label": "Figure 5", "caption": "Right.", "images": ["q.png", "r.png"]},
+            {"label": "Figure 6", "caption": "One.", "images": ["s.png"]},
+            {"label": "Figure 7", "caption": "Two.", "images": ["t.png"]},
+        ])
+
 
 def raw_brackets(md: str) -> list[int]:
     """Offsets of [ and ] that no backslash escapes (an even run of backslashes before them)."""
