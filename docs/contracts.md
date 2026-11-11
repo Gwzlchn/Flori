@@ -147,10 +147,10 @@ claude -p --model <必填> --tools "" --input-format stream-json --output-format
 - cwd:claude 是每次调用前清空重建的 `$HOME/ai-cwd`(固定目录,宿主 `~/.claude/projects` 下只多一项);codex 是每次新建的空目录。
 - 成功判据:stdout 的 stream-json 事件里 type=result 的那一条 is_error=false、subtype=success、result 非空,且退出码 0。退出码非 0 时也解析这条事件再分类。没有 result 事件时按 stderr、stdout 里不是 JSON 的行与各事件的 error 字段分类,stderr 在前;assistant 正文不参与分类。
 - 失败分类:凭据失效 → 30;限流和超时 → 10;其它 → 20。
-- 调用记录:有 FLORI_AI_LOG_DIR 时,每次启动 CLI 的调用在其中写 `<step>-a<attempt>-<k>.*`。step 与 attempt 取 FLORI_STEP、FLORI_ATTEMPT,k 是本次尝试里从 1 起第一个未被占用的号。
+- 调用记录:有 FLORI_AI_LOG_DIR 时,每次走到启动 CLI 的调用在其中写 `<step>-a<attempt>-<k>.*`。step 与 attempt 取 FLORI_STEP、FLORI_ATTEMPT,k 是本次尝试里从 1 起第一个未被占用的号。
   - 调用前写 prompt.md 与 call.json。prompt.md 是发出的文字原样,图片块写成 `<image 路径>`,claude 的 `[N]` 标签照写。call.json 有 tool、model、cli_version(取 job.json)、argv、images(每张图所示 job 文件的相对路径,送的是缩小副本时也写原图)与 started。
-  - 调用后补全 call.json:finished、duration_ms、timed_out、exit_code、signal、outcome(ok|failed)、error_class(auth|retry|permanent)与 error。stdout 原样写成 out.json(每个非空行都是 JSON 时)或 out.txt,stderr 末尾 16 KiB 写成 err.txt。不论回复之后能否通过校验都写;translate 带反馈的重问是另一次调用。
-  - 记录不含环境变量,所以没有令牌和代理口令。写失败只在 job.log 记一行,不影响步骤。没有启动 CLI 的调用(model 为空、图片被拒)不写;被 SIGTERM 中止的调用只留调用前的两个文件。
+  - 调用后补全 call.json:finished、duration_ms、timed_out、exit_code、signal、outcome(ok|failed)、error_class(auth|retry|permanent)与 error。stdout 原样写成 out.json(非空且每个非空行都是 JSON 时)或 out.txt,stderr 末尾 16 KiB 写成 err.txt。不论回复之后能否通过校验都写;translate 带反馈的重问是另一次调用。
+  - 记录不含环境变量,所以没有令牌和代理口令。写失败只在 job.log 记一行,不影响步骤。model 为空、图片被拒的调用不启动 CLI,也不写;CLI 启动失败(如不在 PATH)时照常写,exit_code 为 null,out.txt 为空;被 SIGTERM 中止的调用只留调用前的两个文件。
   - translate 缓存命中的块不调用、不写记录,只在 job.log 记一行。加标点对采用的每处同音替换和还原的每处改动各记一行 `punctuate [MM:SS] corrected|reverted "原文" -> "回复"`,回复用不上、保留原文的节记 `kept as transcribed`;这是从 AI 回复里取用了什么的记录。
 - codex:`--ask-for-approval never exec --strict-config --ignore-user-config --ignore-rules --skip-git-repo-check --sandbox read-only --ephemeral --color never --json [--image <file>]… --model M -c history.persistence="none" -c web_search="disabled" -C <空目录> --output-last-message <file> -`。`--image` 每张图一次,放在 `--model` 之前,因为它会吞掉后面的多个值。
 

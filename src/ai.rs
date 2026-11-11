@@ -105,7 +105,8 @@ pub(crate) async fn until_terminated(step: impl Future<Output = StepResult>) -> 
 /// One single-turn completion without tools, with optional images (see [`media_type`]). The
 /// prompt goes to stdin and the CLI runs in an empty directory. Failures map to step exits:
 /// credentials 30, rate limit and timeout 10, anything else 20. With FLORI_AI_LOG_DIR every call
-/// that starts the CLI leaves its record there (see `audit`).
+/// that gets as far as starting the CLI leaves its record there, even when the start fails (see
+/// `audit`).
 pub async fn complete(
     env: &Env,
     tool: AiTool,

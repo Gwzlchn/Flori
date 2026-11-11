@@ -94,9 +94,9 @@ impl CallLog {
         }
     }
 
-    /// Completes the call info and keeps stdout verbatim, `.out.json` when every line is JSON, as
-    /// both CLIs print, and `.out.txt` otherwise, with the stderr tail beside it. `run` is None
-    /// when the CLI could not be started.
+    /// Completes the call info and keeps stdout verbatim, `.out.json` when it has lines and every
+    /// one is JSON, as both CLIs print, and `.out.txt` otherwise, with the stderr tail beside it.
+    /// `run` is None when the CLI could not be started.
     pub(super) fn finish(mut self, run: Option<&Run>, result: &Result<String, StepFailure>) {
         let status = run.and_then(|r| r.status);
         let error = result.as_ref().err();
