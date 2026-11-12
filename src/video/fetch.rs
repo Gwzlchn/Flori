@@ -110,11 +110,15 @@ const PERMANENT_ERRORS: &[&str] = &[
 /// A `field:value` in `-S` is a preferred value, read per field: `res:2160` takes the largest up
 /// to 2160p, `hdr:sdr` ranks SDR first and every HDR kind after it, but `vcodec:h264` ranks the
 /// codecs above h264 nearest first, so HEVC would beat VP9 and AV1. No sort string puts HEVC
-/// last, hence the filter. `acodec:aac` takes AAC, spelled aac or mp4a, before Opus and FLAC.
+/// last, hence the filter. YouTube's AI-upscaled formats (`-sr` ids) carry no penalty in the
+/// sorter, so the filter drops them too: they add bytes, not detail, and can alter on-screen
+/// text. Codec comes before fps: Bilibili reports a slightly different fps per codec, or a
+/// fraction yt-dlp cannot parse, which would let AV1 beat h264 at the same quality.
+/// `acodec:aac` takes AAC, spelled aac or mp4a, before Opus and FLAC.
 /// `lang` must follow the video fields: in front of them, a muxed 360p format marked with the
 /// original language beats every video-only format.
-const VIDEO_FORMAT: &str = "bv*[vcodec!~='(?i)^([hx]265|he?vc?|dvh)']+ba/bv*+ba/b";
-const VIDEO_SORT: &str = "res:2160,fps,hdr:sdr,vcodec:h264,lang,acodec:aac";
+const VIDEO_FORMAT: &str = "bv*[vcodec!~='(?i)^([hx]265|he?vc?|dvh)'][format_id!*=-sr]+ba/bv*[format_id!*=-sr]+ba/bv*+ba/b";
+const VIDEO_SORT: &str = "res:2160,hdr:sdr,vcodec:h264,fps,lang,acodec:aac";
 
 /// What video-fetch takes from its environment. Tests point the tools at fakes.
 pub(super) struct FetchEnv {

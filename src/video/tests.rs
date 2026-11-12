@@ -800,8 +800,8 @@ async fn the_video_run_asks_for_the_highest_playable_format_as_mp4() {
         run.run().await.unwrap();
         let video_run = run.log().lines().next().unwrap().to_owned();
         let want = concat!(
-            " -f bv*[vcodec!~='(?i)^([hx]265|he?vc?|dvh)']+ba/bv*+ba/b",
-            " -S res:2160,fps,hdr:sdr,vcodec:h264,lang,acodec:aac",
+            " -f bv*[vcodec!~='(?i)^([hx]265|he?vc?|dvh)'][format_id!*=-sr]+ba/bv*[format_id!*=-sr]+ba/bv*+ba/b",
+            " -S res:2160,hdr:sdr,vcodec:h264,fps,lang,acodec:aac",
             " --merge-output-format mp4 --remux-video mp4 ",
         );
         assert!(video_run.contains(want), "{platform}: {video_run}");
