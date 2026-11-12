@@ -4,9 +4,9 @@
 
 ## 产品
 
-把 B站、YouTube 视频和 arXiv HTML 论文变成 Obsidian 笔记。NAS 上一个 `flori` 容器提供网页(投递、流水线与日志、预览、领域/集合、手动订阅)并执行两条固定流水线,发布到 vault 目录;电脑和手机用 Remotely Save 经 WebDAV 同步。
+单人自用的学习笔记生成器:把 B站、YouTube 视频和 arXiv HTML 论文变成 Obsidian 笔记。NAS 上一个 `flori` 容器提供网页(投递、按领域和集合列出笔记、预览、处理过程、手动订阅、关于与系统)并执行两条固定流水线,发布到 vault 目录;电脑和手机用 Remotely Save 经 WebDAV 同步。
 
-不做:PDF、网页文章、音频、本地视频、站内搜索、问答、术语/概念、SRS、MCP、多 worker、定时订阅。扩大范围先问用户。
+定位、对象、不做清单及其重新考虑的条件、加功能的准入判据只在 [docs/scope.md](docs/scope.md)。扩大范围先问用户。
 
 外网访问只经 ECS 原样转发 TCP,TLS 在 NAS 的 Caddy 终止;ECS 未备案,带域名的连接会被重置,所以一律按 IP 访问:WebDAV 走 :8790,网页走 :8792。
 
@@ -18,9 +18,9 @@
 - 按职责成文件,一个文件讲清一件事;文件长到难以维护时按职责拆成多个文件,不为控制行数删功能。不建只转发的层,第三个真实调用方出现前不抽通用框架。
 - 契约只在 [docs/contracts.md](docs/contracts.md):步骤 CLI、vault 布局、HTTP API。改契约时 `src/pipeline.rs`、`src/api.rs` 与它同一提交。
 - 类型链:Rust 类型 → utoipa → `docs/openapi.json` → openapi-typescript → 前端。前端不手写 API 类型;改接口后跑 `just openapi`。
-- SQLite 是唯一结构化真相,SQLx 运行时查询,迁移只向前。
+- SQLite 是任务侧唯一的结构化真相,SQLx 运行时查询,迁移只向前;表与列的准入见 [docs/scope.md](docs/scope.md)。
 - vault 只追加:发布后服务端不再改或删已发布内容。
-- NAS 常驻容器只有 flori、flori-dav、flori-backup。新增常驻容器或跨容器协议先问用户。
+- NAS 常驻容器只有 flori、flori-dav。新增常驻容器或跨容器协议先问用户。
 - 配置只走环境变量。密钥只在 `.local/secrets.env`,按名注入各服务;flori 容器拿不到 AK 和 WebDAV 口令。
 
 ## 工作方式

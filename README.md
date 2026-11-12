@@ -7,7 +7,7 @@
 - arXiv:官方 HTML(回退 ar5iv)→ Markdown → AI 笔记 → 自动翻译 → 发布。
 - 发布即把笔记文件夹原子写入 vault;Obsidian 用 Remotely Save 经 WebDAV 同步。
 
-契约见 [docs/contracts.md](docs/contracts.md),开发约定见 [CLAUDE.md](CLAUDE.md)。
+范围见 [docs/scope.md](docs/scope.md),契约见 [docs/contracts.md](docs/contracts.md),开发约定见 [CLAUDE.md](CLAUDE.md)。
 
 ## 开发
 
