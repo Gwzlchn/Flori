@@ -249,7 +249,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <p v-if="missing" class="empty">任务不存在。<a href="/">回到任务列表</a></p>
+  <p v-if="missing" class="empty">任务不存在。<a href="/">回到笔记列表</a></p>
   <p v-else-if="!detail || !job" class="empty">加载中…</p>
   <div v-else class="stack">
     <header class="card head">

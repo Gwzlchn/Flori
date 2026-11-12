@@ -4,7 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { api, isActive, type Schemas } from "./client";
 import FeedPanel from "./components/FeedPanel.vue";
 import JobDetail from "./components/JobDetail.vue";
-import JobList from "./components/JobList.vue";
+import NoteShelf from "./components/NoteShelf.vue";
 import SubmitBar from "./components/SubmitBar.vue";
 import TaxonomyPanel from "./components/TaxonomyPanel.vue";
 
@@ -53,7 +53,8 @@ async function loadTaxonomy(): Promise<void> {
 }
 
 async function loadJobs(): Promise<void> {
-  const { data } = await api.GET("/api/jobs");
+  // The shelf groups and counts in the browser, so it needs every note, not the default 200.
+  const { data } = await api.GET("/api/jobs", { params: { query: { limit: 5000 } } });
   if (data) jobs.value = data;
 }
 
@@ -82,7 +83,7 @@ onBeforeUnmount(() => {
     <header class="topbar">
       <a class="brand" href="/">Flori</a>
       <nav class="nav">
-        <a href="/" :class="{ on: route.view === 'home' || route.view === 'job' }">任务</a>
+        <a href="/" :class="{ on: route.view === 'home' || route.view === 'job' }">笔记</a>
         <a href="/taxonomy" :class="{ on: route.view === 'taxonomy' || route.view === 'feed' }">领域与订阅</a>
       </nav>
       <small v-if="version" class="meta">v{{ version }}</small>
@@ -90,12 +91,12 @@ onBeforeUnmount(() => {
     <main v-if="ready" class="page">
       <template v-if="route.view === 'home'">
         <SubmitBar :domains :collections @submitted="loadJobs" />
-        <JobList :jobs :domains :collections />
+        <NoteShelf :jobs :domains :collections />
       </template>
       <JobDetail v-else-if="route.view === 'job'" :id="route.id" :key="route.id" :tab="route.tab" :domains :collections />
       <TaxonomyPanel v-else-if="route.view === 'taxonomy'" :domains :collections @changed="loadTaxonomy" />
       <FeedPanel v-else-if="route.view === 'feed'" :id="route.id" :key="route.id" :domains :collections @changed="loadTaxonomy" />
-      <p v-else class="empty">页面不存在。<a href="/">回到任务列表</a></p>
+      <p v-else class="empty">页面不存在。<a href="/">回到笔记列表</a></p>
     </main>
   </div>
 </template>
