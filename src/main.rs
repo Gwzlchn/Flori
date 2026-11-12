@@ -30,7 +30,10 @@ pub struct Config {
     pub steps_dir: PathBuf,
     /// Binary started for built-in steps. Tests point it at a fake.
     pub self_exe: PathBuf,
+    /// The AI CLIs, and YouTube while `video_proxy` is unset.
     pub proxy: Option<String>,
+    /// YouTube only; see [`Config::youtube_proxy`].
+    pub video_proxy: Option<String>,
     pub public_url: String,
     pub vault_name: String,
     pub ai_tool: AiTool,
@@ -62,6 +65,7 @@ impl Config {
             steps_dir: PathBuf::from(var_or("FLORI_STEPS_DIR", "/app/steps")),
             self_exe: env::current_exe().map_err(|e| format!("current_exe: {e}"))?,
             proxy: optional("FLORI_PROXY"),
+            video_proxy: optional("FLORI_VIDEO_PROXY"),
             public_url: required("FLORI_PUBLIC_URL")?
                 .trim_end_matches('/')
                 .to_owned(),
@@ -78,6 +82,12 @@ impl Config {
             codex_home: optional("CODEX_HOME").map(PathBuf::from),
             data_dir,
         })
+    }
+
+    /// The proxy of every yt-dlp request to YouTube, the download and the feed listing alike:
+    /// FLORI_VIDEO_PROXY, or FLORI_PROXY when that is unset. Bilibili never takes a proxy.
+    pub fn youtube_proxy(&self) -> Option<&str> {
+        self.video_proxy.as_deref().or(self.proxy.as_deref())
     }
 }
 

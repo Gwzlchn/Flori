@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, time::Instant as StdInstant};
+use std::{collections::BTreeSet, ffi::OsStr, time::Instant as StdInstant};
 
 use super::*;
 use crate::db::job_dir;
@@ -19,6 +19,7 @@ pub(crate) fn config(root: &Path) -> Config {
         steps_dir: fake.join("steps"),
         self_exe: fake.join("step"),
         proxy: Some("http://proxy.invalid:3128".into()),
+        video_proxy: Some("http://video-proxy.invalid:7897".into()),
         public_url: "http://nas.lan:8780".into(),
         vault_name: "flori".into(),
         ai_tool: AiTool::Claude,
@@ -347,6 +348,56 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
         assert!(env.contains(&ai_log), "{step}: {env}");
     }
     assert!(dir.join("ai").is_dir());
+}
+
+/// YouTube's video-fetch takes FLORI_VIDEO_PROXY, or FLORI_PROXY without it; note and translate
+/// always FLORI_PROXY; nothing else gets a proxy, Bilibili's video-fetch included.
+#[tokio::test]
+async fn proxies_by_step_and_platform() {
+    let w = world().await;
+    let mut jobs = Vec::new();
+    for link in [YT, BV, "2401.12345"] {
+        let dir = job_dir(&w.config.data_dir, w.job(link, TranslateMode::Auto).await);
+        jobs.push((read_job(&dir).unwrap(), dir));
+    }
+    let out = w._dir.path().join("out");
+    let flori_proxy = w.config.proxy.as_deref();
+    for video_proxy in [Some("http://video-proxy.invalid:7897"), None] {
+        let config = Config {
+            video_proxy: video_proxy.map(Into::into),
+            ..(*w.config).clone()
+        };
+        // Built by hand: launch would also start the scheduler, which runs the queued jobs.
+        let inner = Inner {
+            db: w.db.clone(),
+            data_dir: config.data_dir.clone(),
+            self_exe: config.self_exe.clone(),
+            steps_dir: config.steps_dir.clone(),
+            config: Arc::new(config),
+            tools: tools(),
+            wake: Notify::new(),
+            running: Mutex::default(),
+            global: Semaphore::new(2),
+            whisper: Semaphore::new(1),
+            ai: Semaphore::new(1),
+        };
+        for (job, dir) in &jobs {
+            let platform = job.source.platform;
+            for name in StepName::ALL {
+                let cmd = inner.command(job, dir, &out, name, 1).unwrap();
+                let env: BTreeMap<&OsStr, Option<&OsStr>> = cmd.as_std().get_envs().collect();
+                let want = match (name, platform) {
+                    (StepName::VideoFetch, Platform::Youtube) => video_proxy.or(flori_proxy),
+                    (StepName::Note | StepName::Translate, _) => flori_proxy,
+                    _ => None,
+                };
+                for key in ["HTTPS_PROXY", "HTTP_PROXY"] {
+                    let got = env.get(OsStr::new(key)).copied().flatten();
+                    assert_eq!(got, want.map(OsStr::new), "{name} {platform:?} {key}");
+                }
+            }
+        }
+    }
 }
 
 #[tokio::test]

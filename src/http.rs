@@ -533,8 +533,8 @@ async fn run_feed(
         ])
         .env_clear()
         .envs(exec::base_env());
-    if let Some(proxy) = &config.proxy {
-        cmd.env("FLORI_PROXY", proxy);
+    if let Some(proxy) = config.youtube_proxy() {
+        cmd.env("FLORI_VIDEO_PROXY", proxy);
     }
     if let Some(sessdata) = &config.bili_sessdata {
         cmd.env("FLORI_BILI_SESSDATA", sessdata);

@@ -132,8 +132,8 @@ def run_ytdlp(cmd: list[str]) -> subprocess.CompletedProcess:
 def youtube(url: str, limit: int, run) -> tuple[str, list[dict]]:
     cmd = ["yt-dlp", "--flat-playlist", "--playlist-end", str(limit),
            "--extractor-args", "youtubetab:approximate_date", "-J"]
-    if os.environ.get("FLORI_PROXY"):
-        cmd += ["--proxy", os.environ["FLORI_PROXY"]]
+    if os.environ.get("FLORI_VIDEO_PROXY"):
+        cmd += ["--proxy", os.environ["FLORI_VIDEO_PROXY"]]
     done = run(cmd + ["--", url])
     if done.returncode != 0:
         lines = [line for line in done.stderr.splitlines() if line.startswith("ERROR:")] or done.stderr.splitlines()

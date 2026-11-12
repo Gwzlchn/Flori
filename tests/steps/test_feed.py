@@ -239,6 +239,14 @@ class BiliTest(unittest.TestCase):
                 self.assertEqual(len(listing["items"]), 5)
                 self.assertEqual(sent, [("api.bilibili.com", cookie)])
 
+    def test_requests_ignore_every_proxy(self) -> None:
+        def proxied(opener) -> bool:
+            return any(isinstance(h, urllib.request.ProxyHandler) for h in opener.handlers)
+
+        with mock.patch.dict(feed.os.environ, {"HTTPS_PROXY": "http://proxy.example:3128"}):
+            self.assertTrue(proxied(urllib.request.build_opener()))
+        self.assertFalse(proxied(feed.OPENER))
+
     def test_sessdata_is_not_carried_across_a_redirect(self) -> None:
         seen = []
 
@@ -269,7 +277,7 @@ class BiliTest(unittest.TestCase):
 class YoutubeTest(unittest.TestCase):
     def test_channel_and_playlist(self) -> None:
         channel = FakeYtdlp(load("yt_channel.json"))
-        with mock.patch.dict(feed.os.environ, {"FLORI_PROXY": "http://proxy.example:3128"}):
+        with mock.patch.dict(feed.os.environ, {"FLORI_VIDEO_PROXY": "http://proxy.example:3128"}):
             code, listing, _ = run("yt_channel", "https://www.youtube.com/@3blue1brown/videos", 5, ytdlp=channel)
         self.assertEqual(code, 0)
         self.assertEqual(channel.cmd, [
@@ -290,7 +298,7 @@ class YoutubeTest(unittest.TestCase):
         payload["entries"].insert(2, {"_type": "url", "id": "BBBBBBBBBBB", "title": "Soon", "live_status": "is_upcoming"})
         payload["entries"].insert(3, dict(payload["entries"][0]))
         playlist = FakeYtdlp(payload)
-        with mock.patch.dict(feed.os.environ, {"FLORI_PROXY": ""}):
+        with mock.patch.dict(feed.os.environ, {"FLORI_VIDEO_PROXY": ""}):
             code, listing, _ = run("yt_playlist", "https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab", 3, ytdlp=playlist)
         self.assertEqual(code, 0)
         self.assertNotIn("--proxy", playlist.cmd)

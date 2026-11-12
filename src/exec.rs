@@ -162,10 +162,11 @@ impl Inner {
             ("FLORI_STEP", name.as_str().into()),
             ("FLORI_ATTEMPT", attempt.to_string().into()),
         ];
-        let proxy = c
-            .proxy
-            .iter()
-            .flat_map(|p| [("HTTPS_PROXY", p.into()), ("HTTP_PROXY", p.into())]);
+        let proxy = |p: Option<&str>| {
+            p.map(|p| [("HTTPS_PROXY", p.into()), ("HTTP_PROXY", p.into())])
+                .into_iter()
+                .flatten()
+        };
         // video-fetch runs whisper.py t2s to turn Chinese subtitles and titles into simplified
         // characters.
         if name == StepName::VideoFetch {
@@ -179,7 +180,9 @@ impl Inner {
             env.push(("FLORI_CACHE_DIR", cache.into()));
         }
         match name {
-            StepName::VideoFetch if job.source.platform == Platform::Youtube => env.extend(proxy),
+            StepName::VideoFetch if job.source.platform == Platform::Youtube => {
+                env.extend(proxy(c.youtube_proxy()));
+            }
             StepName::VideoFetch => {
                 env.extend(
                     c.bili_sessdata
@@ -196,7 +199,7 @@ impl Inner {
             ]),
             StepName::Publish => env.push(("FLORI_VAULT_DIR", self.data_dir.join("vault").into())),
             StepName::Note | StepName::Translate => {
-                env.extend(proxy);
+                env.extend(proxy(c.proxy.as_deref()));
                 for flag in [
                     "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
                     "DISABLE_AUTOUPDATER",

@@ -58,12 +58,12 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | 步骤 | env |
 |---|---|
 | video-fetch | FLORI_STEPS_DIR(运行 `whisper.py t2s`)、FLORI_CACHE_DIR |
-| video-fetch(youtube) | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY |
+| video-fetch(youtube) | HTTPS_PROXY、HTTP_PROXY = $FLORI_VIDEO_PROXY,未设时 $FLORI_PROXY |
 | video-fetch(bilibili) | FLORI_BILI_SESSDATA(服务端有值时才传);不带代理 |
 | video-transcribe | FLORI_WHISPER_MODEL、FLORI_STEPS_DIR |
 | publish | FLORI_VAULT_DIR=$DATA/vault |
 | note、translate | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY;CLAUDE_CODE_DISABLE_CLAUDE_MDS=1;DISABLE_AUTOUPDATER=1;DISABLE_UPDATES=1;CLAUDE_CODE_OAUTH_TOKEN(存在时);CODEX_HOME(tool=codex 时);FLORI_AI_LOG_DIR;translate 另加 FLORI_CACHE_DIR |
-| feed.py(不是步骤,同样 env_clear) | FLORI_PROXY(只经 yt-dlp `--proxy` 使用,B站请求显式不走代理)、FLORI_BILI_SESSDATA |
+| feed.py(不是步骤,同样 env_clear) | FLORI_VIDEO_PROXY(取值同 video-fetch(youtube) 的代理,只经 yt-dlp `--proxy` 使用,B站请求显式不走代理)、FLORI_BILI_SESSDATA |
 
 ### 步骤表
 
@@ -262,6 +262,6 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
     | yt_playlist | `https://www.youtube.com/playlist?list=<id>` |
 
   - B站用 4 个公开 JSON 接口,带 UA 与 Referer,匿名可用;遇到 HTTP 412 或 code -352、-412 时等 5s 重试 1 次。SESSDATA 只在 bili_fav 的请求里发给 api.bilibili.com,其余三种公开列表匿名请求,频繁刷新触发的风控只落在 IP 上。
-  - YouTube 用 `yt-dlp --flat-playlist --playlist-end N --extractor-args youtubetab:approximate_date -J --proxy $FLORI_PROXY`。
+  - YouTube 用 `yt-dlp --flat-playlist --playlist-end N --extractor-args youtubetab:approximate_date -J --proxy $FLORI_VIDEO_PROXY`。
   - 除 yt_playlist 按列表顺序、bili_fav 按收藏时间外,其余按发布时间新的在前。
 - 内部接口:`AppState{db, exec, config}`;`ExecHandle::{wake(), cancel(job_id)}`;`pipeline::plan(pipeline, translate) -> Vec<StepSpec>`。

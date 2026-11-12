@@ -1132,10 +1132,10 @@ async fn feeds_bind_list_and_submit_in_batches() {
     assert_eq!(status, StatusCode::OK, "{list}");
     assert_eq!(list["items"].as_array().unwrap().len(), 3);
     assert_eq!(list["items"][0]["job"], Value::Null);
-    // feed.py starts from a cleared environment plus the proxy.
+    // feed.py starts from a cleared environment plus the YouTube proxy.
     assert_eq!(
         list["title"],
-        "fake yt_channel env=FLORI_PROXY,HOME,LANG,PATH"
+        "fake yt_channel env=FLORI_VIDEO_PROXY,HOME,LANG,PATH proxy=http://video-proxy.invalid:7897"
     );
 
     let jobs = format!("{feed}/jobs");
@@ -1202,6 +1202,29 @@ async fn feeds_bind_list_and_submit_in_batches() {
     assert_eq!(body["message"], "upstream refused the request");
     let (status, body) = put(Value::Null).await;
     assert_eq!((status, &body["feed"]), (StatusCode::OK, &Value::Null));
+}
+
+#[tokio::test]
+async fn feed_py_falls_back_to_flori_proxy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    let url = "https://www.youtube.com/@3blue1brown/videos";
+    let title = async |cfg: &Config| {
+        run_feed(cfg, FeedKind::YtChannel, url, 1)
+            .await
+            .unwrap()
+            .title
+    };
+    cfg.video_proxy = None;
+    assert_eq!(
+        title(&cfg).await,
+        "fake yt_channel env=FLORI_VIDEO_PROXY,HOME,LANG,PATH proxy=http://proxy.invalid:3128"
+    );
+    cfg.proxy = None;
+    assert_eq!(
+        title(&cfg).await,
+        "fake yt_channel env=HOME,LANG,PATH proxy=None"
+    );
 }
 
 #[tokio::test]
