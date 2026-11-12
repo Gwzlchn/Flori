@@ -402,26 +402,48 @@ async fn no_route() -> ApiError {
 const NAME_FORBIDDEN: &str = "/\\:*?\"<>|#^[],;";
 const NAME_CHARS: usize = 32;
 
+/// Invisible characters that are neither whitespace nor control characters to Rust: zero-width
+/// spaces, the soft hyphen and direction marks. A name holding one looks like another name, and
+/// its tag is not the one typed in Obsidian. The zero-width joiners stay allowed for emoji.
+fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{61c}'
+            | '\u{180e}'
+            | '\u{200b}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+    )
+}
+
 /// The name in NFC when it may name a domain or collection: 1-32 characters, no whitespace,
-/// control characters or [`NAME_FORBIDDEN`], not starting with `.` (hidden folder) or `-`
-/// (read as an option). Old slugs of up to 32 characters pass unchanged; stored names are never
-/// checked again.
+/// control characters, [`invisible`] characters or [`NAME_FORBIDDEN`], not starting with `.`
+/// (hidden folder) or `-` (read as an option) and not ending with `.`, which Windows drops from
+/// folder names. Old slugs of up to 32 characters pass unchanged; stored names are never checked
+/// again.
 fn check_name(name: &str) -> Result<String, ApiError> {
     let name: String = name.nfc().collect();
     let chars = name.chars().count();
     let ok = (1..=NAME_CHARS).contains(&chars)
         && !name.starts_with(['.', '-'])
-        && !name
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || NAME_FORBIDDEN.contains(c));
+        && !name.ends_with('.')
+        && !name.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || invisible(c) || NAME_FORBIDDEN.contains(c)
+        });
     if ok {
         Ok(name)
     } else {
         Err(ApiError::new(
             ErrorCode::InvalidName,
             format!(
-                "a name has 1-{NAME_CHARS} characters without whitespace, control characters \
-                 or any of {NAME_FORBIDDEN} and does not start with . or -"
+                "a name has 1-{NAME_CHARS} characters without whitespace, control or invisible \
+                 characters or any of {NAME_FORBIDDEN}, does not start with . or - and does not \
+                 end with ."
             ),
         ))
     }

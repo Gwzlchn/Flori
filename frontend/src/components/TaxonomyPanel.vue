@@ -8,7 +8,7 @@ const emit = defineEmits<{ changed: [] }>();
 
 // Same rule as the server (contract 3): names become vault folders and the domain an Obsidian
 // tag, and cannot be renamed.
-const forbidden = /[\s\p{Cc}/\\:*?"<>|#^[\],;]/u;
+const forbidden = /[\s\p{Cc}\u00ad\u061c\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff/\\:*?"<>|#^[\],;]/u;
 const domainName = ref("");
 const collectionNames = ref<Record<number, string>>({});
 const message = ref("");
@@ -16,8 +16,8 @@ const busy = ref(false);
 
 function valid(name: string): boolean {
   const length = [...name.normalize("NFC")].length;
-  if (length <= 32 && !forbidden.test(name) && !/^[.-]/.test(name)) return true;
-  message.value = `"${name}" 不能用:最长 32 个字符,不能有空格,不能含 / \\ : * ? " < > | # ^ [ ] , ;,也不能以 . 或 - 开头。`;
+  if (length <= 32 && !forbidden.test(name) && !/^[.-]|\.$/.test(name)) return true;
+  message.value = `"${name}" 不能用:最长 32 个字符,不能有空格或看不见的字符,不能含 / \\ : * ? " < > | # ^ [ ] , ;,不能以 . 或 - 开头,也不能以 . 结尾。`;
   return false;
 }
 

@@ -592,7 +592,20 @@ async fn names_may_be_chinese_but_nothing_that_breaks_a_folder_or_tag() {
     for control in ["\u{0}", "\u{7}", "\u{1b}", "\u{7f}", "\u{9f}"] {
         bad.push(format!("计算{control}机"));
     }
-    bad.extend([".计算机".into(), "-计算机".into(), "数".repeat(33)]);
+    // Invisible: the name would look like another one, and its tag would not be the one typed.
+    for invisible in [
+        "\u{ad}", "\u{61c}", "\u{180e}", "\u{200b}", "\u{200e}", "\u{200f}", "\u{202a}",
+        "\u{202e}", "\u{2060}", "\u{2064}", "\u{2066}", "\u{2069}", "\u{206f}", "\u{feff}",
+    ] {
+        bad.extend([format!("计算{invisible}机"), format!("{invisible}计算机")]);
+    }
+    // Windows drops a trailing dot, so the folder would sync under another name.
+    bad.extend([
+        ".计算机".into(),
+        "-计算机".into(),
+        "计算机.".into(),
+        "数".repeat(33),
+    ]);
     for name in &bad {
         let (status, body) = app.post("/api/domains", json!({"name": name})).await;
         invalid(name, &body, status);
@@ -602,7 +615,15 @@ async fn names_may_be_chinese_but_nothing_that_breaks_a_folder_or_tag() {
 
     let arch = app.domain("计算机系统结构").await;
     let long = app.domain(&"数".repeat(32)).await;
-    for name in ["LLM-推理", "C++", "a.b", "x_y", "数学(基础)", "Ünïcode"] {
+    for name in [
+        "LLM-推理",
+        "C++",
+        "a.b",
+        "x_y",
+        "数学(基础)",
+        "Ünïcode",
+        "👩\u{200d}💻编程",
+    ] {
         app.domain(name).await;
     }
     // Stored composed, so a decomposed spelling of the same name is the same name.

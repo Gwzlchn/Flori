@@ -352,9 +352,9 @@ export interface components {
             /** Format: int64 */
             id: number;
             /**
-             * @description 1-32 characters in NFC without whitespace, control characters or any of
-             *     `/\:*?"<>|#^[],;`, not starting with `.` or `-`; unique ignoring case. Also the vault
-             *     folder name and, for a domain, a tag. Immutable.
+             * @description 1-32 characters in NFC without whitespace, control or invisible characters or any of
+             *     `/\:*?"<>|#^[],;`, not starting with `.` or `-`, not ending with `.`; unique ignoring
+             *     case (contract 3). Also the vault folder name and, for a domain, a tag. Immutable.
              */
             name: string;
         };

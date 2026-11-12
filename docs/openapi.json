@@ -1202,7 +1202,7 @@
           },
           "name": {
             "type": "string",
-            "description": "1-32 characters in NFC without whitespace, control characters or any of\n`/\\:*?\"<>|#^[],;`, not starting with `.` or `-`; unique ignoring case. Also the vault\nfolder name and, for a domain, a tag. Immutable."
+            "description": "1-32 characters in NFC without whitespace, control or invisible characters or any of\n`/\\:*?\"<>|#^[],;`, not starting with `.` or `-`, not ending with `.`; unique ignoring\ncase (contract 3). Also the vault folder name and, for a domain, a tag. Immutable."
           }
         }
       },
