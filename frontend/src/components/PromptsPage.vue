@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 
-import { api, failure, guardUnsaved, textRows, type Schemas } from "../client";
+import { api, failure, guardUnsaved, promptChars, textRows, type Schemas } from "../client";
 
 type Prompt = Schemas["PromptInfo"];
 type Note = { text: string; ok: boolean };
+
+// Longest override, contract 3.
+const MAX_CHARS = 20000;
 
 const prompts = ref<Prompt[]>();
 const drafts = ref<Partial<Record<Schemas["PromptName"], string>>>({});
@@ -31,11 +34,24 @@ function show(next: Prompt, note: Note): void {
   notes.value[next.name] = note;
 }
 
+// Why the draft cannot be saved, or undefined when it can.
+function problem(prompt: Prompt, text: string): string | undefined {
+  const length = promptChars(text);
+  if (!length) return prompt.customized ? "提示词不能为空;要用回默认提示词,点恢复默认。" : "提示词不能为空;不改写时用的就是默认提示词。";
+  return length > MAX_CHARS ? `提示词最长 ${MAX_CHARS} 个字符,现在有 ${length} 个。` : undefined;
+}
+
 async function save(prompt: Prompt): Promise<void> {
+  const text = drafts.value[prompt.name] ?? "";
+  const wrong = problem(prompt, text);
+  if (wrong) {
+    notes.value[prompt.name] = { text: wrong, ok: false };
+    return;
+  }
   busy.value = true;
   notes.value[prompt.name] = undefined;
   const { data, error, response } = await api.PUT("/api/prompts/{name}", {
-    params: { path: { name: prompt.name } }, body: { text: drafts.value[prompt.name] ?? "" },
+    params: { path: { name: prompt.name } }, body: { text },
   }).finally(() => { busy.value = false; });
   if (!data) {
     notes.value[prompt.name] = { text: failure(error, response), ok: false };

@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 
-import { api, failure, guardUnsaved, textRows, type Schemas } from "../client";
+import { api, failure, guardUnsaved, promptChars, textRows, type Schemas } from "../client";
 
 type Prompt = Schemas["DomainPrompt"];
 type Note = { text: string; ok: boolean };
+
+// Longest domain requirement, contract 3.
+const MAX_CHARS = 4000;
 
 const props = defineProps<{ id: number; domains: Schemas["Domain"][] }>();
 
@@ -32,6 +35,11 @@ onMounted(async () => {
 
 // Empty text removes the requirement.
 async function save(prompt: Prompt, text: string): Promise<void> {
+  const length = promptChars(text);
+  if (length > MAX_CHARS) {
+    notes.value[prompt.name] = { text: `领域要求最长 ${MAX_CHARS} 个字符,现在有 ${length} 个。`, ok: false };
+    return;
+  }
   busy.value = true;
   notes.value[prompt.name] = undefined;
   const { data, error, response } = await api.PUT("/api/domains/{id}/prompts/{name}", {

@@ -84,6 +84,15 @@ export function mayLeave(): boolean {
   return !hasUnsaved() || window.confirm("有修改还没保存,离开会丢掉。仍要离开?");
 }
 
+// Characters of prompt text as the server counts them for its limits (contract 3): LF line
+// breaks, without blank lines before it or whitespace after it, by code point. The pages check
+// the limits first because the server explains in English.
+export function promptChars(text: string): number {
+  const body = text.replace(/\r\n/g, "\n").trimEnd();
+  const indent = body.length - body.trimStart().length;
+  return [...body.slice(body.lastIndexOf("\n", indent - 1) + 1)].length;
+}
+
 // Rows of a textarea holding `text`: its lines and one more to type in, from `least` up to 30.
 // Long lines wrap, so this undercounts them; the box still scrolls and resizes.
 export function textRows(text: string, least = 6): number {
