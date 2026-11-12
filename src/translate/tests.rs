@@ -1204,6 +1204,53 @@ async fn a_segment_failing_twice_keeps_its_original_and_the_rest_is_translated()
 }
 
 #[tokio::test]
+async fn a_segment_the_re_ask_breaks_keeps_its_first_translation() {
+    // The re-ask fixes the first block and breaks the second, which the first reply had right.
+    let paper = format!(
+        "We set `alpha` FAKE_UNPLACED_FIRST. {FILLER}\n\nThen `beta` FAKE_UNPLACED_AGAIN. {FILLER}\n"
+    );
+    let fx = arxiv(&paper);
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let want = format!(
+        "We set `alpha` FAKE_UNPLACED_FIRST. {FILLER} (zh)\n\n\
+         Then `beta` FAKE_UNPLACED_AGAIN. {FILLER} (zh)\n"
+    );
+    assert_eq!(
+        fs::read_to_string(out.join("translation.md")).unwrap(),
+        want
+    );
+    assert_eq!(meta(&out)["untranslated_blocks"], MetaValue::Int(0));
+    assert_eq!(fx.calls().len(), 2);
+    // Every segment ended up valid, so a retry needs no call.
+    assert_eq!(fs::read_dir(cache_dir(&fx)).unwrap().count(), 1);
+    let (_, result) = translate(&fx).await;
+    result.unwrap();
+    assert_eq!(fx.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn a_re_ask_unusable_as_a_whole_falls_back_to_the_first_reply() {
+    let paper = format!(
+        "We set `alpha` FAKE_UNPLACED_FIRST. {FILLER}\n\nThen `beta` FAKE_REASK_INVALID. {FILLER}\n"
+    );
+    let fx = arxiv(&paper);
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let want = format!(
+        "We set `alpha` FAKE_UNPLACED_FIRST. {FILLER}\n\n\
+         Then `beta` FAKE_REASK_INVALID. {FILLER} (zh)\n"
+    );
+    assert_eq!(
+        fs::read_to_string(out.join("translation.md")).unwrap(),
+        want
+    );
+    assert_eq!(meta(&out)["untranslated_blocks"], MetaValue::Int(1));
+    assert_eq!(fx.calls().len(), 2);
+    assert_eq!(fs::read_dir(cache_dir(&fx)).unwrap().count(), 0);
+}
+
+#[tokio::test]
 async fn a_video_section_failing_twice_shows_its_original_alone() {
     // Speech has no placeholders but for a literal ⟦, which the marked section carries.
     let marked = format!("Bracket ⟦ here FAKE_UNPLACED. {FILLER}");

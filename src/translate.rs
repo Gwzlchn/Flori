@@ -216,7 +216,7 @@ fn chinese_subtitle(
 }
 
 /// A segment's restored reply, or the job.log line saying why it keeps its original text: the
-/// chunk, the id in it and what the reply after the re-ask got wrong.
+/// chunk, the id in it and what the last reply usable as a whole got wrong.
 type Reply = Result<String, String>;
 
 /// Replies to `prompt` for every segment, chunk by chunk: translations, or the punctuated
@@ -271,9 +271,9 @@ struct Item {
 }
 
 /// Reply texts of one chunk, still holding placeholders, or per segment what is wrong with it.
-/// A reply with any problem is asked again once with feedback. When the second reply is unusable
-/// as a whole the step fails; otherwise its valid segments are used and the others keep their
-/// original. Only replies valid in every segment are cached, under
+/// A reply with any problem is asked again once with feedback. Each segment takes its valid text
+/// from the re-ask, else from the first reply; only when neither reply is usable as a whole does
+/// the step fail. Results valid in every segment are cached, under
 /// sha256(prompt, model, payload), so a retry only calls the AI for chunks not yet cached; a
 /// cached chunk leaves a line in job.log instead of a call record.
 async fn ask_chunk(
@@ -313,10 +313,13 @@ async fn ask_chunk(
     let texts = match check(&reply, part) {
         Ok(texts) if texts.iter().all(Result::is_ok) => texts,
         first => {
-            let problem = match first {
-                Err(problem) => problem,
+            let problem = match &first {
+                Err(problem) => problem.clone(),
                 Ok(texts) => {
-                    let problems: Vec<String> = texts.into_iter().filter_map(Result::err).collect();
+                    let problems: Vec<&str> = texts
+                        .iter()
+                        .filter_map(|t| t.as_ref().err().map(String::as_str))
+                        .collect();
                     problems.join("; ")
                 }
             };
@@ -325,8 +328,25 @@ async fn ask_chunk(
             );
             let reply =
                 ai::complete(env, job.ai.tool, model, &ask(feedback), &[], CHUNK_TIMEOUT).await?;
-            check(&reply, part)
-                .map_err(|p| StepFailure::retry(format!("reply failed validation twice: {p}")))?
+            // The re-ask must not lose what the first reply got right.
+            match (check(&reply, part), first) {
+                (Ok(again), Ok(first)) => again
+                    .into_iter()
+                    .zip(first)
+                    .map(|(again, first)| again.or_else(|why| first.map_err(|_| why)))
+                    .collect(),
+                (Ok(again), Err(_)) => again,
+                (Err(problem), Ok(first)) => {
+                    eprintln!(
+                        "{label}: the re-ask failed validation ({problem}), first reply used"
+                    );
+                    first
+                }
+                (Err(problem), Err(_)) => {
+                    let message = format!("reply failed validation twice: {problem}");
+                    return Err(StepFailure::retry(message));
+                }
+            }
         }
     };
     if texts.iter().all(Result::is_ok) {

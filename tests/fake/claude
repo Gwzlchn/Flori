@@ -12,7 +12,9 @@ stderr, exit 1), FAKE_PUNCTUATE (the input JSON comes back with every whitespace
 segment text turned into "，" and a "。" appended; 复仇 becomes the same-sounding 浮筹 and 菜单
 the different-sounding 拆单, FAKE_EDIT becomes FAKE_EDITED, and a segment holding FAKE_REWRITE
 comes back as other words), FAKE_UNPLACED (in every reply, re-asks included, a segment holding
-it comes back with its ⟦n⟧ placeholders removed and every other segment with " (zh)" appended).
+it comes back with its ⟦n⟧ placeholders removed and every other segment with " (zh)" appended;
+a segment holding FAKE_UNPLACED_FIRST loses them only on the first ask, one holding
+FAKE_UNPLACED_AGAIN only on the re-ask), FAKE_REASK_INVALID (the re-ask reply is not JSON).
 Otherwise the reply echoes the text after the last line `---FLORI-INPUT---`, or a fixed note when
 there is none. stdout is stream-json: a system event, an assistant event and a result event.
 Every call appends one JSON line to $HOME/fake-ai.log so tests can count calls."""
@@ -114,16 +116,20 @@ if "FAKE_NO_RESULT" in prompt:
             {"type": "text", "text": "Mind the rate limit and the OAuth token in this paper."}]}})
         print("fake claude: connection reset", file=sys.stderr)
     sys.exit(1)
+reask = "---FLORI-FEEDBACK---" in prompt
+if "FAKE_REASK_INVALID" in prompt and reask:
+    reply("not json")
 if "FAKE_INVALID_ONCE" in prompt:
-    if "---FLORI-FEEDBACK---" not in prompt:
+    if not reask:
         reply("not json")
 elif "FAKE_INVALID" in prompt:
     reply("not json")
 marker = "---FLORI-INPUT---\n"
 if "FAKE_UNPLACED" in prompt and marker in prompt:
     payload = json.loads(prompt.rsplit(marker, 1)[1])
+    once = "FAKE_UNPLACED_AGAIN" if reask else "FAKE_UNPLACED_FIRST"
     for segment in payload["segments"]:
-        if "FAKE_UNPLACED" in segment["text"]:
+        if re.search(r"FAKE_UNPLACED\b", segment["text"]) or once in segment["text"]:
             segment["text"] = re.sub(r"⟦\d+⟧", "", segment["text"])
         else:
             segment["text"] += " (zh)"
