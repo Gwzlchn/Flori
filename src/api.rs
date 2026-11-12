@@ -40,6 +40,7 @@ use crate::pipeline::{AiSpec, FeedKind, MetaValue, Pipeline, Platform, StepName,
         crate::http::cancel_job,
         crate::http::get_file,
         crate::http::health,
+        crate::system::get_system,
     )
 )]
 pub struct ApiDoc;
@@ -385,6 +386,47 @@ pub struct LogChunk {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Health {
     pub version: String,
+}
+
+/// The running instance, read-only. Secrets are reported only as configured or not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SystemInfo {
+    pub version: String,
+    /// Short commit the binary was built from; `unknown` when the build did not say.
+    pub commit: String,
+    /// What new jobs get: the configured tool and models and the CLI version probed at start
+    /// (`unknown` when the CLI did not answer).
+    pub ai: AiSpec,
+    /// Whether a Bilibili SESSDATA is configured. Says nothing about it still being valid.
+    pub bili_login: bool,
+    pub proxy: bool,
+    /// Probed at start; `unknown` when yt-dlp did not answer.
+    pub ytdlp_version: String,
+    /// Last path component of the whisper model directory, e.g. `whisper-base`.
+    pub whisper_model: String,
+    pub data_dir: String,
+    pub vault_name: String,
+    /// Space left for the server's user on the filesystem of `data_dir`; null when unknown.
+    pub disk_free_bytes: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
+    pub domains: u32,
+    pub collections: u32,
+    /// Jobs that succeeded, i.e. published notes.
+    pub notes: u32,
+    /// Submissions a week has to reach.
+    pub weekly_goal: u32,
+    /// The current week and the three before it, newest first.
+    pub weeks: Vec<WeekUse>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct WeekUse {
+    /// Monday of the week, `YYYY-MM-DD` in +08:00.
+    pub start: String,
+    /// Jobs created in the week, whatever became of them.
+    pub submitted: u32,
+    /// `submitted >= weekly_goal`. The current week may still get there.
+    pub met: bool,
 }
 
 #[cfg(test)]

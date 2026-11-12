@@ -817,6 +817,26 @@
           }
         }
       }
+    },
+    "/api/system": {
+      "get": {
+        "tags": [
+          "crate::system"
+        ],
+        "operationId": "get_system",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemInfo"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1685,12 +1705,136 @@
         },
         "additionalProperties": false
       },
+      "SystemInfo": {
+        "type": "object",
+        "description": "The running instance, read-only. Secrets are reported only as configured or not.",
+        "required": [
+          "version",
+          "commit",
+          "ai",
+          "bili_login",
+          "proxy",
+          "ytdlp_version",
+          "whisper_model",
+          "data_dir",
+          "vault_name",
+          "domains",
+          "collections",
+          "notes",
+          "weekly_goal",
+          "weeks"
+        ],
+        "properties": {
+          "ai": {
+            "$ref": "#/components/schemas/AiSpec",
+            "description": "What new jobs get: the configured tool and models and the CLI version probed at start\n(`unknown` when the CLI did not answer)."
+          },
+          "bili_login": {
+            "type": "boolean",
+            "description": "Whether a Bilibili SESSDATA is configured. Says nothing about it still being valid."
+          },
+          "collections": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "commit": {
+            "type": "string",
+            "description": "Short commit the binary was built from; `unknown` when the build did not say."
+          },
+          "data_dir": {
+            "type": "string"
+          },
+          "disk_free_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Space left for the server's user on the filesystem of `data_dir`; null when unknown.",
+            "minimum": 0
+          },
+          "disk_total_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "domains": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "notes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Jobs that succeeded, i.e. published notes.",
+            "minimum": 0
+          },
+          "proxy": {
+            "type": "boolean"
+          },
+          "vault_name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "weekly_goal": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Submissions a week has to reach.",
+            "minimum": 0
+          },
+          "weeks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WeekUse"
+            },
+            "description": "The current week and the three before it, newest first."
+          },
+          "whisper_model": {
+            "type": "string",
+            "description": "Last path component of the whisper model directory, e.g. `whisper-base`."
+          },
+          "ytdlp_version": {
+            "type": "string",
+            "description": "Probed at start; `unknown` when yt-dlp did not answer."
+          }
+        }
+      },
       "TranslateMode": {
         "type": "string",
         "enum": [
           "auto",
           "off"
         ]
+      },
+      "WeekUse": {
+        "type": "object",
+        "required": [
+          "start",
+          "submitted",
+          "met"
+        ],
+        "properties": {
+          "met": {
+            "type": "boolean",
+            "description": "`submitted >= weekly_goal`. The current week may still get there."
+          },
+          "start": {
+            "type": "string",
+            "description": "Monday of the week, `YYYY-MM-DD` in +08:00."
+          },
+          "submitted": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Jobs created in the week, whatever became of them.",
+            "minimum": 0
+          }
+        }
       }
     }
   }

@@ -213,6 +213,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/system": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_system"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -488,8 +504,62 @@ export interface components {
             translate?: null | components["schemas"]["TranslateMode"];
             url: string;
         };
+        /** @description The running instance, read-only. Secrets are reported only as configured or not. */
+        SystemInfo: {
+            /**
+             * @description What new jobs get: the configured tool and models and the CLI version probed at start
+             *     (`unknown` when the CLI did not answer).
+             */
+            ai: components["schemas"]["AiSpec"];
+            /** @description Whether a Bilibili SESSDATA is configured. Says nothing about it still being valid. */
+            bili_login: boolean;
+            /** Format: int32 */
+            collections: number;
+            /** @description Short commit the binary was built from; `unknown` when the build did not say. */
+            commit: string;
+            data_dir: string;
+            /**
+             * Format: int64
+             * @description Space left for the server's user on the filesystem of `data_dir`; null when unknown.
+             */
+            disk_free_bytes?: number | null;
+            /** Format: int64 */
+            disk_total_bytes?: number | null;
+            /** Format: int32 */
+            domains: number;
+            /**
+             * Format: int32
+             * @description Jobs that succeeded, i.e. published notes.
+             */
+            notes: number;
+            proxy: boolean;
+            vault_name: string;
+            version: string;
+            /**
+             * Format: int32
+             * @description Submissions a week has to reach.
+             */
+            weekly_goal: number;
+            /** @description The current week and the three before it, newest first. */
+            weeks: components["schemas"]["WeekUse"][];
+            /** @description Last path component of the whisper model directory, e.g. `whisper-base`. */
+            whisper_model: string;
+            /** @description Probed at start; `unknown` when yt-dlp did not answer. */
+            ytdlp_version: string;
+        };
         /** @enum {string} */
         TranslateMode: "auto" | "off";
+        WeekUse: {
+            /** @description `submitted >= weekly_goal`. The current week may still get there. */
+            met: boolean;
+            /** @description Monday of the week, `YYYY-MM-DD` in +08:00. */
+            start: string;
+            /**
+             * Format: int32
+             * @description Jobs created in the week, whatever became of them.
+             */
+            submitted: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -1095,6 +1165,25 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    get_system: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemInfo"];
                 };
             };
         };

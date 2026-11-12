@@ -112,6 +112,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/jobs/{id}/logs", get(get_logs))
         .route("/api/jobs/{id}/retry", post(retry_job))
         .route("/api/jobs/{id}/cancel", post(cancel_job))
+        .route("/api/system", get(crate::system::get_system))
         .route(
             "/api/jobs/{id}/files/{*path}",
             get(get_file).layer(middleware::map_response(sandbox)),

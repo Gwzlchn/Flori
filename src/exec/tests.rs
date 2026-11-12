@@ -31,6 +31,13 @@ pub(crate) fn config(root: &Path) -> Config {
     }
 }
 
+pub(crate) fn tools() -> Tools {
+    Tools {
+        cli_version: "1.0".into(),
+        ytdlp_version: "2026.10.21".into(),
+    }
+}
+
 /// Writes `<job_dir>/fake/<step>`; see tests/fake/step.
 pub(crate) fn fake(config: &Config, id: i64, file: &str, content: &str) {
     let dir = job_dir(&config.data_dir, id).join("fake");
@@ -115,7 +122,7 @@ impl World {
     }
 
     async fn start(&self) -> ExecHandle {
-        launch(self.db.clone(), self.config.clone(), "1.0".into())
+        launch(self.db.clone(), self.config.clone(), tools())
             .await
             .unwrap()
     }
@@ -500,7 +507,7 @@ async fn ai_credentials_reach_only_ai_steps() {
         fs::create_dir_all(job_dir(&config.data_dir, id).join("fake")).unwrap();
         ids.push(id);
     }
-    let _exec = launch(db.clone(), Arc::new(codex.clone()), "1.0".into())
+    let _exec = launch(db.clone(), Arc::new(codex.clone()), tools())
         .await
         .unwrap();
     for id in &ids {

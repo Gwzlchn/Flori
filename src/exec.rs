@@ -57,6 +57,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 type Fallible<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// `--version` of the external tools, probed once at start: asking again per request would
+/// start a process each time. `unknown` when a tool did not answer; an image update restarts
+/// the server, so the values do not go stale.
+#[derive(Debug, Clone)]
+pub struct Tools {
+    pub cli_version: String,
+    pub ytdlp_version: String,
+}
+
 /// Cheap handle the HTTP layer uses after it commits a state change.
 #[derive(Clone)]
 pub struct ExecHandle {
@@ -70,7 +79,7 @@ struct Inner {
     data_dir: PathBuf,
     self_exe: PathBuf,
     steps_dir: PathBuf,
-    cli_version: String,
+    tools: Tools,
     wake: Notify,
     /// Jobs with a live task, and the cancel signal of each.
     running: Mutex<HashMap<i64, watch::Sender<bool>>>,
@@ -92,9 +101,13 @@ impl ExecHandle {
         }
     }
 
-    /// `<tool> --version` probed at start, recorded in every new job.json.
+    /// The AI CLI's version, recorded in every new job.json.
     pub fn cli_version(&self) -> &str {
-        &self.inner.cli_version
+        &self.inner.tools.cli_version
+    }
+
+    pub fn tools(&self) -> &Tools {
+        &self.inner.tools
     }
 }
 
@@ -236,15 +249,22 @@ pub async fn start(db: SqlitePool, config: Arc<Config>) -> Result<ExecHandle, St
         AiTool::Claude => "claude",
         AiTool::Codex => "codex",
     };
-    let cli_version = probe_version(Command::new(tool)).await;
-    launch(db, config, cli_version).await
+    let (cli_version, ytdlp_version) = tokio::join!(
+        probe_version(Command::new(tool)),
+        probe_version(Command::new("yt-dlp"))
+    );
+    let tools = Tools {
+        cli_version,
+        ytdlp_version,
+    };
+    launch(db, config, tools).await
 }
 
 /// Recovers from a crash, then starts the scheduler.
 pub(crate) async fn launch(
     db: SqlitePool,
     config: Arc<Config>,
-    cli_version: String,
+    tools: Tools,
 ) -> Result<ExecHandle, String> {
     let abs = |p: &Path| std::path::absolute(p).map_err(|e| format!("{}: {e}", p.display()));
     let data_dir = abs(&config.data_dir)?;
@@ -260,7 +280,7 @@ pub(crate) async fn launch(
         self_exe: abs(&config.self_exe)?,
         steps_dir: abs(&config.steps_dir)?,
         config,
-        cli_version,
+        tools,
         wake: Notify::new(),
         running: Mutex::default(),
         global: Semaphore::new(2),

@@ -204,7 +204,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 
 ## 契约 3:HTTP API
 
-17 个操作,按方法加路径计。请求与响应的字段以 `docs/openapi.json` 为准,它由 `src/api.rs` 生成,`just openapi` 更新。
+18 个操作,按方法加路径计。请求与响应的字段以 `docs/openapi.json` 为准,它由 `src/api.rs` 生成,`just openapi` 更新。
 
 | 端点 | 说明 |
 |---|---|
@@ -219,6 +219,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB;单行超过上限时按字符边界切开)与 next_offset;offset 超出文件末尾 400 invalid_request;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
 | GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range;所有响应只带一个 `Content-Security-Policy: sandbox allow-same-origin; frame-ancestors 'none'` 与 `X-Content-Type-Options: nosniff`:外部 HTML 不能运行脚本或提交表单,它引用的图片仍按同源加载 |
+| GET /api/system | 只读的运行状况,供"关于与系统"页。响应是手写的白名单结构体 SystemInfo,从不序列化整个配置;密钥与可能带口令的值只报有无。version、commit(构建时由 `just image` 经 FLORI_BUILD_COMMIT 注入的短提交号,其它构建为 unknown);ai{tool, model_note, model_translate, cli_version}(当前配置,即新任务会用的);bili_login(是否配置了 FLORI_BILI_SESSDATA,不代表仍有效)、proxy(是否配置了 FLORI_PROXY);ytdlp_version;whisper_model(模型目录的最后一段);data_dir、vault_name;disk_free_bytes、disk_total_bytes(data_dir 所在文件系统,statvfs 失败时为 null);domains、collections、notes(succeeded 的任务数);weekly_goal(3)与 weeks[{start, submitted, met}]:本周与此前三周,新的在前,start 是周一(+08:00),submitted 是该周创建的任务数(不论结果),met 即 submitted ≥ weekly_goal。cli_version 与 ytdlp_version 在服务启动时各取一次 `--version`,请求时不起子进程,取不到为 unknown,接口不因此失败 |
 | GET /api/health | {version};唯一不要求认证的端点 |
 
 - 认证:Basic Auth,用户名 FLORI_WEB_USER,口令 FLORI_WEB_PASSWORD,服务端常量时间比较,不存哈希。静态页面和 /api 都要认证。

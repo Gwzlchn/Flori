@@ -591,6 +591,30 @@ pub async fn step_succeeded(
     Ok(true)
 }
 
+/// Numbers of domains, collections and published notes.
+pub async fn counts(db: &SqlitePool) -> sqlx::Result<(u32, u32, u32)> {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM domains), (SELECT count(*) FROM collections), \
+         (SELECT count(*) FROM jobs WHERE status = 'succeeded')",
+    )
+    .fetch_one(db)
+    .await
+}
+
+/// Jobs created per day from `first_day` (`YYYY-MM-DD`) on. `created` is always written in
+/// +08:00, so its first ten characters are the local date and compare as text.
+pub async fn submissions_since(
+    db: &SqlitePool,
+    first_day: &str,
+) -> sqlx::Result<Vec<(String, u32)>> {
+    sqlx::query_as(
+        "SELECT substr(created, 1, 10) AS day, count(*) FROM jobs WHERE created >= ? GROUP BY day",
+    )
+    .bind(first_day)
+    .fetch_all(db)
+    .await
+}
+
 /// After a crash nothing is running: running jobs go back to the queue and running steps to
 /// pending.
 pub async fn recover(db: &SqlitePool) -> sqlx::Result<()> {

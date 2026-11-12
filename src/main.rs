@@ -9,6 +9,7 @@ mod exec;
 mod http;
 mod pipeline;
 mod publish;
+mod system;
 mod translate;
 mod video;
 

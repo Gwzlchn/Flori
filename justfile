@@ -41,7 +41,7 @@ tools:
 
 # Full image: host-built release binary and frontend on top of the tools stage.
 image tag="local":
-    cargo build --release --locked
+    FLORI_BUILD_COMMIT="$(git rev-parse --short HEAD)" cargo build --release --locked
     cd frontend && npx vite build
     {{docker_build}} --target app -t flori:{{tag}} .
 

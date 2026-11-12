@@ -8,7 +8,7 @@ use tower::ServiceExt;
 use super::*;
 use crate::{
     api::JobStatus,
-    exec::tests::{config, fake, gone, wait_for, wait_status},
+    exec::tests::{config, fake, gone, tools, wait_for, wait_status},
 };
 
 struct App {
@@ -24,7 +24,7 @@ async fn app() -> App {
     fs::write(config.static_dir.join("index.html"), "<!doctype html>index").unwrap();
     fs::write(config.static_dir.join("app.js"), "console.log(1)").unwrap();
     let db = db::open(&dir.path().join("t.sqlite")).await.unwrap();
-    let exec = exec::launch(db.clone(), config.clone(), "1.0".into())
+    let exec = exec::launch(db.clone(), config.clone(), tools())
         .await
         .unwrap();
     let state = AppState { db, exec, config };
@@ -793,6 +793,101 @@ async fn the_list_carries_what_the_note_list_shows_once_published() {
     }
     let (_, detail) = app.get("/api/jobs/1").await;
     assert_eq!(detail["job"]["description"], "注意力如何工作。");
+}
+
+#[tokio::test]
+async fn system_reports_the_instance_without_its_secrets() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    let talks = json!({"domain_id": ml, "name": "talks"});
+    app.post("/api/collections", talks).await;
+    fake(&app.state.config, 1, "video-fetch", "20");
+    for url in ["https://youtu.be/dQw4w9WgXcQ", "2401.12345", "2401.12346"] {
+        let submit = json!({"url": url, "domain_id": ml, "translate": "off"});
+        assert_eq!(app.post("/api/jobs", submit).await.0, StatusCode::CREATED);
+    }
+    wait_status(&app.state.db, 1, JobStatus::Failed).await;
+    for id in [2, 3] {
+        wait_status(&app.state.db, id, JobStatus::Succeeded).await;
+    }
+    // One of the three was submitted five weeks ago: outside the window.
+    sqlx::query("UPDATE jobs SET created = '2020-01-01T10:00:00+08:00' WHERE id = 2")
+        .execute(&app.state.db)
+        .await
+        .unwrap();
+
+    let (status, system) = app.get("/api/system").await;
+    assert_eq!(status, StatusCode::OK);
+    let cfg = &app.state.config;
+    let want = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "ai": {
+            "tool": "claude", "model_note": "model-note", "model_translate": "model-translate",
+            "cli_version": "1.0",
+        },
+        "bili_login": false,
+        "proxy": true,
+        "ytdlp_version": "2026.10.21",
+        "whisper_model": "whisper-base",
+        "data_dir": cfg.data_dir.display().to_string(),
+        "vault_name": "flori",
+        "domains": 1,
+        "collections": 1,
+        "notes": 2,
+        "weekly_goal": 3,
+    });
+    for (key, value) in want.as_object().unwrap() {
+        assert_eq!(&system[key], value, "{key}");
+    }
+    assert!(!system["commit"].as_str().unwrap().is_empty());
+    let (free, total) = (&system["disk_free_bytes"], &system["disk_total_bytes"]);
+    assert!(free.as_u64().unwrap() <= total.as_u64().unwrap() && total.as_u64().unwrap() > 0);
+    let weeks = system["weeks"].as_array().unwrap();
+    let used: Vec<(u64, bool)> = weeks
+        .iter()
+        .map(|w| (w["submitted"].as_u64().unwrap(), w["met"] == true))
+        .collect();
+    assert_eq!(used, [(2, false), (0, false), (0, false), (0, false)]);
+    assert!(weeks[0]["start"].as_str().unwrap() > weeks[3]["start"].as_str().unwrap());
+
+    // A whitelist: these exact keys, and no configured value that is a secret or holds one.
+    let keys: Vec<&str> = system
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "ai",
+            "bili_login",
+            "collections",
+            "commit",
+            "data_dir",
+            "disk_free_bytes",
+            "disk_total_bytes",
+            "domains",
+            "notes",
+            "proxy",
+            "vault_name",
+            "version",
+            "weekly_goal",
+            "weeks",
+            "whisper_model",
+            "ytdlp_version",
+        ]
+    );
+    let text = system.to_string();
+    for secret in [cfg.web_password.as_str(), "proxy.invalid"] {
+        assert!(!text.contains(secret), "{secret}");
+    }
+    // Like the rest of /api, not for anonymous readers.
+    let anonymous = HttpRequest::get("/api/system")
+        .body(AxumBody::empty())
+        .unwrap();
+    let response = app.router.clone().oneshot(anonymous).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
