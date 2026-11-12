@@ -38,13 +38,10 @@ const platformTags = computed(() => [
   })),
 ]);
 
-// Source date first; notes whose source gave none sort by the day they were submitted.
-function day(job: Job): string {
-  return job.published ?? job.created.slice(0, 10);
-}
-
+// By source date, newest first. Notes without one come after all dated ones, by submission:
+// a submission day is always later than a source date, so mixing the two would float them up.
 function newestFirst(a: Job, b: Job): number {
-  return day(b).localeCompare(day(a)) || b.created.localeCompare(a.created) || b.id - a.id;
+  return (b.published ?? "").localeCompare(a.published ?? "") || b.created.localeCompare(a.created) || b.id - a.id;
 }
 
 // Domains and collections in the order of their lists, 未归集合 last; empty ones are left out.
