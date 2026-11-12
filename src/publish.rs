@@ -22,6 +22,8 @@ const COPIED: [(&str, &str); 3] = [
 ];
 /// Heading of the note section that becomes `description`, as prompts/note-*.md ask for it.
 const SUMMARY_HEADING: &str = "一句话总结";
+/// The description is one row of a list; a summary that runs on is cut here, ellipsis included.
+const DESCRIPTION_CHARS: usize = 300;
 const TITLE_BYTES: usize = 100;
 
 pub async fn run(job_dir: &Path, out_dir: &Path) -> StepResult {
@@ -262,8 +264,9 @@ fn source_fields(step: StepName, meta: &BTreeMap<String, MetaValue>) -> Vec<(&'s
         .collect()
 }
 
-/// The note's summary section as one line of plain text, or None when the note has no such
-/// section or it is empty. The section ends at the next heading.
+/// The note's summary section as one line of plain text of at most DESCRIPTION_CHARS characters,
+/// or None when the note has no such section or it is empty. The section ends at the next
+/// heading; a model that writes no further heading would otherwise hand over the whole note.
 fn description(note: &str) -> Option<String> {
     let heading = |line: &str| line.starts_with('#');
     let lines = note
@@ -273,13 +276,30 @@ fn description(note: &str) -> Option<String> {
         .take_while(|line| !heading(line))
         .map(|line| {
             let line = line.trim();
+            let numbered = line
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .strip_prefix(". ")
+                .filter(|rest| rest.len() + 2 < line.len());
             ["> ", "- ", "* ", "+ "]
                 .iter()
                 .find_map(|marker| line.strip_prefix(marker))
+                .or(numbered)
                 .unwrap_or(line)
         });
-    let text = plain(&lines.collect::<Vec<_>>().join(" "));
-    (!text.is_empty()).then_some(text)
+    // The source is cut before it is cleaned: `plain` rescans to the end for every unclosed
+    // bracket, and marks never make the text longer than a few times what is kept.
+    let source: String = lines
+        .flat_map(|line| line.chars().chain([' ']))
+        .take(DESCRIPTION_CHARS * 8)
+        .collect();
+    let text = plain(&source);
+    if text.is_empty() {
+        return None;
+    }
+    Some(match text.char_indices().nth(DESCRIPTION_CHARS - 1) {
+        Some((cut, c)) if cut + c.len_utf8() < text.len() => format!("{}…", text[..cut].trim_end()),
+        _ => text,
+    })
 }
 
 /// Inline Markdown as the text a reader sees: links keep their label, images go, emphasis and

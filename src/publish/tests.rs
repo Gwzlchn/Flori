@@ -337,6 +337,27 @@ fn notes_without_job_id_are_recognized_by_job_url() {
 }
 
 #[test]
+fn a_summary_that_runs_on_is_cut_to_one_row() {
+    let exact = "字".repeat(DESCRIPTION_CHARS);
+    assert_eq!(
+        description(&format!("## 一句话总结\n{exact}\n")),
+        Some(exact)
+    );
+    // No later heading: the rest of the note is the section. Unclosed brackets stay cheap.
+    let note = format!(
+        "## 一句话总结\n{}{}",
+        "很长 ".repeat(1_000),
+        "[\n".repeat(200_000)
+    );
+    let cut = description(&note).unwrap();
+    assert_eq!(cut.chars().count(), DESCRIPTION_CHARS);
+    assert!(
+        cut.starts_with("很长 很长") && cut.ends_with("长…"),
+        "{cut}"
+    );
+}
+
+#[test]
 fn description_is_the_summary_section_as_one_plain_line() {
     let cases = [
         (
@@ -349,6 +370,8 @@ fn description_is_the_summary_section_as_one_plain_line() {
             Some("讲了 3.5 倍 [03:30] snake_case 旧"),
         ),
         ("## 一句话总结\n- 只有一条\n", Some("只有一条")),
+        ("## 一句话总结\n1. 第一\n2. 第二\n", Some("第一 第二")),
+        ("## 一句话总结\n3. \n2024 年\n", Some("3. 2024 年")),
         ("## 一句话总结\n\n## 内容要点\n\n正文\n", None),
         ("## 总结\n\n正文\n", None),
         ("一句话总结\n\n正文\n", None),

@@ -198,7 +198,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | ai_tool、ai_model | 生成笔记所用 |
 
 - 附属文件:同目录里有 transcript.md、original.md、translation.md 时,主笔记末尾加一节 `## 附属文件`,每个文件一行标准 Markdown 相对链接(`- [转写](transcript.md)`、`[原文]`、`[译文]`),不用 wikilink;一个都没有时不加这一节。只写进 vault 里的主笔记,job 目录的 note.md 不变。
-- description:取笔记里标题文字是"一句话总结"的那一节(任意级别,提示词要求 `## 一句话总结`),到下一个标题为止。各行去掉行首的引用或列表标记后用空格连成一行;链接只留文字,图片去掉,去掉 `*`、反引号、`~~` 与反斜杠转义,压缩空白。程序抽取,不调用 AI。
+- description:笔记里"一句话总结"一节的单行纯文本,最多 300 字符,超出时截断并以 … 结尾;没有这一节或为空时不写。程序抽取,不调用 AI。
 - job 的字符串 id:`<bili|yt|arxiv>-<source_id>-<短 hash>`,如 `yt-dQw4w9WgXcQ-edaaa1`;前缀与 source_id 的写法同文件夹名。短 hash 是 sha256("<platform>:<source_id>:<created>") 的前 6 位小写十六进制,三个值取 job.json 的 source.platform、source.id(不换 `/`)与 created 的原字符串,所以只凭 job.json 就能重算(`pipeline::job_key`,只定义一次)。它与 job.json 的 job_id 不是一回事:后者是整数主键,即 jobs/<n>/ 目录名与 /jobs/<n> 地址,清库后从 1 重来;字符串 id 不随之变。
 - 来源字段紧跟 source_id,值缺失或为空时不写该字段。文件夹日期与 created 仍取 job 创建时间,不取 published。
 
