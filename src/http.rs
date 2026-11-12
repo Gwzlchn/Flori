@@ -14,10 +14,10 @@ use axum::{
         FromRequest, FromRequestParts, Path, Query, Request, State, rejection::PathRejection,
     },
     http::{
-        HeaderValue, Method, StatusCode,
+        HeaderMap, HeaderValue, Method, StatusCode,
         header::{
-            AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, HOST, ORIGIN, REFERRER_POLICY,
-            WWW_AUTHENTICATE, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+            AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, ORIGIN,
+            REFERRER_POLICY, WWW_AUTHENTICATE, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
         },
         request::Parts,
     },
@@ -911,7 +911,27 @@ pub async fn get_file(
     if !file.starts_with(&root) || !file.is_file() {
         return Err(missing().into());
     }
-    Ok(ServeFile::new(file).try_call(req).await?.into_response())
+    let mut res = ServeFile::new(file).try_call(req).await?.into_response();
+    utf8_text(res.headers_mut());
+    Ok(res)
+}
+
+/// Every text a step writes is UTF-8. Without a charset, and with `nosniff`, a browser decodes a
+/// text type as windows-1252 and Chinese turns into mojibake. SubRip has no text type of its own
+/// and would be downloaded, so it is shown as plain text.
+fn utf8_text(headers: &mut HeaderMap) {
+    let Some(kind) = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()) else {
+        return;
+    };
+    let kind = match kind {
+        "application/x-subrip" => "text/plain",
+        "application/json" => kind,
+        _ if kind.starts_with("text/") && !kind.contains(';') => kind,
+        _ => return,
+    };
+    let value = HeaderValue::from_str(&format!("{kind}; charset=utf-8"))
+        .expect("a content type that was a header value stays one");
+    headers.insert(CONTENT_TYPE, value);
 }
 
 #[utoipa::path(get, path = "/api/health", responses((status = 200, body = Health)))]

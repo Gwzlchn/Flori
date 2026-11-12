@@ -526,6 +526,70 @@ async fn files_stay_inside_the_job_and_support_range() {
 }
 
 #[tokio::test]
+async fn job_text_is_served_as_utf8_and_binary_types_stay() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    let (_, job) = app
+        .post("/api/jobs", json!({"url": "2401.12345", "domain_id": ml}))
+        .await;
+    let id = job["id"].as_i64().unwrap();
+    let dir = app.job_dir(id).join("steps/05-translate");
+    fs::create_dir_all(&dir).unwrap();
+    let chinese = "## 00:00\n\n这是转写稿。\n";
+    let text = [
+        ("transcript.md", "text/markdown; charset=utf-8"),
+        ("subtitle.srt", "text/plain; charset=utf-8"),
+        ("subtitle.vtt", "text/vtt; charset=utf-8"),
+        ("ffmpeg.log", "text/plain; charset=utf-8"),
+        ("notes.txt", "text/plain; charset=utf-8"),
+        ("manifest.json", "application/json; charset=utf-8"),
+        ("page.html", "text/html; charset=utf-8"),
+    ];
+    for (name, _) in text {
+        fs::write(dir.join(name), chinese).unwrap();
+    }
+    let binary = [
+        ("video.mp4", "video/mp4"),
+        ("frame-0.jpg", "image/jpeg"),
+        ("figure.svg", "image/svg+xml"),
+        ("blob", "application/octet-stream"),
+    ];
+    for (name, _) in binary {
+        fs::write(dir.join(name), [0xe8, 0xbf, 0x99, 0]).unwrap();
+    }
+    let get = |name: &str, range: Option<&str>| {
+        let mut req = HttpRequest::builder()
+            .uri(format!("/api/jobs/{id}/files/steps/05-translate/{name}"))
+            .header(AUTHORIZATION, auth());
+        if let Some(range) = range {
+            req = req.header(header::RANGE, range);
+        }
+        req.body(AxumBody::empty()).unwrap()
+    };
+    for (name, want) in text.into_iter().chain(binary) {
+        let (status, headers, _) = app.send(get(name, None)).await;
+        assert_eq!(status, StatusCode::OK, "{name}");
+        let types: Vec<_> = headers.get_all(header::CONTENT_TYPE).iter().collect();
+        assert_eq!(types, [want], "{name}");
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff", "{name}");
+    }
+    let (status, headers, body) = app.send(get("transcript.md", None)).await;
+    assert_eq!(
+        (status, body.as_slice()),
+        (StatusCode::OK, chinese.as_bytes())
+    );
+    assert_eq!(headers[header::CONTENT_LENGTH], chinese.len().to_string());
+    // A range of a text file keeps the charset and its bytes.
+    let (status, headers, body) = app.send(get("transcript.md", Some("bytes=10-"))).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        headers[header::CONTENT_TYPE],
+        "text/markdown; charset=utf-8"
+    );
+    assert_eq!(body, chinese.as_bytes()[10..]);
+}
+
+#[tokio::test]
 async fn logs_return_whole_lines_from_an_offset() {
     let app = app().await;
     let ml = app.domain("ml").await;
