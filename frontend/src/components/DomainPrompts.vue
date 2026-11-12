@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 
-import { api, failure, textRows, type Schemas } from "../client";
+import { api, failure, guardUnsaved, textRows, type Schemas } from "../client";
 
 type Prompt = Schemas["DomainPrompt"];
 type Note = { text: string; ok: boolean };
@@ -14,6 +14,8 @@ const drafts = ref<Partial<Record<Schemas["PromptName"], string>>>({});
 const notes = ref<Partial<Record<Schemas["PromptName"], Note | undefined>>>({});
 const message = ref("");
 const busy = ref(false);
+
+guardUnsaved(() => prompts.value?.some((prompt) => drafts.value[prompt.name] !== prompt.text) ?? false);
 
 onMounted(async () => {
   if (!domain.value) return;
@@ -43,6 +45,12 @@ async function save(prompt: Prompt, text: string): Promise<void> {
   drafts.value[data.name] = data.text;
   notes.value[data.name] = { text: data.text ? "已保存。" : "已清空,这个领域不再追加要求。", ok: true };
 }
+
+// One tap would drop the saved text for good, so it asks like 恢复默认 does.
+async function clear(prompt: Prompt): Promise<void> {
+  if (!window.confirm(`清空"${prompt.label}"的领域要求?写好的内容会丢掉。`)) return;
+  await save(prompt, "");
+}
 </script>
 
 <template>
@@ -70,7 +78,7 @@ async function save(prompt: Prompt, text: string): Promise<void> {
       />
       <div class="row">
         <button type="button" class="btn primary" :disabled="busy || drafts[prompt.name] === prompt.text" @click="save(prompt, drafts[prompt.name] ?? '')">保存</button>
-        <button v-if="prompt.text" type="button" class="btn danger-outline" :disabled="busy" @click="save(prompt, '')">清空</button>
+        <button v-if="prompt.text" type="button" class="btn danger-outline" :disabled="busy" @click="clear(prompt)">清空</button>
       </div>
       <p v-if="notes[prompt.name]" :class="notes[prompt.name]?.ok ? 'ok' : 'error'">{{ notes[prompt.name]?.text }}</p>
     </section>

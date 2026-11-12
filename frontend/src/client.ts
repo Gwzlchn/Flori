@@ -1,4 +1,5 @@
 import createClient from "openapi-fetch";
+import { onBeforeUnmount } from "vue";
 
 import type { components, paths } from "./openapi";
 
@@ -60,6 +61,27 @@ export function failure(error: { message?: string } | undefined, response: Respo
 // `preview_base` + a job-relative path; each segment is encoded, the slashes are not.
 export function fileUrl(base: string, path: string): string {
   return base + path.split("/").map(encodeURIComponent).join("/");
+}
+
+// Whether the open page holds edits it has not saved. App asks before going to another page,
+// the browser before reloading or closing the tab.
+let unsaved: (() => boolean) | undefined;
+
+// Called from a page's setup; the check is dropped when the page unmounts.
+export function guardUnsaved(check: () => boolean): void {
+  unsaved = check;
+  onBeforeUnmount(() => {
+    if (unsaved === check) unsaved = undefined;
+  });
+}
+
+export function hasUnsaved(): boolean {
+  return unsaved?.() ?? false;
+}
+
+// True when nothing is unsaved or the reader chooses to drop it.
+export function mayLeave(): boolean {
+  return !hasUnsaved() || window.confirm("有修改还没保存,离开会丢掉。仍要离开?");
 }
 
 // Rows of a textarea holding `text`: its lines and one more to type in, from `least` up to 30.

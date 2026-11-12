@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { api, isActive, type Schemas } from "./client";
+import { api, hasUnsaved, isActive, mayLeave, type Schemas } from "./client";
 import AboutPage from "./components/AboutPage.vue";
 import DomainPrompts from "./components/DomainPrompts.vue";
 import FeedPanel from "./components/FeedPanel.vue";
@@ -47,7 +47,10 @@ function follow(event: MouseEvent): void {
   const link = event.target instanceof Element ? event.target.closest("a") : null;
   if (!link || link.target || link.origin !== location.origin || link.pathname.startsWith("/api/")) return;
   event.preventDefault();
-  if (link.pathname !== location.pathname) history.pushState(null, "", link.pathname);
+  if (link.pathname !== location.pathname) {
+    if (!mayLeave()) return;
+    history.pushState(null, "", link.pathname);
+  }
   const before = route.value;
   path.value = link.pathname;
   const after = route.value;
@@ -55,8 +58,18 @@ function follow(event: MouseEvent): void {
   if (!(before.view === "job" && after.view === "job" && before.id === after.id)) window.scrollTo(0, 0);
 }
 
+// Back and forward have already changed the address; staying puts the page's address back.
 function popped(): void {
+  if (location.pathname !== path.value && !mayLeave()) {
+    history.pushState(null, "", path.value);
+    return;
+  }
   path.value = location.pathname;
+}
+
+// The browser shows its own dialog; pages cannot set its text.
+function unloading(event: BeforeUnloadEvent): void {
+  if (hasUnsaved()) event.preventDefault();
 }
 
 async function loadTaxonomy(): Promise<void> {
@@ -77,6 +90,7 @@ watch(() => route.value.view, (view) => {
 
 onMounted(async () => {
   window.addEventListener("popstate", popped);
+  window.addEventListener("beforeunload", unloading);
   // The list only needs refreshing while something is still moving.
   timer = window.setInterval(() => {
     if (route.value.view === "home" && jobs.value.some((job) => isActive(job.status))) void loadJobs();
@@ -87,6 +101,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("popstate", popped);
+  window.removeEventListener("beforeunload", unloading);
   window.clearInterval(timer);
 });
 </script>

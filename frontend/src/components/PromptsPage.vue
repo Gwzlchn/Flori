@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 
-import { api, failure, textRows, type Schemas } from "../client";
+import { api, failure, guardUnsaved, textRows, type Schemas } from "../client";
 
 type Prompt = Schemas["PromptInfo"];
 type Note = { text: string; ok: boolean };
@@ -12,6 +12,8 @@ const drafts = ref<Partial<Record<Schemas["PromptName"], string>>>({});
 const notes = ref<Partial<Record<Schemas["PromptName"], Note | undefined>>>({});
 const message = ref("");
 const busy = ref(false);
+
+guardUnsaved(() => prompts.value?.some((prompt) => drafts.value[prompt.name] !== prompt.text) ?? false);
 
 onMounted(async () => {
   const { data, error, response } = await api.GET("/api/prompts");
