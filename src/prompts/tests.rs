@@ -29,6 +29,11 @@ fn built_in_texts_compose_to_what_steps_sent_before() {
 #[test]
 fn tidy_keeps_the_text_and_drops_what_surrounds_it() {
     assert_eq!(tidy("\r\n\n  - 一\r\n  - 二 \r\n\n\t "), "  - 一\n  - 二");
+    // A blank line holding spaces is still a blank line; the first line keeps its indent.
+    assert_eq!(
+        tidy(" \r\n\t\n\u{3000}\n  - 一\n\n  - 二"),
+        "  - 一\n\n  - 二"
+    );
     assert_eq!(tidy(" \n "), "");
     assert_eq!(
         tidy(builtin(PromptName::Translate)) + "\n",

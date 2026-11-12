@@ -41,8 +41,16 @@ pub fn label(name: PromptName) -> &'static str {
 /// Text as it is stored and compared: line breaks as `\n`, without blank lines before or
 /// whitespace after it.
 pub fn tidy(text: &str) -> String {
-    let text = text.replace("\r\n", "\n");
-    text.trim_start_matches('\n').trim_end().to_owned()
+    trim_blank_edges(&text.replace("\r\n", "\n")).to_owned()
+}
+
+/// `text` without its leading blank lines, spaces-only ones included, and its trailing
+/// whitespace. The first line keeps its indent.
+fn trim_blank_edges(text: &str) -> &str {
+    let text = text.trim_end();
+    let first = text.len() - text.trim_start().len();
+    let line = text[..first].rfind('\n').map_or(0, |newline| newline + 1);
+    &text[line..]
 }
 
 /// Stored texts by prompt name: the overrides of built-in prompts and one domain's requirements.
@@ -131,7 +139,7 @@ impl Prompt {
 pub fn compose(blocks: &[&str]) -> String {
     let mut out = String::new();
     for block in blocks {
-        let block = block.trim_start_matches('\n').trim_end();
+        let block = trim_blank_edges(block);
         if block.is_empty() {
             continue;
         }

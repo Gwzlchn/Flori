@@ -387,7 +387,11 @@ async fn prompts_are_overridden_and_restored() {
     assert_eq!(list[4]["label"], "加标点");
 
     let put = |name: &str, text: Value| app.put_text(format!("/api/prompts/{name}"), text);
-    let (status, body) = put("translate", json!("\r\n只译成中文。\r\n- 保留术语。 \n\n")).await;
+    let (status, body) = put(
+        "translate",
+        json!(" \r\n\t\r\n只译成中文。\r\n- 保留术语。 \n\n"),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["text"], "只译成中文。\n- 保留术语。");
     assert_eq!(body["customized"], true);
