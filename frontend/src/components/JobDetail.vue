@@ -194,9 +194,10 @@ async function act(action: "retry" | "cancel"): Promise<void> {
 
 // A timestamp clicked far down the note: bring the player back into view so the moment is seen,
 // not only heard. Seeking before the metadata has loaded is kept by the browser as the start time.
+// A time past the end is ignored: the browser would clamp it to the end and stop there.
 function seek(at: number): void {
   const element = player.value;
-  if (!element) return;
+  if (!element || at >= element.duration) return;
   element.currentTime = at;
   void element.play().catch(() => undefined);
   element.scrollIntoView({ block: "nearest", behavior: "smooth" });

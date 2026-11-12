@@ -28,8 +28,11 @@ md.renderer.rules.image = (tokens, index, options, env, self) => {
 // bare time. Both become buttons. Only text tokens are rewritten, so code spans, code blocks and
 // link text keep theirs as written. The rule runs after text_join, which is what turns the
 // transcript's escaped `\[` into plain text.
-const STAMP = /\[((?:\d{1,2}:)?\d{1,2}:\d{2})\]/g;
-const BARE = /^(?:\d{1,2}:)?\d{1,2}:\d{2}$/;
+// Seconds are 00-59, and so are minutes once there is an hour: `[99:99]` is not a time. Minutes
+// alone may pass 59, which is how a long video is often cited.
+const CLOCK = "(?:\\d{1,2}:[0-5]\\d|\\d{1,2}):[0-5]\\d";
+const STAMP = new RegExp(`\\[(${CLOCK})\\]`, "g");
+const BARE = new RegExp(`^${CLOCK}$`);
 
 function stampSeconds(clock: string): number {
   return clock.split(":").reduce((total, part) => total * 60 + Number(part), 0);
@@ -107,7 +110,7 @@ watchEffect(() => {
 const parts = computed(() => {
   const front = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(props.source);
   const body = front ? props.source.slice(front[0].length) : props.source;
-  return { front: front?.[1] ?? "", html: md.render(body), math: math.value, seekable: props.seekable };
+  return { front: front?.[1] ?? "", html: md.render(body), math: math.value };
 });
 </script>
 
