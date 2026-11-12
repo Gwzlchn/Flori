@@ -566,6 +566,36 @@ fn video_uses_translated_transcript_and_collection() {
 }
 
 #[test]
+fn chinese_domain_and_collection_name_the_folders_and_the_tag_as_they_are() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let mut job = job_spec(Pipeline::Arxiv, AiTool::Claude);
+    job.domain = "计算机系统结构".into();
+    job.collection = Some("CPU缓存".into());
+    fx.write_job(&job);
+    arxiv_job(&fx, false);
+    let vault = tempfile::tempdir().unwrap();
+    publish_into(&fx, vault.path()).unwrap();
+    let rel = "flori/计算机系统结构/CPU缓存/2026-11-08-arxiv-2401.04088";
+    let note = fs::read_to_string(
+        vault
+            .path()
+            .join(rel)
+            .join("Mixtral of Experts Sparse MoE.md"),
+    )
+    .unwrap();
+    assert!(
+        note.contains("\ndomain: \"计算机系统结构\"\ncollection: \"CPU缓存\"\n"),
+        "{note}"
+    );
+    assert!(
+        note.contains("\ntags: [\"flori\",\"arxiv\",\"计算机系统结构\"]\n"),
+        "{note}"
+    );
+    let manifest = pipeline::read_manifest(&fx.job_dir().join("steps/05-publish.tmp")).unwrap();
+    assert_eq!(manifest.meta["vault_path"], MetaValue::Text(rel.into()));
+}
+
+#[test]
 fn a_title_with_edge_spaces_is_its_only_alias() {
     // yt-dlp passes the platform's title through as typed, spaces included; when no conversion
     // changed it, the platform title is the title and adds no second alias.

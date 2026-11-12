@@ -6,16 +6,18 @@ import { api, failure, feedKindText, type Schemas } from "../client";
 const props = defineProps<{ domains: Schemas["Domain"][]; collections: Schemas["Collection"][] }>();
 const emit = defineEmits<{ changed: [] }>();
 
-// Same rule as the server; names become vault folders and cannot be renamed.
-const slug = /^[a-z0-9][a-z0-9-]{0,47}$/;
+// Same rule as the server (contract 3): names become vault folders and the domain an Obsidian
+// tag, and cannot be renamed.
+const forbidden = /[\s\p{Cc}/\\:*?"<>|#^[\],;]/u;
 const domainName = ref("");
 const collectionNames = ref<Record<number, string>>({});
 const message = ref("");
 const busy = ref(false);
 
 function valid(name: string): boolean {
-  if (slug.test(name)) return true;
-  message.value = `"${name}" 不能用:只能包含小写字母、数字和连字符,以字母或数字开头,最长 48 个字符。`;
+  const length = [...name.normalize("NFC")].length;
+  if (length <= 32 && !forbidden.test(name) && !/^[.-]/.test(name)) return true;
+  message.value = `"${name}" 不能用:最长 32 个字符,不能有空格,不能含 / \\ : * ? " < > | # ^ [ ] , ;,也不能以 . 或 - 开头。`;
   return false;
 }
 
@@ -54,10 +56,10 @@ async function remove(kind: "domains" | "collections", id: number, name: string)
   <section class="card stack">
     <div>
       <h2>领域与集合</h2>
-      <p class="meta">名字就是 Obsidian 里的文件夹名,建好后不能改名;领域下还有集合或任务、集合下还有任务时不能删除。</p>
+      <p class="meta">名字就是 Obsidian 里的文件夹名,领域名也是笔记的标签;可以用中文,建好后不能改名;领域下还有集合或任务、集合下还有任务时不能删除。</p>
     </div>
     <form class="row" @submit.prevent="addDomain">
-      <input v-model="domainName" class="grow" type="text" autocapitalize="off" autocomplete="off" placeholder="新领域,如 ml" aria-label="新领域名字">
+      <input v-model="domainName" class="grow" type="text" autocapitalize="off" autocomplete="off" placeholder="新领域,如 计算机系统结构" aria-label="新领域名字">
       <button class="btn primary" :disabled="busy || !domainName.trim()">新建领域</button>
     </form>
     <p v-if="message" class="error">{{ message }}</p>

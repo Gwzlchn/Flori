@@ -102,16 +102,30 @@ pub async fn list_domains(db: &SqlitePool) -> sqlx::Result<Vec<Domain>> {
         .await
 }
 
+/// Whether two names give the same vault folder on the devices that sync it: the file systems
+/// of phones, macOS and Windows ignore case.
+pub fn same_folder(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// Names are compared in a write transaction, so no other insert slips in between.
 pub async fn create_domain(db: &SqlitePool, name: &str) -> sqlx::Result<Result<Domain, ApiError>> {
-    let domain: Option<Domain> = sqlx::query_as(
-        "INSERT INTO domains (name, created) VALUES (?, ?) ON CONFLICT DO NOTHING \
-         RETURNING id, name, created",
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM domains")
+        .fetch_all(&mut *tx)
+        .await?;
+    if names.iter().any(|taken| same_folder(taken, name)) {
+        return Ok(Err(conflict("domain name already exists")));
+    }
+    let domain: Domain = sqlx::query_as(
+        "INSERT INTO domains (name, created) VALUES (?, ?) RETURNING id, name, created",
     )
     .bind(name)
     .bind(now())
-    .fetch_optional(db)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(domain.ok_or_else(|| conflict("domain name already exists")))
+    tx.commit().await?;
+    Ok(Ok(domain))
 }
 
 pub async fn delete_domain(db: &SqlitePool, id: i64) -> sqlx::Result<Result<(), ApiError>> {
@@ -156,29 +170,36 @@ pub async fn get_collection(db: &SqlitePool, id: i64) -> sqlx::Result<Option<Col
     Ok(row.map(collection))
 }
 
+/// Unique within the domain the way [`create_domain`] is among domains.
 pub async fn create_collection(
     db: &SqlitePool,
     domain_id: i64,
     name: &str,
 ) -> sqlx::Result<Result<Collection, ApiError>> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    if !exists(&mut *tx, "domains", domain_id).await? {
+        return Ok(Err(not_found("domain")));
+    }
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM collections WHERE domain_id = ?")
+        .bind(domain_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    if names.iter().any(|taken| same_folder(taken, name)) {
+        return Ok(Err(conflict(
+            "collection name already exists in this domain",
+        )));
+    }
     let sql = format!(
-        "INSERT INTO collections (domain_id, name, created) \
-         SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM domains WHERE id = ?1) \
-         ON CONFLICT DO NOTHING RETURNING {COLUMNS}"
+        "INSERT INTO collections (domain_id, name, created) VALUES (?, ?, ?) RETURNING {COLUMNS}"
     );
-    let row: Option<CollectionRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+    let row: CollectionRow = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(domain_id)
         .bind(name)
         .bind(now())
-        .fetch_optional(db)
+        .fetch_one(&mut *tx)
         .await?;
-    match row {
-        Some(row) => Ok(Ok(collection(row))),
-        None if exists(db, "domains", domain_id).await? => Ok(Err(conflict(
-            "collection name already exists in this domain",
-        ))),
-        None => Ok(Err(not_found("domain"))),
-    }
+    tx.commit().await?;
+    Ok(Ok(collection(row)))
 }
 
 pub async fn delete_collection(db: &SqlitePool, id: i64) -> sqlx::Result<Result<(), ApiError>> {

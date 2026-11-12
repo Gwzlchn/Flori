@@ -36,6 +36,7 @@ use tokio::{
     time::Instant,
 };
 use tower_http::services::{ServeDir, ServeFile};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{
     Config,
@@ -370,18 +371,34 @@ async fn no_route() -> ApiError {
     not_found("endpoint")
 }
 
-fn check_name(name: &str) -> Result<(), ApiError> {
-    let ok = (1..=48).contains(&name.len())
-        && name
-            .bytes()
-            .enumerate()
-            .all(|(i, b)| b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && b == b'-'));
+/// Characters a domain or collection name may not hold besides whitespace and control
+/// characters: path separators and what Windows file names refuse, since the name is a vault
+/// folder on every synced device, and what ends or splits an Obsidian tag, since the domain is
+/// one.
+const NAME_FORBIDDEN: &str = "/\\:*?\"<>|#^[],;";
+const NAME_CHARS: usize = 32;
+
+/// The name in NFC when it may name a domain or collection: 1-32 characters, no whitespace,
+/// control characters or [`NAME_FORBIDDEN`], not starting with `.` (hidden folder) or `-`
+/// (read as an option). Old slugs of up to 32 characters pass unchanged; stored names are never
+/// checked again.
+fn check_name(name: &str) -> Result<String, ApiError> {
+    let name: String = name.nfc().collect();
+    let chars = name.chars().count();
+    let ok = (1..=NAME_CHARS).contains(&chars)
+        && !name.starts_with(['.', '-'])
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || NAME_FORBIDDEN.contains(c));
     if ok {
-        Ok(())
+        Ok(name)
     } else {
         Err(ApiError::new(
             ErrorCode::InvalidName,
-            "name must match ^[a-z0-9][a-z0-9-]{0,47}$",
+            format!(
+                "a name has 1-{NAME_CHARS} characters without whitespace, control characters \
+                 or any of {NAME_FORBIDDEN} and does not start with . or -"
+            ),
         ))
     }
 }
@@ -399,8 +416,8 @@ pub async fn create_domain(
     State(s): State<AppState>,
     Body(body): Body<NewDomain>,
 ) -> Res<(StatusCode, Json<Domain>)> {
-    check_name(&body.name)?;
-    let domain = db::create_domain(&s.db, &body.name).await??;
+    let name = check_name(&body.name)?;
+    let domain = db::create_domain(&s.db, &name).await??;
     Ok((StatusCode::CREATED, Json(domain)))
 }
 
@@ -429,12 +446,12 @@ pub async fn create_collection(
     State(s): State<AppState>,
     Body(body): Body<NewCollection>,
 ) -> Res<(StatusCode, Json<Collection>)> {
-    check_name(&body.name)?;
-    if body.name == "unsorted" {
+    let name = check_name(&body.name)?;
+    if db::same_folder(&name, "unsorted") {
         let reserved = "unsorted is the vault folder of jobs without a collection";
         return Err(ApiError::new(ErrorCode::InvalidName, reserved).into());
     }
-    let collection = db::create_collection(&s.db, body.domain_id, &body.name).await??;
+    let collection = db::create_collection(&s.db, body.domain_id, &name).await??;
     Ok((StatusCode::CREATED, Json(collection)))
 }
 

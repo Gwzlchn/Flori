@@ -191,7 +191,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | platform、source_id | bilibili/youtube/arxiv 与平台 ID |
 | uploader、published、duration_min、transcript | 视频:video-fetch 的 uploader、published(YYYY-MM-DD)与 duration_ms 四舍五入的整分钟数(不足半分钟记 1);transcript 是 video-transcribe 的来源,manual(人工字幕)、ai(B站 AI 字幕)或 whisper |
 | authors、published、arxiv_version、arxiv_category | arXiv:arxiv-fetch 的 authors(数组)、published、version 与 primary_category |
-| domain、collection | slug;无集合为 "" |
+| domain、collection | 领域与集合的名字原样(规则见契约 3);无集合为 "" |
 | created | ISO 时间 +08:00 |
 | status | unread |
 | language、translated | 取 translate 的 meta;未排 translate 时为 unknown、false |
@@ -211,8 +211,8 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 
 | 端点 | 说明 |
 |---|---|
-| GET/POST /api/domains,DELETE /api/domains/{id} | name 即 slug `^[a-z0-9][a-z0-9-]{0,47}$`,不可改;不合法 400 invalid_name;重名 409;仍有集合或 job 时删除 409 |
-| GET/POST /api/collections,DELETE /api/collections/{id} | 同上,属于某个领域,同一领域内不重名;`unsorted` 保留给无集合的 job,不能用作集合名(400 invalid_name);领域不存在 404;有 job 时删除 409 |
+| GET/POST /api/domains,DELETE /api/domains/{id} | name 即 vault 文件夹名与笔记的标签,规则见下,不可改;不合法 400 invalid_name;忽略大小写重名 409;仍有集合或 job 时删除 409 |
+| GET/POST /api/collections,DELETE /api/collections/{id} | 同上,属于某个领域,同一领域内忽略大小写不重名;`unsorted` 保留给无集合的 job,忽略大小写不能用作集合名(400 invalid_name);领域不存在 404;有 job 时删除 409 |
 | PUT /api/collections/{id}/feed | {url\|null};解析为 6 种 kind 之一并规范化后存 feed_url;解析不了 400 invalid_url;null 解绑 |
 | GET /api/collections/{id}/feed?limit=30 | 同步调用 feed.py(limit 1–100,超时 60s),每条附 job:{id,status}\|null;未绑定 400 invalid_request;已有刷新在跑或上次刷新开始不到 10s(失败或中途断开的刷新同样计时)409;上游失败 502 upstream,message 取 feed.py stderr 最后一行 |
 | POST /api/collections/{id}/feed/jobs | {items:[{platform,source_id}], translate?};每批 1–20 条,超出 400 invalid_request;服务端校验 ID 并自己拼 URL;一个事务内插入;返回 {created, skipped},每项带 job |
@@ -225,6 +225,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | GET /api/system | 只读的运行状况,供"关于与系统"页。响应是手写的白名单结构体,从不序列化整个配置;密钥与可能带口令的值只报有无。commit 在构建时由 `just image` 注入,其它构建为 unknown;AI CLI 与 yt-dlp 的版本在服务启动时各取一次,请求时不起子进程,取不到为 unknown;磁盘两项在 statvfs 失败时为 null;weeks 是本周与此前三周,新的在前,周从周一起按 +08:00,按创建的任务计,不论结果 |
 | GET /api/health | {version};唯一不要求认证的端点 |
 
+- 领域与集合的名字:先转成 NFC 再校验并原样保存;1–32 个字符,任何位置都不能有空白(领域名是 Obsidian 标签)或控制字符,不能含 `/ \ : * ? " < > | # ^ [ ] , ;`,不能以 `.` 或 `-` 开头;可以是中文。已建的名字不重新校验。手机、macOS、Windows 的文件系统不分大小写,所以重名与 `unsorted` 都忽略大小写比较。
 - 认证:Basic Auth,用户名 FLORI_WEB_USER,口令 FLORI_WEB_PASSWORD,服务端常量时间比较,不存哈希。静态页面和 /api 都要认证。
 - 认证失败:
   - 不带 `Authorization` 的请求是浏览器的第一次请求,直接 401,不记日志也不计数。

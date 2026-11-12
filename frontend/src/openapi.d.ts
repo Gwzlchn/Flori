@@ -276,13 +276,18 @@ export interface components {
             feed?: null | components["schemas"]["Feed"];
             /** Format: int64 */
             id: number;
+            /** @description Same rule as `Domain.name`, unique within the domain; `unsorted` is reserved. */
             name: string;
         };
         Domain: {
             created: string;
             /** Format: int64 */
             id: number;
-            /** @description Slug `^[a-z0-9][a-z0-9-]{0,47}$`; also the vault folder name. Immutable. */
+            /**
+             * @description 1-32 characters in NFC without whitespace, control characters or any of
+             *     `/\:*?"<>|#^[],;`, not starting with `.` or `-`; unique ignoring case. Also the vault
+             *     folder name and, for a domain, a tag. Immutable.
+             */
             name: string;
         };
         /** @enum {string} */

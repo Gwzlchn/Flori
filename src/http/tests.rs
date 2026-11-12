@@ -245,7 +245,7 @@ fn auth_failure_lines_name_the_request_but_not_the_credentials() {
 #[tokio::test]
 async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
     let app = app().await;
-    for bad in ["ML", "-ml", "", "a_b", "数学", &"a".repeat(49)] {
+    for bad in ["-ml", "", ".ml", "a b", &"a".repeat(33)] {
         let (status, body) = app.post("/api/domains", json!({"name": bad})).await;
         assert_eq!(
             (status, code(&body)),
@@ -261,7 +261,7 @@ async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
         (StatusCode::BAD_REQUEST, "invalid_request")
     );
     let ml = app.domain("ml").await;
-    let math = app.domain(&format!("0{}", "a".repeat(47))).await;
+    let math = app.domain(&format!("0{}", "a".repeat(31))).await;
     let (status, body) = app.post("/api/domains", json!({"name": "ml"})).await;
     assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "conflict"));
     assert_eq!(body.get("job_id"), None);
@@ -280,19 +280,21 @@ async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
         .await;
     assert_eq!((status, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
     let (status, body) = app
-        .post("/api/collections", json!({"domain_id": ml, "name": "Bad"}))
+        .post("/api/collections", json!({"domain_id": ml, "name": "a/b"}))
         .await;
     assert_eq!(
         (status, code(&body)),
         (StatusCode::BAD_REQUEST, "invalid_name")
     );
-    let unsorted = json!({"domain_id": ml, "name": "unsorted"});
-    let (status, body) = app.post("/api/collections", unsorted).await;
-    assert_eq!(
-        (status, code(&body)),
-        (StatusCode::BAD_REQUEST, "invalid_name"),
-        "reserved name"
-    );
+    for reserved in ["unsorted", "Unsorted"] {
+        let unsorted = json!({"domain_id": ml, "name": reserved});
+        let (status, body) = app.post("/api/collections", unsorted).await;
+        assert_eq!(
+            (status, code(&body)),
+            (StatusCode::BAD_REQUEST, "invalid_name"),
+            "reserved name {reserved}"
+        );
+    }
     let (_, list) = app.get("/api/collections").await;
     assert_eq!(list.as_array().unwrap().len(), 2);
 
@@ -347,7 +349,102 @@ async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
         .collect();
     assert_eq!(
         names,
-        [format!("0{}", "a".repeat(47)).as_str(), "ml", "unsorted"]
+        [format!("0{}", "a".repeat(31)).as_str(), "ml", "unsorted"]
+    );
+}
+
+#[tokio::test]
+async fn names_may_be_chinese_but_nothing_that_breaks_a_folder_or_tag() {
+    let app = app().await;
+    let invalid = |name: &str, body: &Value, status| {
+        assert_eq!(
+            (status, code(body)),
+            (StatusCode::BAD_REQUEST, "invalid_name"),
+            "{name:?}"
+        );
+    };
+    let mut bad: Vec<String> = "/\\:*?\"<>|#^[],;"
+        .chars()
+        .map(|c| format!("计算{c}机"))
+        .collect();
+    // Whitespace anywhere, the ideographic and no-break spaces included; nothing is trimmed.
+    for space in [" ", "\t", "\n", "\u{3000}", "\u{a0}", "\u{2028}"] {
+        bad.extend([
+            format!("计算{space}机"),
+            format!("{space}计算机"),
+            format!("计算机{space}"),
+        ]);
+    }
+    for control in ["\u{0}", "\u{7}", "\u{1b}", "\u{7f}", "\u{9f}"] {
+        bad.push(format!("计算{control}机"));
+    }
+    bad.extend([".计算机".into(), "-计算机".into(), "数".repeat(33)]);
+    for name in &bad {
+        let (status, body) = app.post("/api/domains", json!({"name": name})).await;
+        invalid(name, &body, status);
+    }
+    let (_, list) = app.get("/api/domains").await;
+    assert_eq!(list, json!([]));
+
+    let arch = app.domain("计算机系统结构").await;
+    let long = app.domain(&"数".repeat(32)).await;
+    for name in ["LLM-推理", "C++", "a.b", "x_y", "数学(基础)", "Ünïcode"] {
+        app.domain(name).await;
+    }
+    // Stored composed, so a decomposed spelling of the same name is the same name.
+    let (status, body) = app
+        .post("/api/domains", json!({"name": "Schro\u{308}dinger"}))
+        .await;
+    assert_eq!(
+        (status, &body["name"]),
+        (StatusCode::CREATED, &json!("Schrödinger"))
+    );
+    // Phone, macOS and Windows file systems ignore case: one folder, one name.
+    for taken in ["Schrödinger", "SCHRÖDINGER", "llm-推理", "ünÏcode"] {
+        let (status, body) = app.post("/api/domains", json!({"name": taken})).await;
+        assert_eq!(
+            (status, code(&body)),
+            (StatusCode::CONFLICT, "conflict"),
+            "{taken}"
+        );
+    }
+
+    let cache = app.collection(arch, "CPU缓存").await;
+    app.collection(long, "CPU缓存").await;
+    for (name, want) in [("cpu缓存", "conflict"), ("UNSORTED", "invalid_name")] {
+        let body = json!({"domain_id": arch, "name": name});
+        let (_, body) = app.post("/api/collections", body).await;
+        assert_eq!(code(&body), want, "{name}");
+    }
+    for name in &bad {
+        let body = json!({"domain_id": arch, "name": name});
+        let (status, body) = app.post("/api/collections", body).await;
+        invalid(name, &body, status);
+    }
+
+    // The names reach job.json as they are; the Obsidian link encodes them.
+    let cfg = &app.state.config;
+    let folder = "flori/计算机系统结构/CPU缓存/2026-11-08-yt-dQw4w9WgXcQ";
+    let publish = json!({"title": null, "files": {}, "assets": [], "meta": {
+        "vault_path": folder, "note_file": "缓存 & 一致性.md",
+    }});
+    fake(cfg, 1, "publish.json", &publish.to_string());
+    let job =
+        json!({"url": "https://youtu.be/dQw4w9WgXcQ", "domain_id": arch, "collection_id": cache});
+    let (status, body) = app.post("/api/jobs", job).await;
+    assert_eq!((status, &body["id"]), (StatusCode::CREATED, &json!(1)));
+    let spec = read_job(&app.job_dir(1)).unwrap();
+    assert_eq!(
+        (spec.domain.as_str(), spec.collection.as_deref()),
+        ("计算机系统结构", Some("CPU缓存"))
+    );
+    wait_status(&app.state.db, 1, JobStatus::Succeeded).await;
+    let (_, detail) = app.get("/api/jobs/1").await;
+    assert_eq!(detail["vault_path"], folder);
+    assert_eq!(
+        detail["obsidian_uri"],
+        "obsidian://open?vault=flori&file=%E8%AE%A1%E7%AE%97%E6%9C%BA%E7%B3%BB%E7%BB%9F%E7%BB%93%E6%9E%84\
+         %2FCPU%E7%BC%93%E5%AD%98%2F2026-11-08-yt-dQw4w9WgXcQ%2F%E7%BC%93%E5%AD%98%20%26%20%E4%B8%80%E8%87%B4%E6%80%A7.md"
     );
 }
 

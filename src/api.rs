@@ -128,7 +128,9 @@ pub enum StepStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct Domain {
     pub id: i64,
-    /// Slug `^[a-z0-9][a-z0-9-]{0,47}$`; also the vault folder name. Immutable.
+    /// 1-32 characters in NFC without whitespace, control characters or any of
+    /// `/\:*?"<>|#^[],;`, not starting with `.` or `-`; unique ignoring case. Also the vault
+    /// folder name and, for a domain, a tag. Immutable.
     pub name: String,
     pub created: String,
 }
@@ -143,6 +145,7 @@ pub struct NewDomain {
 pub struct Collection {
     pub id: i64,
     pub domain_id: i64,
+    /// Same rule as `Domain.name`, unique within the domain; `unsorted` is reserved.
     pub name: String,
     pub feed: Option<Feed>,
     pub created: String,
