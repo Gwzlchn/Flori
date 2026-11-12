@@ -76,7 +76,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | arxiv-convert | cpu | original.md、figures.json、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$`,其中未转义的 `$`(`\text{}` 里的公式)依次换成 `\(`、`\)`,公式编号去掉 `$`,公式只在自己的定界符处结束;正文文字里的 `[`、`]`、`!` 一律转义,链接、图片与脚注只由 convert 写出,链接地址百分号编码;figures.json 见下 | 10m | 2 |
 | note | ai | note.md(读原文与全部关键帧或 figures.json 里的全部论文图,只受单次请求的上限约束;中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
 | translate(auto 时排入) | ai | arXiv:translation.md;视频:读 sections.json,非中文写双语 transcript.md,中文写加标点的 transcript.md;每块调用超时 600s | 3h | 1 |
-| publish | local | meta: vault_path(相对 FLORI_VAULT_DIR,含 vault 名), note_file(主笔记文件名) | 5m | 2 |
+| publish | local | meta: vault_path(相对 FLORI_VAULT_DIR,含 vault 名), note_file(主笔记文件名), description(同 frontmatter 的 description,抽不到时省略) | 5m | 2 |
 
 全局 Semaphore(2) 限制同时运行的步骤数,whisper 与 ai 各另有 Semaphore(1),local 不占全局名额。
 
@@ -167,7 +167,7 @@ claude -p --model <必填> --tools "" --input-format stream-json --output-format
 
 ```text
 $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bili|yt|arxiv>-<source_id>/
-  <标题>.md            AI 笔记,带 frontmatter
+  <标题>.md            AI 笔记,带 frontmatter;末尾有"附属文件"一节
   transcript.md        视频:转写 + 关键帧(非中文时为双语,中文时由 AI 加标点)
   original.md          arXiv:原文 Markdown
   translation.md       arXiv:中文译文(非中文时)
@@ -183,6 +183,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | frontmatter 字段 | 值 |
 |---|---|
 | title、aliases | 标题(中文已转成简体);aliases 先是 title,与 video-fetch 或 arxiv-fetch 的 meta.title(平台原标题)不同时再加上原标题 |
+| description | 笔记"一句话总结"一节的纯文本,单行;没有这一节或为空时不写 |
 | source_url | 原始链接 |
 | platform、source_id | bilibili/youtube/arxiv 与平台 ID |
 | uploader、published、duration_min、transcript | 视频:video-fetch 的 uploader、published(YYYY-MM-DD)与 duration_ms 四舍五入的整分钟数(不足半分钟记 1);transcript 是 video-transcribe 的来源,manual(人工字幕)、ai(B站 AI 字幕)或 whisper |
@@ -196,6 +197,8 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | job_url | $FLORI_PUBLIC_URL/jobs/<整数 id>;只作跳回网页的链接,地址或整数 id 变了不影响判重 |
 | ai_tool、ai_model | 生成笔记所用 |
 
+- 附属文件:同目录里有 transcript.md、original.md、translation.md 时,主笔记末尾加一节 `## 附属文件`,每个文件一行标准 Markdown 相对链接(`- [转写](transcript.md)`、`[原文]`、`[译文]`),不用 wikilink;一个都没有时不加这一节。只写进 vault 里的主笔记,job 目录的 note.md 不变。
+- description:取笔记里标题文字是"一句话总结"的那一节(任意级别,提示词要求 `## 一句话总结`),到下一个标题为止。各行去掉行首的引用或列表标记后用空格连成一行;链接只留文字,图片去掉,去掉 `*`、反引号、`~~` 与反斜杠转义,压缩空白。程序抽取,不调用 AI。
 - job 的字符串 id:`<bili|yt|arxiv>-<source_id>-<短 hash>`,如 `yt-dQw4w9WgXcQ-edaaa1`;前缀与 source_id 的写法同文件夹名。短 hash 是 sha256("<platform>:<source_id>:<created>") 的前 6 位小写十六进制,三个值取 job.json 的 source.platform、source.id(不换 `/`)与 created 的原字符串,所以只凭 job.json 就能重算(`pipeline::job_key`,只定义一次)。它与 job.json 的 job_id 不是一回事:后者是整数主键,即 jobs/<n>/ 目录名与 /jobs/<n> 地址,清库后从 1 重来;字符串 id 不随之变。
 - 来源字段紧跟 source_id,值缺失或为空时不写该字段。文件夹日期与 created 仍取 job 创建时间,不取 published。
 

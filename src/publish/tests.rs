@@ -100,7 +100,10 @@ fn a_video_titled_transcript_keeps_both_files() {
         "转写稿\n"
     );
     let note = fs::read_to_string(folder.join("Transcript 笔记.md")).unwrap();
-    assert!(note.starts_with("---\ntitle: \"Transcript\"\n") && note.ends_with("笔记\n"));
+    assert!(
+        note.starts_with("---\ntitle: \"Transcript\"\n")
+            && note.ends_with("笔记\n\n## 附属文件\n\n- [转写](transcript.md)\n")
+    );
     let manifest = pipeline::read_manifest(&fx.job_dir().join("steps/05-publish.tmp")).unwrap();
     assert_eq!(
         manifest.meta["note_file"],
@@ -213,6 +216,7 @@ fn arxiv_publish_writes_the_folder_and_frontmatter() {
     let want = r#"---
 title: "Mixtral of Experts: Sparse MoE"
 aliases: ["Mixtral of Experts: Sparse MoE"]
+description: "稀疏专家。"
 source_url: "https://arxiv.org/abs/2401.04088"
 platform: "arxiv"
 source_id: "2401.04088"
@@ -236,6 +240,11 @@ ai_model: "model-note"
 ## 一句话总结
 
 稀疏专家。
+
+## 附属文件
+
+- [原文](original.md)
+- [译文](translation.md)
 "#;
     assert_eq!(note, want);
     let manifest = pipeline::read_manifest(&fx.job_dir().join("steps/05-publish.tmp")).unwrap();
@@ -243,6 +252,10 @@ ai_model: "model-note"
     assert_eq!(
         manifest.meta["note_file"],
         MetaValue::Text("Mixtral of Experts Sparse MoE.md".into())
+    );
+    assert_eq!(
+        manifest.meta["description"],
+        MetaValue::Text("稀疏专家。".into())
     );
     assert!(manifest.files.is_empty() && manifest.assets.is_empty() && manifest.title.is_none());
     assert!(!fx.job_dir().join("publish.tmp").exists());
@@ -321,6 +334,48 @@ fn notes_without_job_id_are_recognized_by_job_url() {
         fs::write(&note, text).unwrap();
         assert_eq!(published_by(&note, key, url), want, "{text}");
     }
+}
+
+#[test]
+fn description_is_the_summary_section_as_one_plain_line() {
+    let cases = [
+        (
+            "## 一句话总结\n\n**稀疏**专家用 `top-2` 路由,\n见[论文](https://arxiv.org/abs/1)。\n\n## 背景\n\n别的。\n",
+            Some("稀疏专家用 top-2 路由, 见论文。"),
+        ),
+        // Heading level and trailing spaces vary between models; the time mark is no link.
+        (
+            "前言\n\n### 一句话总结  \n> 讲了 3\\.5 倍 [03:30] ![图](assets/a.jpg) snake_case ~~旧~~\n# 下一节\n",
+            Some("讲了 3.5 倍 [03:30] snake_case 旧"),
+        ),
+        ("## 一句话总结\n- 只有一条\n", Some("只有一条")),
+        ("## 一句话总结\n\n## 内容要点\n\n正文\n", None),
+        ("## 总结\n\n正文\n", None),
+        ("一句话总结\n\n正文\n", None),
+        ("", None),
+    ];
+    for (note, want) in cases {
+        assert_eq!(description(note).as_deref(), want, "{note:?}");
+    }
+}
+
+#[test]
+fn a_note_without_summary_or_files_gets_neither_description_nor_links() {
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let mut job = job_spec(Pipeline::Arxiv, AiTool::Claude);
+    job.translate = TranslateMode::Off;
+    fx.write_job(&job);
+    fx.step(1, StepName::ArxivFetch, Some("T"), &[], &[], &[]);
+    fx.step(2, StepName::ArxivConvert, None, &[], &[], &[]);
+    let note = [("note", "note.md", "正文,没有换行结尾")];
+    fx.step(3, StepName::Note, None, &note, &[], &[]);
+    let vault = tempfile::tempdir().unwrap();
+    publish(fx.job_dir(), &fx.out_dir("04-publish"), vault.path()).unwrap();
+    let text = fs::read_to_string(vault.path().join(FOLDER).join("T.md")).unwrap();
+    assert!(!text.contains("description") && !text.contains("附属文件"));
+    assert!(text.ends_with("---\n\n正文,没有换行结尾"), "{text}");
+    let manifest = pipeline::read_manifest(&fx.job_dir().join("steps/04-publish.tmp")).unwrap();
+    assert!(!manifest.meta.contains_key("description"));
 }
 
 #[test]

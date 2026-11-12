@@ -13,8 +13,15 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::pipeline::{self, JobSpec, Manifest, MetaValue, StepFailure, StepName, StepResult};
 
-/// Logical names copied into the vault as `<name>.md`. The note becomes `<title>.md`.
-const COPIED: [&str; 3] = ["transcript", "original", "translation"];
+/// Logical names copied into the vault as `<name>.md`, with the label of the link the note gets
+/// to each. The note becomes `<title>.md`.
+const COPIED: [(&str, &str); 3] = [
+    ("transcript", "转写"),
+    ("original", "原文"),
+    ("translation", "译文"),
+];
+/// Heading of the note section that becomes `description`, as prompts/note-*.md ask for it.
+const SUMMARY_HEADING: &str = "一句话总结";
 const TITLE_BYTES: usize = 100;
 
 pub async fn run(job_dir: &Path, out_dir: &Path) -> StepResult {
@@ -75,6 +82,8 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
     let note = files
         .get("note")
         .ok_or_else(|| StepFailure::permanent("no note to publish"))?;
+    let body = fs::read_to_string(note)?;
+    let description = description(&body);
     let title = title.unwrap_or_else(|| job.source.id.clone());
     let note_file = note_file(&title, &job.source.id);
     let rel = vault_path(&job)?;
@@ -97,13 +106,22 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
         let mut aliases = vec![title.clone()];
         aliases.extend(original_title.filter(|original| *original != title));
         let ids = (job_key.as_str(), job_url.as_str());
-        let fields = frontmatter(&job, &aliases, source, &language, translated, ids);
-        fs::write(tmp.join(&note_file), fields + &fs::read_to_string(note)?)?;
-        for name in COPIED {
+        let summary = description.as_deref();
+        let fields = frontmatter(&job, &aliases, summary, source, &language, translated, ids);
+        let mut links = String::new();
+        for (name, label) in COPIED {
             if let Some(src) = files.get(name) {
                 fs::copy(src, tmp.join(format!("{name}.md")))?;
+                links.push_str(&format!("- [{label}]({name}.md)\n"));
             }
         }
+        let mut text = fields + &body;
+        if !links.is_empty() {
+            // Plain relative links, so any Markdown reader gets from the note to the files
+            // beside it.
+            text = format!("{}\n\n## 附属文件\n\n{links}", text.trim_end());
+        }
+        fs::write(tmp.join(&note_file), text)?;
         if !assets.is_empty() {
             fs::create_dir(tmp.join("assets"))?;
             for (asset, src) in &assets {
@@ -123,6 +141,11 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
     manifest
         .meta
         .insert("note_file".into(), MetaValue::Text(note_file));
+    if let Some(description) = description {
+        manifest
+            .meta
+            .insert("description".into(), MetaValue::Text(description));
+    }
     pipeline::write_manifest(out_dir, &manifest)?;
     Ok(())
 }
@@ -153,7 +176,8 @@ fn note_file(title: &str, source_id: &str) -> String {
     };
     let taken = COPIED
         .iter()
-        .chain(&["assets"])
+        .map(|(n, _)| *n)
+        .chain(["assets"])
         .any(|n| n.eq_ignore_ascii_case(&name));
     if taken {
         format!("{name} 笔记.md")
@@ -238,25 +262,86 @@ fn source_fields(step: StepName, meta: &BTreeMap<String, MetaValue>) -> Vec<(&'s
         .collect()
 }
 
+/// The note's summary section as one line of plain text, or None when the note has no such
+/// section or it is empty. The section ends at the next heading.
+fn description(note: &str) -> Option<String> {
+    let heading = |line: &str| line.starts_with('#');
+    let lines = note
+        .lines()
+        .skip_while(|line| !heading(line) || line.trim_start_matches('#').trim() != SUMMARY_HEADING)
+        .skip(1)
+        .take_while(|line| !heading(line))
+        .map(|line| {
+            let line = line.trim();
+            ["> ", "- ", "* ", "+ "]
+                .iter()
+                .find_map(|marker| line.strip_prefix(marker))
+                .unwrap_or(line)
+        });
+    let text = plain(&lines.collect::<Vec<_>>().join(" "));
+    (!text.is_empty()).then_some(text)
+}
+
+/// Inline Markdown as the text a reader sees: links keep their label, images go, emphasis and
+/// code marks and backslash escapes are dropped, whitespace collapses. `_` stays: in a summary
+/// it is far more often part of a name than emphasis.
+fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let image = rest.starts_with("![");
+        if let Some((label, after)) = link(&rest[usize::from(image)..]) {
+            if !image {
+                out.push_str(&plain(label));
+            }
+            rest = after;
+            continue;
+        }
+        let mut width = c.len_utf8();
+        match (c, rest[width..].chars().next()) {
+            ('\\', Some(next)) if next.is_ascii_punctuation() => {
+                out.push(next);
+                width += 1;
+            }
+            ('*' | '`', _) => {}
+            ('~', Some('~')) => width += 1,
+            _ => out.push(c),
+        }
+        rest = &rest[width..];
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `[label](target)` at the start of `text`: the label and the text after the link. A label
+/// with a bracket inside is not taken, so `[03:30] … [a](b)` stays two things.
+fn link(text: &str) -> Option<(&str, &str)> {
+    let close = text.strip_prefix('[')?.find("](")? + 1;
+    let label = &text[1..close];
+    let end = close + text[close..].find(')')?;
+    (!label.contains(['[', ']'])).then(|| (label, &text[end + 1..]))
+}
+
 /// YAML frontmatter. Every value is written as JSON, which YAML reads as the same scalar or
 /// flow sequence, so titles with quotes or colons need no escaping rules of their own. The first
 /// alias is the title.
 fn frontmatter(
     job: &JobSpec,
     aliases: &[String],
+    description: Option<&str>,
     source: Vec<(&str, Value)>,
     language: &str,
     translated: bool,
     (job_key, job_url): (&str, &str),
 ) -> String {
     let platform = json!(job.source.platform);
-    let mut fields: Vec<(&str, Value)> = vec![
-        ("title", json!(aliases[0])),
-        ("aliases", json!(aliases)),
+    let mut fields: Vec<(&str, Value)> =
+        vec![("title", json!(aliases[0])), ("aliases", json!(aliases))];
+    fields.extend(description.map(|text| ("description", json!(text))));
+    fields.extend([
         ("source_url", json!(job.source.url)),
         ("platform", platform.clone()),
         ("source_id", json!(job.source.id)),
-    ];
+    ]);
     fields.extend(source);
     fields.extend([
         ("domain", json!(job.domain)),
