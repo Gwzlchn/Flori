@@ -134,9 +134,9 @@ impl StepName {
     pub fn spec(self) -> StepSpec {
         const MIN: u64 = 60;
         let (program, resource, timeout_s, attempts) = match self {
-            StepName::VideoFetch => (StepProgram::BuiltIn, Resource::Net, 30 * MIN, 3),
+            StepName::VideoFetch => (StepProgram::BuiltIn, Resource::Net, 120 * MIN, 3),
             StepName::VideoTranscribe => (StepProgram::BuiltIn, Resource::Whisper, 120 * MIN, 2),
-            StepName::VideoFrames => (StepProgram::BuiltIn, Resource::Cpu, 60 * MIN, 2),
+            StepName::VideoFrames => (StepProgram::BuiltIn, Resource::Cpu, 120 * MIN, 2),
             StepName::ArxivFetch => (
                 StepProgram::Python {
                     script: "arxiv.py",

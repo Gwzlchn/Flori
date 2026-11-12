@@ -105,6 +105,17 @@ const PERMANENT_ERRORS: &[&str] = &[
     "live event will begin",
 ];
 
+/// The format rule of contract 1, "video-fetch 的下载" in docs/contracts.md.
+///
+/// A `field:value` in `-S` is a preferred value, read per field: `res:2160` takes the largest up
+/// to 2160p, `hdr:sdr` ranks SDR first and every HDR kind after it, but `vcodec:h264` ranks the
+/// codecs above h264 nearest first, so HEVC would beat VP9 and AV1. No sort string puts HEVC
+/// last, hence the filter. `acodec:aac` takes AAC, spelled aac or mp4a, before Opus and FLAC.
+/// `lang` must follow the video fields: in front of them, a muxed 360p format marked with the
+/// original language beats every video-only format.
+const VIDEO_FORMAT: &str = "bv*[vcodec!~='(?i)^([hx]265|he?vc?|dvh)']+ba/bv*+ba/b";
+const VIDEO_SORT: &str = "res:2160,fps,hdr:sdr,vcodec:h264,lang,acodec:aac";
+
 /// What video-fetch takes from its environment. Tests point the tools at fakes.
 pub(super) struct FetchEnv {
     pub(super) proxy: Option<String>,
@@ -207,11 +218,8 @@ pub(super) async fn fetch_with(job_dir: &Path, out_dir: &Path, env: &FetchEnv) -
     // A single format goes straight to `<name>.part`, which the next attempt would continue
     // even if the site then serves another format.
     let mut video = ytdlp(&cache.join("video.%(format_id)s.%(ext)s"));
-    // h264 first: it plays in every browser and ffmpeg decodes it fast.
     video
-        // 720p is enough for keyframes and playback, and the YouTube path goes through a
-        // proxy that can drop to ~100KB/s; 1080p then runs into the 30m step timeout.
-        .args(["-f", "bv*+ba/b", "-S", "vcodec:h264,res:720,acodec:m4a"])
+        .args(["-f", VIDEO_FORMAT, "-S", VIDEO_SORT])
         .args(["--merge-output-format", "mp4", "--remux-video", "mp4"])
         .arg("--print-to-file")
         .arg(concat!(

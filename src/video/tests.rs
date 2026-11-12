@@ -792,6 +792,22 @@ async fn subtitle_is_kept_and_both_runs_skip_live_streams() {
     }
 }
 
+/// Both platforms ask for the same format; why the strings read like this is at `VIDEO_SORT`.
+#[tokio::test]
+async fn the_video_run_asks_for_the_highest_playable_format_as_mp4() {
+    for (platform, id) in [("youtube", "video-subs-ok"), ("bilibili", "BV-subs-ok")] {
+        let run = FetchRun::new(platform, id, None);
+        run.run().await.unwrap();
+        let video_run = run.log().lines().next().unwrap().to_owned();
+        let want = concat!(
+            " -f bv*[vcodec!~='(?i)^([hx]265|he?vc?|dvh)']+ba/bv*+ba/b",
+            " -S res:2160,fps,hdr:sdr,vcodec:h264,lang,acodec:aac",
+            " --merge-output-format mp4 --remux-video mp4 ",
+        );
+        assert!(video_run.contains(want), "{platform}: {video_run}");
+    }
+}
+
 #[tokio::test]
 async fn original_language_picks_the_transcript_and_chinese_becomes_the_translation() {
     struct Case {
@@ -1096,7 +1112,7 @@ async fn a_subtitle_run_killed_by_a_signal_is_retried() {
 }
 
 /// On a slow link only attempts that each continue the last one's part get a video through the
-/// 30m timeout.
+/// step timeout.
 #[tokio::test]
 async fn the_next_attempt_continues_the_part_a_failed_one_left() {
     for id in ["video-part-fail", "video-part-killed", "BV-part-fail"] {

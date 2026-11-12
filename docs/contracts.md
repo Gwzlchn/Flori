@@ -69,9 +69,9 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 
 | 步骤 | 资源 | 输出 | 超时 | 尝试 |
 |---|---|---|---|---|
-| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(转写用的人工字幕,选轨规则见下)、subtitle_zh.srt(中文人工字幕,作译文)、manual_subtitle_<lang>.srt(原声未知时的人工字幕)与 ai_subtitle_<lang>.srt(B站 AI 字幕),后两种待 video-transcribe 核对语言;meta: title, uploader, duration_ms, published, width, height, fps, vcodec, acodec, tags(字符串数组), filesize_bytes(video.mp4 的字节数),有 subtitle.srt 时另有 subtitle_language;除 filesize_bytes 外取 yt-dlp 所报下载格式的值,逐项校验:宽高 1–65535 的整数,fps 在 (0, 1000],编码只含字母数字与 `._+-` 且不超过 64 字符,`none` 不写,标签去空白与重复,单个不超过 100 字符、合计不超过 500 字符;不合规、拿不到或标签为空时省略该项 | 30m | 3 |
+| video-fetch | net | video.mp4(发布后保留在 job 目录)、可选 subtitle.srt(转写用的人工字幕,选轨规则见下)、subtitle_zh.srt(中文人工字幕,作译文)、manual_subtitle_<lang>.srt(原声未知时的人工字幕)与 ai_subtitle_<lang>.srt(B站 AI 字幕),后两种待 video-transcribe 核对语言;meta: title, uploader, duration_ms, published, width, height, fps, vcodec, acodec, tags(字符串数组), filesize_bytes(video.mp4 的字节数),有 subtitle.srt 时另有 subtitle_language;除 filesize_bytes 外取 yt-dlp 所报下载格式的值,逐项校验:宽高 1–65535 的整数,fps 在 (0, 1000],编码只含字母数字与 `._+-` 且不超过 64 字符,`none` 不写,标签去空白与重复,单个不超过 100 字符、合计不超过 500 字符;不合规、拿不到或标签为空时省略该项 | 2h | 3 |
 | video-transcribe | whisper | transcript.json、可选 subtitle_zh.srt;人工字幕优先(subtitle,或与音频语言相同的 manual_subtitle_<lang>),其次与音频语言相同的 B站 AI 字幕,最后 whisper;meta: origin(subtitle\|whisper), language, language_probability,origin 为 subtitle 时另有 subtitle_kind(manual\|ai) | 2h | 2 |
-| video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节,去重后每节至多 2 张关键帧,全片不设总数上限)、由它渲染的 transcript.md | 1h | 2 |
+| video-frames | cpu | assets/frame-<ms>.jpg、sections.json `[{start_ms, frames:[basename], text}]`(30s 一节,去重后每节至多 2 张关键帧,全片不设总数上限)、由它渲染的 transcript.md | 2h | 2 |
 | arxiv-fetch | net | page.html、资源原件;meta: arxiv_id(去版本号), version("vN",拿不到时省略), title, authors, abstract, html_source(arxiv\|ar5iv), published(arXiv API 的第一版日期 YYYY-MM-DD)与 primary_category(如 cs.LG),后两项拿不到时省略;categories(API 列出的全部分类,字符串数组,去重,每项至多 64 字符、至多 32 项)、comment(作者备注)与 journal_ref(期刊引用)取自 API,压成一行、去掉控制字符,至多 1000 字符,没有时省略;官方页截断且没有 ar5iv 时退出 10,两处都确定没有 HTML 时退出 20 | 15m | 3 |
 | arxiv-convert | cpu | original.md、figures.json、assets/;公式取 MathML alttext 写成 `$…$`/`$$…$$`,其中未转义的 `$`(`\text{}` 里的公式)依次换成 `\(`、`\)`,公式编号去掉 `$`,公式只在自己的定界符处结束;正文文字里的 `[`、`]`、`!` 一律转义,链接、图片与脚注只由 convert 写出,链接地址百分号编码;figures.json 见下 | 10m | 2 |
 | note | ai | note.md(读原文与全部关键帧或 figures.json 里的全部论文图,只受单次请求的上限约束;中文输出,只有正文,可用 `![描述](assets/<basename>)` 插图);单次调用超时 1800s | 35m | 1 |
@@ -106,6 +106,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 - video-fetch 的下载:
   - yt-dlp 把视频下到 FLORI_CACHE_DIR,输出模板 `video.%(format_id)s.%(ext)s`,靠它默认的 `.part` 续传;`--ignore-config`,不加 `--no-continue` 或 `--no-part`。超时、取消或失败时缓存原样保留,下次尝试与手动重试从断点接着下;已下完的视频不再下载。
   - 例外是被打断的 remux:`--remux-video` 让 ffmpeg 直接写 `<文件名>.mp4`,写完 yt-dlp 才删原文件 `<文件名>.<ext>`;SIGTERM 下 ffmpeg 会把截断的 mp4 收尾成能播放的短文件,下次 yt-dlp 会当它已下完。所以每次尝试开始先删掉旁边还有同名原文件的 mp4,由 yt-dlp 从原文件重新 remux。合并先写 `.temp.mp4` 再改名,不受影响。
+  - 格式两个平台相同:`-f "bv*[vcodec!~='(?i)^([hx]265|he?vc?|dvh)']+ba/bv*+ba/b" -S res:2160,fps,hdr:sdr,vcodec:h264,lang,acodec:aac`,yt-dlp 的字段语义见 `src/video/fetch.rs` 的 `VIDEO_SORT`。先取不超过 2160p 的最高分辨率(按短边算,竖屏同样适用),8K 在 NAS 上每秒只解码 30–40 帧,一小时 60 帧的 8K 光扫描就超过 video-frames 的 2h;再取最高帧率;然后 SDR 先于 HDR,不做色调映射时从 HDR 截的关键帧发灰;分辨率与帧率都相同时 h264 先于 VP9,VP9 先于 AV1。HEVC(含杜比视界)只在没有别的视频格式时才用:Linux 的 Chrome 与许多 Android 设备放不了,为此宁可放弃只有 HEVC 才有的更高分辨率。音频先取原声语言的轨,再取 AAC。合并与转封装都输出 mp4。
   - 文件名带 format_id:合并下载的分片本来就带 `.f<format_id>`,单一格式却直接写 `<文件名>.part`,文件名不带 format_id 时站点换了格式也会接着上一个格式的残片下。
   - 整步成功时才把视频移成 out_dir 的 video.mp4,并清空缓存目录(含别的格式的残片);字幕仍直接写 out_dir,每次尝试重下。
   - 视频下完后 job.log 记一行大小、用时与平均速度(十进制单位),如 `video-fetch: 31.2 MB in 1384 s (22.5 KB/s)`。续传时速度只算本次下载的字节,写成 `video-fetch: 31.2 MB, 19.2 MB of it in 853 s (22.5 KB/s), the rest from earlier attempts`;此前的字节取尝试开始时缓存里同一格式的文件大小之和。
