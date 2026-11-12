@@ -882,6 +882,38 @@ async fn system_reports_the_instance_without_its_secrets() {
     for secret in [cfg.web_password.as_str(), "proxy.invalid"] {
         assert!(!text.contains(secret), "{secret}");
     }
+    // With the login state and the token set, the answer says so and still holds neither.
+    let mut with_secrets = (**cfg).clone();
+    with_secrets.bili_sessdata = Some("sessdata-sentinel".into());
+    with_secrets.claude_oauth_token = Some("oauth-sentinel".into());
+    let state = AppState {
+        config: Arc::new(with_secrets),
+        ..app.state.clone()
+    };
+    let request = HttpRequest::get("/api/system")
+        .header(AUTHORIZATION, auth())
+        .body(AxumBody::empty())
+        .unwrap();
+    let response = router(state).oneshot(request).await.unwrap();
+    let text = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(text.contains(r#""bili_login":true"#), "{text}");
+    for secret in [
+        "sessdata-sentinel",
+        "oauth-sentinel",
+        "test-only",
+        "proxy.invalid",
+    ] {
+        assert!(!text.contains(secret), "{secret}");
+    }
     // Like the rest of /api, not for anonymous readers.
     let anonymous = HttpRequest::get("/api/system")
         .body(AxumBody::empty())
