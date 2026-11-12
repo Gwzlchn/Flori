@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-import { duration, fileText, fileUrl, jobStatusText, platformText, shortTime, type Schemas } from "../client";
+import { bytes, duration, fileText, fileUrl, jobStatusText, platformText, shortTime, type Schemas } from "../client";
 
 const props = defineProps<{
   detail: Schemas["JobDetail"]; domain: string | undefined; collection: string | undefined; spent: number;
@@ -36,18 +36,6 @@ function number(meta: Meta, key: string): number | undefined {
 function list(meta: Meta, key: string): string[] {
   const value = meta[key];
   return Array.isArray(value) ? value.filter((item) => item.trim()) : [];
-}
-
-function bytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = size / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
 }
 
 function language(code: string | undefined, probability?: number): string | undefined {

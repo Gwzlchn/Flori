@@ -67,3 +67,15 @@ export function duration(total: number): string {
   if (minutes < 60) return `${minutes} 分 ${total % 60} 秒`;
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 }
+
+export function bytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = size / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
+}

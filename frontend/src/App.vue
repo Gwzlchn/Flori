@@ -2,13 +2,14 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { api, isActive, type Schemas } from "./client";
+import AboutPage from "./components/AboutPage.vue";
 import FeedPanel from "./components/FeedPanel.vue";
 import JobDetail from "./components/JobDetail.vue";
 import NoteShelf from "./components/NoteShelf.vue";
 import SubmitBar from "./components/SubmitBar.vue";
 import TaxonomyPanel from "./components/TaxonomyPanel.vue";
 
-type Route = { view: "home" | "taxonomy" | "missing" } | { view: "job"; id: number; tab: string } | { view: "feed"; id: number };
+type Route = { view: "home" | "taxonomy" | "about" | "missing" } | { view: "job"; id: number; tab: string } | { view: "feed"; id: number };
 
 const path = ref(location.pathname);
 const ready = ref(false);
@@ -25,6 +26,7 @@ const route = computed((): Route => {
   const feed = /^\/collections\/(\d+)\/feed\/?$/.exec(path.value);
   if (feed) return { view: "feed", id: Number(feed[1]) };
   if (path.value === "/") return { view: "home" };
+  if (path.value === "/about") return { view: "about" };
   return { view: path.value === "/taxonomy" ? "taxonomy" : "missing" };
 });
 
@@ -85,6 +87,7 @@ onBeforeUnmount(() => {
       <nav class="nav">
         <a href="/" :class="{ on: route.view === 'home' || route.view === 'job' }">笔记</a>
         <a href="/taxonomy" :class="{ on: route.view === 'taxonomy' || route.view === 'feed' }">领域与订阅</a>
+        <a href="/about" :class="{ on: route.view === 'about' }">关于</a>
       </nav>
       <small v-if="version" class="meta">v{{ version }}</small>
     </header>
@@ -96,6 +99,7 @@ onBeforeUnmount(() => {
       <JobDetail v-else-if="route.view === 'job'" :id="route.id" :key="route.id" :tab="route.tab" :domains :collections />
       <TaxonomyPanel v-else-if="route.view === 'taxonomy'" :domains :collections @changed="loadTaxonomy" />
       <FeedPanel v-else-if="route.view === 'feed'" :id="route.id" :key="route.id" :domains :collections @changed="loadTaxonomy" />
+      <AboutPage v-else-if="route.view === 'about'" />
       <p v-else class="empty">页面不存在。<a href="/">回到笔记列表</a></p>
     </main>
   </div>
