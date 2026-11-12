@@ -32,7 +32,7 @@ openapi:
 
 # Images. Docker Hub is unreachable through the NAS proxy, so base images must be local and
 # downloads inside the build go through the host proxy.
-proxy := env("FLORI_BUILD_PROXY", "http://127.0.0.1:11081")
+proxy := env("FLORI_BUILD_PROXY", "http://127.0.0.1:7897")
 docker_build := "docker build --pull=false --network host --build-arg http_proxy=" + proxy + " --build-arg https_proxy=" + proxy + " --build-arg HTTP_PROXY=" + proxy + " --build-arg HTTPS_PROXY=" + proxy + " -f docker/flori.Dockerfile"
 
 # Tools image without the application; `step` and `dev` mount host builds into it.
