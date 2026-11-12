@@ -104,9 +104,8 @@ input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var
 .grid thead th { color: var(--muted); font-size: 13px; font-weight: 500; }
 .grid tbody th { color: var(--ink); white-space: nowrap; }
 .grid code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
-.excluded { margin: 0 0 10px; padding: 0; list-style: none; }
-.excluded li { display: grid; grid-template-columns: minmax(0, 17em) minmax(0, 1fr); gap: 2px 14px; padding: 6px 0; border-top: 1px solid var(--line-soft); }
-.excluded b { color: var(--ink); font-weight: 600; }
+.excluded { max-width: 46em; margin: 0 0 10px; padding-left: 1.3em; }
+.excluded li { padding: 2px 0; }
 .system { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 18px 32px; }
 .system h3 { margin-bottom: 4px; }
 .system .meta { margin-top: 6px; }
@@ -187,5 +186,4 @@ details[open] > .fold { margin-bottom: 10px; }
   .shelf-group { grid-template-columns: 1fr; }
   .shelf-group h4 { position: static; padding: 6px 0 0; }
   .note-row { padding: 8px 0; }
-  .excluded li { grid-template-columns: 1fr; }
 }

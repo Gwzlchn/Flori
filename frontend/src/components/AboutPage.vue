@@ -3,26 +3,26 @@ import { computed, onMounted, ref } from "vue";
 
 import { api, bytes, failure, type Schemas } from "../client";
 
-// The three levels and the not-doing list restate docs/scope.md and the vault layout of
-// contract 2; those two stay the authority, this page only shows them where the user is.
+// The three levels follow the vault layout of contract 2. The not-doing list carries only the
+// item names of docs/scope.md; the reasons and the conditions to reconsider live there alone.
 const levels = [
   { name: "领域", what: "一级分类,投递时必选", folder: "<vault>/<领域>/" },
   { name: "集合", what: "领域内的专题或一个订阅来源,可以不选", folder: "<领域>/<集合>/,没选时是 unsorted/" },
   { name: "笔记", what: "一次成功的任务发布出的自包含文件夹", folder: "<集合>/<日期>-<bili|yt|arxiv>-<来源 ID>/" },
 ];
 const excluded = [
-  ["PDF、网页文章、音频、本地视频", "每种来源都是一条要长期维护的抓取与转换链"],
-  ["站内搜索", "Obsidian 搜索已覆盖,网页再做一份是两处真相"],
-  ["标签、阅读状态、评分的网页管理", "这些属于笔记本身,在 Obsidian 里改"],
-  ["术语与概念库、知识图谱、主题页", "需要人工审阅队列,笔记少时跨篇关联很稀"],
-  ["站内问答、周报", "外部 agent 直接读 vault 目录就能做"],
-  ["SRS 与复习排期", "调度交给 Obsidian 的复习插件"],
-  ["MCP", "vault 是普通目录,agent 不需要专门协议"],
-  ["AI 评审打分", "分数不驱动任何动作"],
-  ["可编辑的设置页、提示词在线编辑", "配置只走环境变量,提示词随代码走"],
-  ["多 worker、定时订阅、声明式流水线", "两条固定流水线、单机单人用不上"],
-  ["导出命令、静态站生成", "vault 目录已经是导出物"],
-  ["vault 备份与快照", "用户改动丢失可接受,机器生成的部分可由任务目录重建"],
+  "PDF、网页文章、音频、本地视频",
+  "站内搜索",
+  "标签、阅读状态、评分的网页管理",
+  "术语与概念库、知识图谱、主题页",
+  "站内问答、周报",
+  "SRS 与复习排期",
+  "MCP",
+  "AI 评审打分",
+  "可编辑的设置页、提示词在线编辑",
+  "多 worker、定时订阅、声明式流水线",
+  "导出命令、静态站生成",
+  "vault 备份与快照",
 ];
 
 const info = ref<Schemas["SystemInfo"]>();
@@ -91,12 +91,11 @@ onMounted(async () => {
           </tbody>
         </table>
       </div>
-      <p class="meta">网页负责投递、订阅、按领域和集合列出笔记、预览与处理过程;阅读、编辑、搜索、标签和复习在 Obsidian 里做。</p>
       <h2>不做什么</h2>
       <ul class="excluded">
-        <li v-for="[what, why] in excluded" :key="what"><b>{{ what }}</b><span class="meta">{{ why }}</span></li>
+        <li v-for="what in excluded" :key="what">{{ what }}</li>
       </ul>
-      <p class="meta">每一项重新考虑的条件写在代码仓库的 docs/scope.md,那里是范围的唯一权威。</p>
+      <p class="meta">每一项的原因与重新考虑的条件写在代码仓库的 docs/scope.md,那里是范围的唯一权威。</p>
     </section>
 
     <section class="card">
