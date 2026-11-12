@@ -3,7 +3,7 @@ use std::fs;
 use super::*;
 use crate::{
     ai::tests::{Fixture, job_spec},
-    pipeline::{AiTool, Pipeline, StepExit, TranslateMode},
+    pipeline::{AiTool, Pipeline, Platform, StepExit, TranslateMode},
 };
 
 #[test]
@@ -227,6 +227,7 @@ status: "unread"
 language: "en"
 translated: true
 tags: ["flori","arxiv","ml"]
+job_id: "arxiv-2401.04088-805ac6"
 job_url: "http://nas.lan:8780/jobs/12"
 ai_tool: "claude"
 ai_model: "model-note"
@@ -267,10 +268,19 @@ fn republishing_the_same_job_is_a_no_op_and_others_get_20() {
     let manifest = pipeline::read_manifest(&fx.job_dir().join("steps/05-publish.tmp")).unwrap();
     assert_eq!(manifest.meta["vault_path"], MetaValue::Text(FOLDER.into()));
 
-    // Another job for the same source in the same place must not touch it.
+    // The key holds when the address and the integer id change, as after a wiped database.
+    let mut job = job_spec(Pipeline::Arxiv, AiTool::Claude);
+    job.public_url = "https://203.0.113.7:8792".into();
+    job.job_id = 1;
+    fx.write_job(&job);
+    publish_into(&fx, vault.path()).unwrap();
+    assert_eq!(fs::read_to_string(&note).unwrap(), before);
+
+    // Another job for the same source in the same place must not touch it, even one that got
+    // the same integer id and address.
     let other = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
     let mut job = job_spec(Pipeline::Arxiv, AiTool::Claude);
-    job.job_id = 13;
+    job.created = "2026-11-08T10:00:01+08:00".into();
     other.write_job(&job);
     arxiv_job(&other, true);
     let failure = publish_into(&other, vault.path()).unwrap_err();
@@ -281,6 +291,36 @@ fn republishing_the_same_job_is_a_no_op_and_others_get_20() {
         failure.message
     );
     assert_eq!(fs::read_to_string(&note).unwrap(), before);
+}
+
+#[test]
+fn notes_without_job_id_are_recognized_by_job_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let note = dir.path().join("n.md");
+    let (key, url) = ("yt-abc-123456", "http://nas.lan:8780/jobs/12");
+    let cases = [
+        ("---\njob_url: \"http://nas.lan:8780/jobs/12\"\n---\n", true),
+        (
+            "---\njob_url: \"http://nas.lan:8780/jobs/13\"\n---\n",
+            false,
+        ),
+        // job_id decides once it is there.
+        (
+            "---\njob_id: \"yt-abc-123456\"\njob_url: \"http://other/jobs/1\"\n---\n",
+            true,
+        ),
+        (
+            "---\njob_id: \"yt-abc-654321\"\njob_url: \"http://nas.lan:8780/jobs/12\"\n---\n",
+            false,
+        ),
+        // Only frontmatter counts.
+        ("---\ntitle: \"t\"\n---\njob_id: \"yt-abc-123456\"\n", false),
+        ("job_id: \"yt-abc-123456\"\n", false),
+    ];
+    for (text, want) in cases {
+        fs::write(&note, text).unwrap();
+        assert_eq!(published_by(&note, key, url), want, "{text}");
+    }
 }
 
 #[test]
@@ -436,6 +476,11 @@ fn video_uses_translated_transcript_and_collection() {
     assert!(note.contains("\nlanguage: \"en\"\n"), "{note}");
     assert!(note.contains("\ncollection: \"talks\"\n"), "{note}");
     assert!(note.contains("\nai_tool: \"codex\"\n"), "{note}");
+    // Hashed over created as job.json spells it, here in UTC.
+    assert!(
+        note.contains("\njob_id: \"bili-BV1GJ411x7h7-531bee\"\n"),
+        "{note}"
+    );
     assert!(
         note.contains("\ntags: [\"flori\",\"bilibili\",\"ml\"]\n"),
         "{note}"

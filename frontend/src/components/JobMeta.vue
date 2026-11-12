@@ -119,7 +119,8 @@ const processing = computed((): Row[] => {
     ai.tool, `笔记 ${ai.model_note}`, job.translate === "auto" ? `翻译 ${ai.model_translate}` : undefined,
   ].filter(Boolean).join(" · ");
   return rows([
-    ["任务 ID", `#${job.id}`],
+    ["任务序号", `#${job.id}`],
+    ["任务 ID", job.job_key],
     ["状态", jobStatusText[job.status], { pill: `state-${job.status}` }],
     ["领域", props.domain],
     ["集合", props.collection],

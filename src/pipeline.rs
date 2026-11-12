@@ -10,6 +10,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 pub const JOB_FILE: &str = "job.json";
@@ -294,6 +295,38 @@ pub struct AiSpec {
     pub model_note: String,
     pub model_translate: String,
     pub cli_version: String,
+}
+
+impl Platform {
+    /// The serialized value, as in job.json and the database.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Platform::Bilibili => "bilibili",
+            Platform::Youtube => "youtube",
+            Platform::Arxiv => "arxiv",
+        }
+    }
+}
+
+/// `<bili|yt|arxiv>-<source id>`, the tail of the vault folder name and the head of the job key.
+/// Old-style arXiv ids carry a `/`, which a file name cannot.
+pub fn source_slug(platform: Platform, source_id: &str) -> String {
+    let prefix = match platform {
+        Platform::Bilibili => "bili",
+        Platform::Youtube => "yt",
+        Platform::Arxiv => "arxiv",
+    };
+    format!("{prefix}-{}", source_id.replace('/', "_"))
+}
+
+/// The job's string id: `<slug>-<first 6 hex of sha256("<platform>:<source_id>:<created>")>`,
+/// e.g. `yt-dQw4w9WgXcQ-3f9a2c`. All three inputs are in job.json and never change, so the key
+/// survives a wiped database, where the integer id starts over. `created` is hashed as written,
+/// not reparsed: another spelling of the same instant would give another key.
+pub fn job_key(platform: Platform, source_id: &str, created: &str) -> String {
+    let digest = Sha256::digest(format!("{}:{source_id}:{created}", platform.as_str()));
+    let hash: String = digest[..3].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{}-{hash}", source_slug(platform, source_id))
 }
 
 /// `manifest.json` in every finished step directory.

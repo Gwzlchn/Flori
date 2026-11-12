@@ -360,8 +360,17 @@ export interface components {
             current_step?: null | components["schemas"]["StepName"];
             /** Format: int64 */
             domain_id: number;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Integer primary key: the `{id}` of every job endpoint and the name of `jobs/<id>/`.
+             */
             id: number;
+            /**
+             * @description String id written to the note's frontmatter as `job_id`:
+             *     `<bili|yt|arxiv>-<source id>-<6 hex>`. Derived from platform, source_id and created, not
+             *     stored; no endpoint takes it.
+             */
+            job_key: string;
             pipeline: components["schemas"]["Pipeline"];
             platform: components["schemas"]["Platform"];
             source_id: string;

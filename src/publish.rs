@@ -11,9 +11,7 @@ use serde_json::{Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339, macros::offset};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::pipeline::{
-    self, JobSpec, Manifest, MetaValue, Platform, StepFailure, StepName, StepResult,
-};
+use crate::pipeline::{self, JobSpec, Manifest, MetaValue, StepFailure, StepName, StepResult};
 
 /// Logical names copied into the vault as `<name>.md`. The note becomes `<title>.md`.
 const COPIED: [&str; 3] = ["transcript", "original", "translation"];
@@ -85,19 +83,21 @@ pub(crate) fn publish(job_dir: &Path, out_dir: &Path, vault_dir: &Path) -> StepR
         job.public_url.trim_end_matches('/'),
         job.job_id
     );
+    let job_key = pipeline::job_key(job.source.platform, &job.source.id, &job.created);
     let target = vault_dir.join(&rel);
     let tmp = job_dir.join("publish.tmp");
     remove_dir_if_exists(&tmp)?;
     if target.exists() {
         // A crash after rename leaves our folder in place; anything else is never touched.
-        if !published_by(&target.join(&note_file), &job_url) {
+        if !published_by(&target.join(&note_file), &job_key, &job_url) {
             return Err(StepFailure::permanent(format!("{rel} already exists")));
         }
     } else {
         fs::create_dir(&tmp)?;
         let mut aliases = vec![title.clone()];
         aliases.extend(original_title.filter(|original| *original != title));
-        let fields = frontmatter(&job, &aliases, source, &language, translated, &job_url);
+        let ids = (job_key.as_str(), job_url.as_str());
+        let fields = frontmatter(&job, &aliases, source, &language, translated, ids);
         fs::write(tmp.join(&note_file), fields + &fs::read_to_string(note)?)?;
         for name in COPIED {
             if let Some(src) = files.get(name) {
@@ -132,12 +132,8 @@ fn vault_path(job: &JobSpec) -> Result<String, StepFailure> {
     let created = OffsetDateTime::parse(&job.created, &Rfc3339)
         .map_err(|e| StepFailure::permanent(format!("created {:?}: {e}", job.created)))?;
     let date = created.to_offset(offset!(+8)).date();
-    let (prefix, id) = match job.source.platform {
-        Platform::Bilibili => ("bili", job.source.id.clone()),
-        Platform::Youtube => ("yt", job.source.id.clone()),
-        Platform::Arxiv => ("arxiv", job.source.id.replace('/', "_")),
-    };
-    let folder = format!("{date}-{prefix}-{id}");
+    let slug = pipeline::source_slug(job.source.platform, &job.source.id);
+    let folder = format!("{date}-{slug}");
     let collection = job.collection.as_deref().unwrap_or("unsorted");
     let parts = [job.vault_name.as_str(), &job.domain, collection, &folder];
     for part in parts {
@@ -251,7 +247,7 @@ fn frontmatter(
     source: Vec<(&str, Value)>,
     language: &str,
     translated: bool,
-    job_url: &str,
+    (job_key, job_url): (&str, &str),
 ) -> String {
     let platform = json!(job.source.platform);
     let mut fields: Vec<(&str, Value)> = vec![
@@ -270,6 +266,7 @@ fn frontmatter(
         ("language", json!(language)),
         ("translated", json!(translated)),
         ("tags", json!(["flori", platform, job.domain])),
+        ("job_id", json!(job_key)),
         ("job_url", json!(job_url)),
         ("ai_tool", json!(job.ai.tool)),
         ("ai_model", json!(job.ai.model_note)),
@@ -281,8 +278,10 @@ fn frontmatter(
     out + "---\n\n"
 }
 
-/// Whether the note at `path` has `job_url` in its frontmatter, i.e. this job published it.
-fn published_by(path: &Path, job_url: &str) -> bool {
+/// Whether this job published the note at `path`: its frontmatter `job_id` is the job key. The
+/// key does not depend on FLORI_PUBLIC_URL or the integer id, both of which can change under a
+/// published note. Notes from before `job_id` have only `job_url` to compare.
+fn published_by(path: &Path, job_key: &str, job_url: &str) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
@@ -290,10 +289,17 @@ fn published_by(path: &Path, job_url: &str) -> bool {
     if lines.next() != Some("---") {
         return false;
     }
-    lines
-        .take_while(|line| *line != "---")
-        .filter_map(|line| line.strip_prefix("job_url: "))
-        .any(|value| serde_json::from_str::<String>(value).is_ok_and(|url| url == job_url))
+    let fields: Vec<&str> = lines.take_while(|line| *line != "---").collect();
+    let field = |key: &str| {
+        fields
+            .iter()
+            .find_map(|line| line.strip_prefix(key)?.strip_prefix(": "))
+            .and_then(|value| serde_json::from_str::<String>(value).ok())
+    };
+    match field("job_id") {
+        Some(id) => id == job_key,
+        None => field("job_url").is_some_and(|url| url == job_url),
+    }
 }
 
 fn remove_dir_if_exists(dir: &Path) -> io::Result<()> {

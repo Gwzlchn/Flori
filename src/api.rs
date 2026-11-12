@@ -249,7 +249,13 @@ pub struct JobsQuery {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct JobSummary {
+    /// Integer primary key: the `{id}` of every job endpoint and the name of `jobs/<id>/`.
     pub id: i64,
+    /// String id written to the note's frontmatter as `job_id`:
+    /// `<bili|yt|arxiv>-<source id>-<6 hex>`. Derived from platform, source_id and created, not
+    /// stored; no endpoint takes it.
+    #[sqlx(skip)]
+    pub job_key: String,
     pub pipeline: Pipeline,
     pub platform: Platform,
     pub source_id: String,

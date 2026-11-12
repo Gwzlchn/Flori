@@ -54,6 +54,41 @@ fn ai_steps_run_once_and_arxiv_runs_in_python() {
 }
 
 #[test]
+fn job_keys_follow_the_vault_prefix_and_hash_job_json_values() {
+    let created = "2026-11-08T10:00:00+08:00";
+    let cases = [
+        (Platform::Youtube, "dQw4w9WgXcQ", "yt-dQw4w9WgXcQ-edaaa1"),
+        (Platform::Arxiv, "2401.04088", "arxiv-2401.04088-805ac6"),
+        // The hash covers the id as job.json has it, with its slash.
+        (
+            Platform::Arxiv,
+            "hep-th/9711200",
+            "arxiv-hep-th_9711200-0c6cd0",
+        ),
+    ];
+    for (platform, id, want) in cases {
+        assert_eq!(job_key(platform, id, created), want);
+        assert_eq!(
+            serde_json::to_string(&platform).unwrap(),
+            format!("\"{}\"", platform.as_str())
+        );
+    }
+    // The same source submitted again, or to another domain later, is another job.
+    assert_ne!(
+        job_key(
+            Platform::Youtube,
+            "dQw4w9WgXcQ",
+            "2026-11-08T10:00:01+08:00"
+        ),
+        "yt-dQw4w9WgXcQ-edaaa1"
+    );
+    assert_eq!(
+        job_key(Platform::Bilibili, "BV1GJ411x7h7", "2026-11-07T20:30:00Z"),
+        "bili-BV1GJ411x7h7-531bee"
+    );
+}
+
+#[test]
 fn step_names_round_trip() {
     for name in StepName::ALL {
         assert_eq!(name.as_str().parse::<StepName>(), Ok(name));

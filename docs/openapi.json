@@ -1280,6 +1280,7 @@
         "type": "object",
         "required": [
           "id",
+          "job_key",
           "pipeline",
           "platform",
           "source_id",
@@ -1326,7 +1327,12 @@
           },
           "id": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Integer primary key: the `{id}` of every job endpoint and the name of `jobs/<id>/`."
+          },
+          "job_key": {
+            "type": "string",
+            "description": "String id written to the note's frontmatter as `job_id`:\n`<bili|yt|arxiv>-<source id>-<6 hex>`. Derived from platform, source_id and created, not\nstored; no endpoint takes it."
           },
           "pipeline": {
             "$ref": "#/components/schemas/Pipeline"

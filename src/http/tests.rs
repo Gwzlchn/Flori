@@ -398,6 +398,16 @@ async fn duplicate_submissions_conflict_with_the_existing_job() {
             &json!("off")
         )
     );
+    // The string id is what publish computes from job.json alone; list and detail agree.
+    let id = job["id"].as_i64().unwrap();
+    let spec = read_job(&app.job_dir(id)).unwrap();
+    let key = crate::pipeline::job_key(spec.source.platform, &spec.source.id, &spec.created);
+    assert!(key.starts_with("arxiv-2401.12345-") && key.len() == "arxiv-2401.12345-".len() + 6);
+    assert_eq!(job["job_key"], json!(key));
+    let (_, detail) = app.get(&format!("/api/jobs/{id}")).await;
+    assert_eq!(detail["job"]["job_key"], json!(key));
+    let (_, list) = app.get("/api/jobs").await;
+    assert_eq!(list[0]["job_key"], json!(key));
     let (status, body) = app
         .post(
             "/api/jobs",

@@ -22,8 +22,8 @@ use crate::{
         StepStatus,
     },
     pipeline::{
-        AiSpec, JOB_FILE, JobSpec, Pipeline, Platform, Source, StepName, TranslateMode, parse_feed,
-        plan,
+        AiSpec, JOB_FILE, JobSpec, Pipeline, Platform, Source, StepName, TranslateMode, job_key,
+        parse_feed, plan,
     },
 };
 
@@ -208,12 +208,20 @@ const JOB: &str = "SELECT jobs.id, pipeline, platform, source_id, url, domain_id
     LEFT JOIN steps cur ON cur.job_id = jobs.id AND cur.seq = (SELECT min(seq) FROM steps \
     WHERE job_id = jobs.id AND status IN ('running', 'failed', 'canceled'))";
 
+/// `job_key` is not a column. The row's `created` is the string job.json got, so the key equals
+/// the one publish wrote.
+fn with_key(mut job: JobSummary) -> JobSummary {
+    job.job_key = job_key(job.platform, &job.source_id, &job.created);
+    job
+}
+
 pub async fn list_jobs(db: &SqlitePool, limit: u32) -> sqlx::Result<Vec<JobSummary>> {
     let sql = format!("{JOB} ORDER BY jobs.id DESC LIMIT ?");
-    sqlx::query_as(sqlx::AssertSqlSafe(sql))
+    let jobs: Vec<JobSummary> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(limit)
         .fetch_all(db)
-        .await
+        .await?;
+    Ok(jobs.into_iter().map(with_key).collect())
 }
 
 #[derive(sqlx::FromRow)]
@@ -233,7 +241,7 @@ pub async fn get_job(
         .bind(id)
         .fetch_optional(db)
         .await?;
-    Ok(row.map(|row| (row.job, row.vault_path)))
+    Ok(row.map(|row| (with_key(row.job), row.vault_path)))
 }
 
 async fn job_summary(db: &SqlitePool, id: i64) -> sqlx::Result<Result<JobSummary, ApiError>> {

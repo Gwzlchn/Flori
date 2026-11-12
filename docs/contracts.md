@@ -176,7 +176,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 
 - 日期取 job.json 的 created(+08:00),retry 不会换文件夹。arXiv 的 source_id 去掉版本号,`/` 换成 `_`,如 `hep-th_9711200`。
 - 主笔记用标题命名。标题清洗:NFC,去掉 `\/:*?"<>|#^[]` 与控制字符,压缩空白,去掉首尾的点(点开头在 Obsidian 里是隐藏文件),不超过 100 UTF-8 字节,截断不切开字符。清洗结果为空时用 source id;与 transcript、original、translation、assets 忽略大小写相同时,文件名为 `<结果> 笔记.md`。
-- 发布:删除残留的 publish.tmp 后重新组装;`mkdir -p` 父目录后 rename 到最终路径。目标已存在且主笔记 frontmatter 的 job_url 指向本 job → 视为上次已发布,补写 manifest 后退出 0;其它"已存在"退出 20。同一文件系统内 rename 是原子的。
+- 发布:删除残留的 publish.tmp 后重新组装;`mkdir -p` 父目录后 rename 到最终路径。目标已存在且主笔记 frontmatter 的 job_id 等于本 job 的字符串 id → 视为上次已发布,补写 manifest 后退出 0;frontmatter 没有 job_id 的旧笔记改比 job_url;其它"已存在"退出 20。同一文件系统内 rename 是原子的。
 - 文件夹名建好后不能改,因为 Remotely Save 把改名当成删除加新增。服务端从不修改或删除 vault 里已有的内容。
 - 视频文件不进 vault,留在 jobs/<id>/,网页详情页可播放。
 
@@ -192,9 +192,11 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | status | unread |
 | language、translated | 取 translate 的 meta;未排 translate 时为 unknown、false |
 | tags | [flori, <platform>, <domain>] |
-| job_url | $FLORI_PUBLIC_URL/jobs/<id> |
+| job_id | job 的字符串 id,见下 |
+| job_url | $FLORI_PUBLIC_URL/jobs/<整数 id>;只作跳回网页的链接,地址或整数 id 变了不影响判重 |
 | ai_tool、ai_model | 生成笔记所用 |
 
+- job 的字符串 id:`<bili|yt|arxiv>-<source_id>-<短 hash>`,如 `yt-dQw4w9WgXcQ-edaaa1`;前缀与 source_id 的写法同文件夹名。短 hash 是 sha256("<platform>:<source_id>:<created>") 的前 6 位小写十六进制,三个值取 job.json 的 source.platform、source.id(不换 `/`)与 created 的原字符串,所以只凭 job.json 就能重算(`pipeline::job_key`,只定义一次)。它与 job.json 的 job_id 不是一回事:后者是整数主键,即 jobs/<n>/ 目录名与 /jobs/<n> 地址,清库后从 1 重来;字符串 id 不随之变。
 - 来源字段紧跟 source_id,值缺失或为空时不写该字段。文件夹日期与 created 仍取 job 创建时间,不取 published。
 
 ## 契约 3:HTTP API
@@ -209,7 +211,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | GET /api/collections/{id}/feed?limit=30 | 同步调用 feed.py(limit 1–100,超时 60s),每条附 job:{id,status}\|null;未绑定 400 invalid_request;已有刷新在跑或上次刷新开始不到 10s(失败或中途断开的刷新同样计时)409;上游失败 502 upstream,message 取 feed.py stderr 最后一行 |
 | POST /api/collections/{id}/feed/jobs | {items:[{platform,source_id}], translate?};每批 1–20 条,超出 400 invalid_request;服务端校验 ID 并自己拼 URL;一个事务内插入;返回 {created, skipped},每项带 job |
 | POST /api/jobs | {url, domain_id, collection_id?, translate?};识别不了 400 invalid_url;领域或集合不存在 404;重复 409 conflict 并带 job_id;成功 201 |
-| GET /api/jobs?limit= | 按 id 倒序,默认 200 条;筛选在前端做 |
+| GET /api/jobs?limit= | 按 id 倒序,默认 200 条;筛选在前端做。每项的 id 是整数主键,用于所有 /api/jobs/{id} 端点;job_key 是契约 2 的字符串 id(frontmatter 的 job_id),由 platform、source_id、created 现算,不建列,没有端点接受它 |
 | GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url、ai(job.json 的 ai,读不到时为 null);files 是各步 manifest.files 按 publish 规则合并的结果;每步带 meta(成功步骤的 manifest.meta 原样,其余为空对象)与 files(本步自己的 manifest.files,不受后续步骤覆盖,路径相对 job 目录),以及 manifest 的 skipped_reason,translate 给中文视频加了标点时另有 punctuation{sections, kept_original, corrected, reverted}(早于同音纠错的任务后两项为 0);每步另带 ai_calls[{name, attempt, index, files}],即 ai/ 里本步各次尝试的调用记录,按尝试与序号排序,files 是 job 内相对路径,按 prompt.md、call.json、out.json\|out.txt、err.txt 排列,失败的步骤也列出;记录里是不可信的转写与模型文字,前端只按纯文本显示,经 files 端点按需读取;obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB;单行超过上限时按字符边界切开)与 next_offset;offset 超出文件末尾 400 invalid_request;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
