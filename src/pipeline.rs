@@ -74,6 +74,70 @@ pub enum StepName {
     Publish,
 }
 
+/// The prompts AI steps send, each a file in prompts/ and in `jobs/<id>/prompts/`. note sends
+/// note-video or note-arxiv, followed by note-images when images go along; translate sends
+/// translate, or punctuate for a Chinese video.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    ToSchema,
+    sqlx::Type,
+)]
+#[serde(rename_all = "kebab-case")]
+#[sqlx(rename_all = "kebab-case")]
+pub enum PromptName {
+    NoteVideo,
+    NoteArxiv,
+    NoteImages,
+    Translate,
+    Punctuate,
+}
+
+impl PromptName {
+    pub const ALL: [PromptName; 5] = [
+        PromptName::NoteVideo,
+        PromptName::NoteArxiv,
+        PromptName::NoteImages,
+        PromptName::Translate,
+        PromptName::Punctuate,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PromptName::NoteVideo => "note-video",
+            PromptName::NoteArxiv => "note-arxiv",
+            PromptName::NoteImages => "note-images",
+            PromptName::Translate => "translate",
+            PromptName::Punctuate => "punctuate",
+        }
+    }
+}
+
+impl fmt::Display for PromptName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for PromptName {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        PromptName::ALL
+            .into_iter()
+            .find(|name| name.as_str() == s)
+            .ok_or_else(|| format!("unknown prompt {s:?}"))
+    }
+}
+
 /// Global limit a step waits on. All steps share Semaphore(2); whisper and ai also hold
 /// their own Semaphore(1). Local steps skip the global limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

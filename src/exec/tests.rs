@@ -4,7 +4,7 @@ use super::*;
 use crate::db::job_dir;
 use crate::{
     api::JobSummary,
-    pipeline::{TranslateMode, parse_source},
+    pipeline::{PromptName, TranslateMode, parse_source},
 };
 
 /// Test configuration: built-in steps run tests/fake/step, Python steps tests/fake/steps.
@@ -323,6 +323,7 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
         "DISABLE_AUTOUPDATER",
         "DISABLE_UPDATES",
         "FLORI_AI_LOG_DIR",
+        "FLORI_PROMPTS_DIR",
         "HTTPS_PROXY",
         "HTTP_PROXY",
     ];
@@ -346,8 +347,101 @@ async fn steps_get_only_whitelisted_env_and_outputs_reach_the_job() {
         let env = fs::read_to_string(dir.join(format!("fake/{step}.env"))).unwrap();
         let ai_log = format!("FLORI_AI_LOG_DIR={}\n", dir.join("ai").display());
         assert!(env.contains(&ai_log), "{step}: {env}");
+        let prompts = format!("FLORI_PROMPTS_DIR={}\n", dir.join("prompts").display());
+        assert!(env.contains(&prompts), "{step}: {env}");
     }
     assert!(dir.join("ai").is_dir());
+}
+
+/// What one attempt of an AI step found in FLORI_PROMPTS_DIR, by file name.
+fn prompt_files(dir: &Path, step: &str, attempt: u32) -> BTreeMap<String, String> {
+    let copy = dir.join(format!("fake/{step}.prompts-{attempt}"));
+    fs::read_dir(&copy)
+        .unwrap_or_else(|e| panic!("{}: {e}", copy.display()))
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, fs::read_to_string(&path).unwrap())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn ai_steps_get_the_prompts_stored_when_each_attempt_starts() {
+    let w = world().await;
+    let id = w.job(YT, TranslateMode::Auto).await;
+    let other = db::create_domain(&w.db, "数学").await.unwrap().unwrap().id;
+    let set = |name, domain, text: Option<&'static str>| {
+        let db = w.db.clone();
+        async move {
+            db::set_prompt(&db, name, domain, text)
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+    set(PromptName::NoteVideo, None, Some("自定义笔记提示词")).await;
+    set(
+        PromptName::Translate,
+        Some(w.domain_id),
+        Some("术语保留英文。"),
+    )
+    .await;
+    set(PromptName::NoteVideo, Some(other), Some("别的领域")).await;
+    fake(&w.config, id, "translate", "20 0");
+    let exec = w.start().await;
+    wait_status(&w.db, id, JobStatus::Failed).await;
+    let dir = job_dir(&w.config.data_dir, id);
+    let note = prompt_files(&dir, "note", 1);
+    let names: Vec<&str> = note.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "note-arxiv.md",
+            "note-images.md",
+            "note-video.md",
+            "punctuate.md",
+            "translate.domain.md",
+            "translate.md"
+        ]
+    );
+    assert_eq!(note["note-video.md"], "自定义笔记提示词");
+    assert_eq!(
+        note["note-arxiv.md"],
+        prompts::builtin(PromptName::NoteArxiv)
+    );
+    assert_eq!(
+        note["translate.domain.md"],
+        "## 领域要求(ml)\n\n术语保留英文。\n"
+    );
+    assert_eq!(prompt_files(&dir, "translate", 1), note);
+
+    // Edits made before a retry reach it; nothing of the previous attempt stays behind.
+    set(PromptName::NoteVideo, None, None).await;
+    set(PromptName::Translate, Some(w.domain_id), None).await;
+    set(
+        PromptName::Punctuate,
+        Some(w.domain_id),
+        Some("保留口头禅。"),
+    )
+    .await;
+    db::retry_job(&w.db, id).await.unwrap().unwrap();
+    exec.wake();
+    wait_status(&w.db, id, JobStatus::Succeeded).await;
+    let retried = prompt_files(&dir, "translate", 2);
+    assert_eq!(
+        retried["note-video.md"],
+        prompts::builtin(PromptName::NoteVideo)
+    );
+    assert!(!retried.contains_key("translate.domain.md"));
+    assert_eq!(
+        retried["punctuate.domain.md"],
+        "## 领域要求(ml)\n\n保留口头禅。\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("prompts/punctuate.domain.md")).unwrap(),
+        retried["punctuate.domain.md"]
+    );
 }
 
 /// YouTube's video-fetch takes FLORI_VIDEO_PROXY, or FLORI_PROXY without it; note and translate

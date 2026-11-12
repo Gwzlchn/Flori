@@ -11,7 +11,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::pipeline::{AiSpec, FeedKind, MetaValue, Pipeline, Platform, StepName, TranslateMode};
+use crate::pipeline::{
+    AiSpec, FeedKind, MetaValue, Pipeline, Platform, PromptName, StepName, TranslateMode,
+};
 
 /// Only the drift test builds the document; the server never serves it.
 #[cfg(test)]
@@ -39,6 +41,11 @@ use crate::pipeline::{AiSpec, FeedKind, MetaValue, Pipeline, Platform, StepName,
         crate::http::retry_job,
         crate::http::cancel_job,
         crate::http::get_file,
+        crate::http::list_prompts,
+        crate::http::set_prompt,
+        crate::http::reset_prompt,
+        crate::http::list_domain_prompts,
+        crate::http::set_domain_prompt,
         crate::http::health,
         crate::system::get_system,
     )
@@ -389,6 +396,41 @@ pub struct LogChunk {
     /// Whole UTF-8 lines starting at `offset`.
     pub text: String,
     pub next_offset: u64,
+}
+
+/// A prompt AI steps send and the text a step that starts now uses for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PromptInfo {
+    pub name: PromptName,
+    /// What pages call it, e.g. 视频笔记.
+    pub label: String,
+    /// The built-in text from prompts/.
+    pub default_text: String,
+    /// The override when there is one, else the built-in text.
+    pub text: String,
+    /// Whether an override is stored.
+    pub customized: bool,
+}
+
+/// One domain's requirement for a prompt, sent after the prompt's instructions under the
+/// heading `## 领域要求(<domain>)` for the domain's jobs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct DomainPrompt {
+    pub name: PromptName,
+    pub label: String,
+    /// Empty when the domain has none.
+    pub text: String,
+    /// The prompt it goes after: `PromptInfo.text`.
+    pub base: String,
+}
+
+/// Plain text. An override has 1-20000 characters; text equal to the built-in one removes the
+/// override. A domain requirement has at most 4000 characters; empty text removes it. CRLF
+/// becomes LF, and blank lines before and whitespace after the text are dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetPrompt {
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

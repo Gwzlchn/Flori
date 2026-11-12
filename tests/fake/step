@@ -3,7 +3,8 @@
 # <job_dir>/fake/<name> holds one token per attempt: an exit code, "hang" to block with a child
 # process until the group is killed, or "nomanifest" to exit 0 without manifest.json. The last
 # token repeats. No file means success. When <job_dir>/fake exists the step also writes its
-# environment to fake/<name>.env and the hanging child's pid to fake/<name>.pid, and on success
+# environment to fake/<name>.env, copies $FLORI_PROMPTS_DIR, when set, to
+# fake/<name>.prompts-<attempt>/ and the hanging child's pid to fake/<name>.pid, and on success
 # copies fake/<name>.json, when present, as its manifest.
 set -u
 if [ $# -ne 4 ] || [ "$1" != step ]; then
@@ -23,6 +24,9 @@ if [ -f "$fake/$name" ]; then
   fi
 fi
 [ -d "$fake" ] && env >"$fake/$name.env"
+if [ -d "$fake" ] && [ -n "${FLORI_PROMPTS_DIR:-}" ]; then
+  cp -R "$FLORI_PROMPTS_DIR" "$fake/$name.prompts-$attempt"
+fi
 echo "fake $name attempt $attempt token $token"
 echo "fake $name stderr" >&2
 case $token in

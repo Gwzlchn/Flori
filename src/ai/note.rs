@@ -16,13 +16,12 @@ use serde::Deserialize;
 use tokio::{io::AsyncWriteExt, process::Command};
 
 use super::{Env, INPUT_MARKER, Image, Scratch, complete, inherited, media_type, until_terminated};
-use crate::pipeline::{self, Manifest, Pipeline, Section, StepFailure, StepName, StepResult};
+use crate::{
+    pipeline::{self, Manifest, Pipeline, PromptName, Section, StepFailure, StepName, StepResult},
+    prompts::{self, Prompt},
+};
 
 const NOTE_TIMEOUT: Duration = Duration::from_secs(1800);
-const NOTE_ARXIV: &str = include_str!("../../prompts/note-arxiv.md");
-const NOTE_VIDEO: &str = include_str!("../../prompts/note-video.md");
-/// Appended only when images go along.
-const NOTE_IMAGES: &str = include_str!("../../prompts/note-images.md");
 /// A video sends every keyframe and a paper every figure, so each key point can get
 /// its image; video-frames bounds frames per section. Only one request's limits bound them here:
 /// the API's image count, and the base64 bytes of the images. The API takes at most 32 MB per
@@ -83,7 +82,7 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
             )?)?;
             let figures = paper_figures(&dir, &converted)?;
             (
-                NOTE_ARXIV,
+                PromptName::NoteArxiv,
                 StepName::ArxivFetch,
                 original,
                 figures,
@@ -101,7 +100,13 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
                 .collect();
             let frames = video_frames(&sections, &dir.join("assets"));
             let text = lines.join("\n");
-            (NOTE_VIDEO, StepName::VideoFetch, text, frames, FRAME_SIDE)
+            (
+                PromptName::NoteVideo,
+                StepName::VideoFetch,
+                text,
+                frames,
+                FRAME_SIDE,
+            )
         }
     };
     let title = pipeline::prior_step(job_dir, fetch)?.1.title;
@@ -109,17 +114,24 @@ pub(crate) async fn note_with(job_dir: &Path, out_dir: &Path, env: &Env) -> Step
     let scratch = Scratch::new()?;
     let pictures = sendable(env, pictures, side, &scratch.0).await;
     let pictures = within_budget(pictures, REQUEST_IMAGE_BYTES);
-    let mut prompt = template.to_owned();
+    let template = Prompt::load(env, template)?;
+    let image_rules = Prompt::load(env, PromptName::NoteImages)?;
+    // The image instructions only go along with images; the domain requirement of the note
+    // prompt comes after them, as the end of all instructions.
+    let mut blocks = vec![template.text.as_str()];
     let mut list = String::new();
     if !pictures.is_empty() {
-        prompt.push_str(NOTE_IMAGES);
+        blocks.push(&image_rules.text);
+        blocks.extend(image_rules.domain.as_deref());
         list.push_str("图片(序号即消息末尾附图的顺序):\n");
         for (i, picture) in pictures.iter().enumerate() {
             let _ = writeln!(list, "[{}] {}", i + 1, picture.label);
         }
         list.push('\n');
     }
-    let prompt = format!("{prompt}\n{INPUT_MARKER}\n标题:{title}\n\n{list}{text}");
+    blocks.extend(template.domain.as_deref());
+    let instructions = prompts::compose(&blocks);
+    let prompt = format!("{instructions}\n{INPUT_MARKER}\n标题:{title}\n\n{list}{text}");
     let images: Vec<Image> = pictures
         .iter()
         .map(|p| Image {

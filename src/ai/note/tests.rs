@@ -494,6 +494,60 @@ async fn a_video_without_frames_still_gets_a_note() {
     assert!(sent_images(&fx).is_empty());
 }
 
+/// The instructions the last call sent, up to the last input marker.
+fn instructions(fx: &Fixture) -> String {
+    let calls = fx.calls();
+    let prompt = calls.last().unwrap()["prompt"].as_str().unwrap();
+    let (head, _) = prompt.rsplit_once(INPUT_MARKER).unwrap();
+    head.to_owned()
+}
+
+#[tokio::test]
+async fn the_domain_requirement_ends_the_instructions() {
+    let mut stored = prompts::Stored::default();
+    for (name, text) in [
+        (PromptName::NoteVideo, "视频笔记提示词"),
+        (PromptName::NoteArxiv, "论文笔记提示词"),
+        (PromptName::NoteImages, "配图提示词"),
+    ] {
+        stored.overrides.insert(name, text.into());
+        stored.domain.insert(name, format!("{text}的领域要求"));
+    }
+    let section = |text: &str| format!("## 领域要求(计算机系统结构)\n\n{text}的领域要求\n");
+    let images = format!("配图提示词\n\n{}\n", section("配图提示词"));
+    let cases: [(Pipeline, bool, &str); 4] = [
+        (Pipeline::Video, true, "视频笔记提示词"),
+        (Pipeline::Video, false, "视频笔记提示词"),
+        (Pipeline::Arxiv, true, "论文笔记提示词"),
+        (Pipeline::Arxiv, false, "论文笔记提示词"),
+    ];
+    for (pipeline, with_images, text) in cases {
+        let fx = Fixture::new(pipeline, AiTool::Claude);
+        match (pipeline, with_images) {
+            (Pipeline::Video, true) => video_job(&fx, 1, 2),
+            (Pipeline::Video, false) => video_job(&fx, 0, 2),
+            (Pipeline::Arxiv, true) => {
+                paper(&fx, &[("Figure 1", "Model.", &["a.png"])], &["a.png"]);
+            }
+            (Pipeline::Arxiv, false) => {
+                paper(&fx, &[], &[]);
+            }
+        }
+        let dir = fx.job_dir().join("prompts");
+        prompts::write_dir(&dir, "计算机系统结构", &stored).unwrap();
+        let mut env = fx.env();
+        env.push(("FLORI_PROMPTS_DIR".into(), dir.into()));
+        let out = fx.out_dir("04-note");
+        note_with(fx.job_dir(), &out, &env).await.unwrap();
+        // The image instructions and their requirement come only with images, before the
+        // requirement of the note prompt itself.
+        let middle = if with_images { images.as_str() } else { "" };
+        let want = format!("{text}\n\n{middle}{}\n", section(text));
+        assert_eq!(instructions(&fx), want, "{pipeline:?} images {with_images}");
+        assert_eq!(sent_images(&fx).is_empty(), !with_images);
+    }
+}
+
 #[tokio::test]
 async fn failures_keep_their_class_with_images_attached() {
     let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);

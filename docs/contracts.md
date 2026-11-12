@@ -11,6 +11,7 @@ job_dir 只读:job.json、steps/<nn>-<name>/{manifest.json, 文件, assets/}
 out_dir steps/<nn>-<name>.tmp/,执行器建好的空目录;成功后原子 rename 为 steps/<nn>-<name>/;失败时整体删除,下次尝试重建
 cache   只有 video-fetch 与 translate 拿到 FLORI_CACHE_DIR=jobs/<id>/cache/<name>/(可写,各用各的;不在步骤目录里,跨尝试与手动重试保留)
 ai      note 与 translate 拿到 FLORI_AI_LOG_DIR=jobs/<id>/ai/(可写,跨尝试保留,只增不删),放每次 AI CLI 调用的记录,见"AI CLI 固定调用"
+prompts note 与 translate 拿到 FLORI_PROMPTS_DIR=jobs/<id>/prompts/(只读,执行器每次尝试前重写),放要发的提示词,见"提示词"
 日志   执行器把子进程 stdout/stderr 逐行追加到 jobs/<id>/job.log,每段以 `== <nn>-<name> attempt <n> ==` 开头,只追加不截断;步骤目录里不放日志
 env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATTEMPT,再加下表白名单
 退出码 0 成功,必须有 manifest.json,缺了按 20 处理;10 可重试;20 永久失败;30 凭据失效(处理同 20,UI 标注);其它退出码或信号按可重试处理
@@ -62,7 +63,7 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
 | video-fetch(bilibili) | FLORI_BILI_SESSDATA(服务端有值时才传);不带代理 |
 | video-transcribe | FLORI_WHISPER_MODEL、FLORI_STEPS_DIR |
 | publish | FLORI_VAULT_DIR=$DATA/vault |
-| note、translate | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY;CLAUDE_CODE_DISABLE_CLAUDE_MDS=1;DISABLE_AUTOUPDATER=1;DISABLE_UPDATES=1;CLAUDE_CODE_OAUTH_TOKEN(存在时);CODEX_HOME(tool=codex 时);FLORI_AI_LOG_DIR;translate 另加 FLORI_CACHE_DIR |
+| note、translate | HTTPS_PROXY、HTTP_PROXY = $FLORI_PROXY;CLAUDE_CODE_DISABLE_CLAUDE_MDS=1;DISABLE_AUTOUPDATER=1;DISABLE_UPDATES=1;CLAUDE_CODE_OAUTH_TOKEN(存在时);CODEX_HOME(tool=codex 时);FLORI_AI_LOG_DIR;FLORI_PROMPTS_DIR;translate 另加 FLORI_CACHE_DIR |
 | feed.py(不是步骤,同样 env_clear) | FLORI_VIDEO_PROXY(取值同 video-fetch(youtube) 的代理,只经 yt-dlp `--proxy` 使用,B站请求显式不走代理)、FLORI_BILI_SESSDATA |
 
 ### 步骤表
@@ -148,6 +149,15 @@ env    env_clear 后只注入 PATH LANG=C.UTF-8 HOME TMPDIR FLORI_STEP FLORI_ATT
   - 模型用 `![描述](img:N)` 插图,落盘时换成 `![描述](assets/<basename>)`;N 不在清单里时整条图片标记删除。`assets/` 下的图片原样保留,其它图片(http、data:、别的路径)整条删除。描述去掉 `[`、`]`、`\`,`|` 换成 `/`。
 - note 与 translate 失败时 publish 不执行,可手动 retry。
 
+### 提示词
+
+- 五个提示词:note-video、note-arxiv、note-images、translate、punctuate,内置文本是 `prompts/<name>.md`。note 发 note-video 或 note-arxiv,有图时其后接 note-images;translate 发 translate,给中文视频加标点时发 punctuate。
+- 网页可以给每个提示词存一份改写,替换内置文本;也可以给每个领域的每个提示词存一段领域要求。两者都在 SQLite 的 prompts 表,领域删除时它的领域要求一并删除;接口见契约 3。
+- 步骤不读库。note 与 translate 每次尝试开始前,执行器删掉并重写 `jobs/<id>/prompts/`:每个提示词一个 `<name>.md`,有改写时是改写,否则是内置文本;job 的领域对它有要求时另写 `<name>.domain.md`,内容是 `## 领域要求(<领域名>)`、空行、要求原文。手动 retry 因此用 retry 时网页上的文本。
+- 步骤从 FLORI_PROMPTS_DIR 读,没有这个变量或文件时用内置文本,没有领域要求(测试与 `just step`)。
+- 拼接:各段去掉开头的空行和末尾的空白,以一个空行相连,末尾一个换行,之后才是代码追加的输入标记与输入(translate 重问时输入标记前另有反馈段)。段的顺序:提示词本身;note 有图时接 note-images 与 note-images 的领域要求;最后是该提示词自己的领域要求。内置文本拼出的结果与提示词可编辑之前逐字节相同。
+- translate 缓存键里的 prompt 是拼好的指令,改写或领域要求一变就不再命中旧缓存。AI 调用记录的 prompt.md 照旧是发出的原文。
+
 ### AI CLI 固定调用
 
 ```text
@@ -207,7 +217,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 
 ## 契约 3:HTTP API
 
-18 个操作,按方法加路径计。请求与响应的字段以 `docs/openapi.json` 为准,它由 `src/api.rs` 生成,`just openapi` 更新。
+23 个操作,按方法加路径计。请求与响应的字段以 `docs/openapi.json` 为准,它由 `src/api.rs` 生成,`just openapi` 更新。
 
 | 端点 | 说明 |
 |---|---|
@@ -222,10 +232,13 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB;单行超过上限时按字符边界切开)与 next_offset;offset 超出文件末尾 400 invalid_request;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
 | GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range;Content-Type 按扩展名取,文本类型(text/*、application/json)加 `; charset=utf-8`,`.srt` 按 `text/plain; charset=utf-8`,其余原样;所有响应只带一个 `Content-Security-Policy: sandbox allow-same-origin; frame-ancestors 'none'` 与 `X-Content-Type-Options: nosniff`:外部 HTML 不能运行脚本或提交表单,它引用的图片仍按同源加载 |
+| GET /api/prompts,PUT/DELETE /api/prompts/{name} | 五个提示词,每项 name、label(中文名)、default_text(内置文本)、text(步骤现在开始时用的文本)与 customized(是否存了改写);PUT {text} 存改写并返回该项;DELETE 删掉改写,恢复内置文本,没有改写时同样 204 |
+| GET /api/domains/{id}/prompts,PUT /api/domains/{id}/prompts/{name} | 该领域对五个提示词的领域要求:text(没有时为空串)与 base(该提示词的 text,只供显示);PUT {text} 存领域要求并返回该项,空文本即删除;领域不存在 404 |
 | GET /api/system | 只读的运行状况,供"关于与系统"页。响应是手写的白名单结构体,从不序列化整个配置;密钥与可能带口令的值只报有无。commit 在构建时由 `just image` 注入,其它构建为 unknown;AI CLI 与 yt-dlp 的版本在服务启动时各取一次,请求时不起子进程,取不到为 unknown;磁盘两项在 statvfs 失败时为 null;weeks 是本周与此前三周,新的在前,周从周一起按 +08:00,按创建的任务计,不论结果 |
 | GET /api/health | {version};唯一不要求认证的端点 |
 
 - 领域与集合的名字:先转成 NFC 再校验并原样保存;1–32 个字符,任何位置都不能有空白(领域名是 Obsidian 标签)或控制字符,不能含 `/ \ : * ? " < > | # ^ [ ] , ;`,不能以 `.` 或 `-` 开头;可以是中文。已建的名字不重新校验。手机、macOS、Windows 的文件系统不分大小写,所以重名与 `unsorted` 都忽略大小写比较。
+- 提示词文本:纯文本,存之前 CRLF 换成 LF,去掉开头的空行和末尾的空白。改写 1–20000 个字符,与内置文本相同时视同删除改写;领域要求至多 4000 个字符。name 不是五个之一、文本超长或改写为空时 400 invalid_request。改动只对之后开始的步骤尝试生效,见契约 1"提示词"。
 - 认证:Basic Auth,用户名 FLORI_WEB_USER,口令 FLORI_WEB_PASSWORD,服务端常量时间比较,不存哈希。静态页面和 /api 都要认证。
 - 认证失败:
   - 不带 `Authorization` 的请求是浏览器的第一次请求,直接 401,不记日志也不计数。

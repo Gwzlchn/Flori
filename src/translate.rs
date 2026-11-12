@@ -20,11 +20,12 @@ use sha2::{Digest, Sha256};
 use crate::{
     ai::{self, Env, INPUT_MARKER},
     pipeline::{
-        self, JobSpec, Manifest, MetaValue, Pipeline, Section, StepFailure, StepName, StepResult,
+        self, JobSpec, Manifest, MetaValue, Pipeline, PromptName, Section, StepFailure, StepName,
+        StepResult,
     },
+    prompts::Prompt,
 };
 
-const PROMPT: &str = include_str!("../prompts/translate.md");
 /// Goes before the input marker on the one re-ask after a reply fails validation.
 const FEEDBACK_MARKER: &str = "---FLORI-FEEDBACK---";
 const CHUNK_CHARS: usize = 12_000;
@@ -134,7 +135,8 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
     if let Some(reason) = skipped {
         meta.insert("skipped_reason".into(), MetaValue::Text(reason.into()));
     } else if punctuate {
-        let replies = ask_all(env, &job, punctuate::PROMPT, &segments, &chunks).await?;
+        let prompt = Prompt::load(env, PromptName::Punctuate)?.instructions();
+        let replies = ask_all(env, &job, &prompt, &segments, &chunks).await?;
         let (punctuated, tally) = punctuate::apply(&sections, replies);
         for line in &tally.log {
             eprintln!("punctuate {line}");
@@ -154,7 +156,8 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
         let (translated, source) = match subtitle_zh {
             Some(texts) => (texts.into_iter().map(Some).collect(), "subtitle"),
             None => {
-                let replies = ask_all(env, &job, PROMPT, &segments, &chunks).await?;
+                let prompt = Prompt::load(env, PromptName::Translate)?.instructions();
+                let replies = ask_all(env, &job, &prompt, &segments, &chunks).await?;
                 let kept = replies.iter().filter(|reply| reply.is_err()).count();
                 meta.insert("untranslated_blocks".into(), MetaValue::Int(kept as i64));
                 (log_kept(replies), "ai")
@@ -275,7 +278,8 @@ struct Item {
 /// from the re-ask, else from the first reply; only when neither reply is usable as a whole does
 /// the step fail. Results valid in every segment are cached, under
 /// sha256(prompt, model, payload), so a retry only calls the AI for chunks not yet cached; a
-/// cached chunk leaves a line in job.log instead of a call record.
+/// cached chunk leaves a line in job.log instead of a call record. `prompt` holds the
+/// instructions as sent, the domain requirement included, so an edit on the web is asked anew.
 async fn ask_chunk(
     env: &Env,
     job: &JobSpec,

@@ -29,6 +29,7 @@ use crate::{
         self, AiTool, JobSpec, Manifest, MetaValue, Pipeline, Platform, Resource, StepName,
         StepProgram, StepSpec, read_job, read_manifest, step_dir_name,
     },
+    prompts,
 };
 
 #[cfg(not(test))]
@@ -219,12 +220,29 @@ impl Inner {
                 let ai_log = job_dir.join("ai");
                 fs::create_dir_all(&ai_log)?;
                 env.push(("FLORI_AI_LOG_DIR", ai_log.into()));
+                env.push(("FLORI_PROMPTS_DIR", prompts_dir(job_dir).into()));
             }
             StepName::VideoFrames | StepName::ArxivFetch | StepName::ArxivConvert => {}
         }
         cmd.envs(env);
         Ok(cmd)
     }
+}
+
+/// `jobs/<id>/prompts/`, where note and translate read the prompts they send.
+fn prompts_dir(job_dir: &Path) -> PathBuf {
+    job_dir.join("prompts")
+}
+
+/// Writes the prompts the web holds now for the job's domain, before every attempt of an AI
+/// step, so a retry sends the current texts. Steps read these files and never the database.
+async fn write_prompts(db: &SqlitePool, job: &JobSpec, job_dir: &Path) -> Fallible<()> {
+    let domain_id = db::get_job(db, job.job_id)
+        .await?
+        .map(|(job, _)| job.domain_id);
+    let stored = db::prompts(db, domain_id).await?;
+    prompts::write_dir(&prompts_dir(job_dir), &job.domain, &stored)?;
+    Ok(())
 }
 
 /// PATH, LANG and HOME for a child that starts from a cleared environment.
@@ -403,6 +421,9 @@ async fn run_step(
             .append(true)
             .open(job_dir.join("job.log"))?;
         writeln!(log, "== {name} attempt {attempt} ==")?;
+        if matches!(spec.name, StepName::Note | StepName::Translate) {
+            write_prompts(&inner.db, job, job_dir).await?;
+        }
         let mut last_err = None;
         let cmd = inner.command(job, job_dir, &tmp, spec.name, attempt)?;
         let stop = run_child(cmd, timeout, Some(cancel), |stderr, line| {

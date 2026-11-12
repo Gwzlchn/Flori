@@ -22,9 +22,10 @@ use crate::{
         StepStatus,
     },
     pipeline::{
-        AiSpec, JOB_FILE, JobSpec, Pipeline, Platform, Source, StepName, TranslateMode, job_key,
-        parse_feed, plan,
+        AiSpec, JOB_FILE, JobSpec, Pipeline, Platform, PromptName, Source, StepName, TranslateMode,
+        job_key, parse_feed, plan,
     },
+    prompts,
 };
 
 pub async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
@@ -99,6 +100,13 @@ async fn delete_unused(
 pub async fn list_domains(db: &SqlitePool) -> sqlx::Result<Vec<Domain>> {
     sqlx::query_as("SELECT id, name, created FROM domains ORDER BY name")
         .fetch_all(db)
+        .await
+}
+
+pub async fn get_domain(db: &SqlitePool, id: i64) -> sqlx::Result<Option<Domain>> {
+    sqlx::query_as("SELECT id, name, created FROM domains WHERE id = ?")
+        .bind(id)
+        .fetch_optional(db)
         .await
 }
 
@@ -610,6 +618,57 @@ pub async fn step_succeeded(
     }
     tx.commit().await?;
     Ok(true)
+}
+
+/// The stored prompt overrides and, with `domain_id`, that domain's requirements.
+pub async fn prompts(db: &SqlitePool, domain_id: Option<i64>) -> sqlx::Result<prompts::Stored> {
+    let rows: Vec<(PromptName, Option<i64>, String)> = sqlx::query_as(
+        "SELECT name, domain_id, text FROM prompts WHERE domain_id IS NULL OR domain_id = ?",
+    )
+    .bind(domain_id)
+    .fetch_all(db)
+    .await?;
+    let mut stored = prompts::Stored::default();
+    for (name, domain, text) in rows {
+        let texts = match domain {
+            Some(_) => &mut stored.domain,
+            None => &mut stored.overrides,
+        };
+        texts.insert(name, text);
+    }
+    Ok(stored)
+}
+
+/// Stores the override of `name`, or with `domain_id` that domain's requirement; None deletes
+/// it. A requirement goes with its domain: the foreign key cascades.
+pub async fn set_prompt(
+    db: &SqlitePool,
+    name: PromptName,
+    domain_id: Option<i64>,
+    text: Option<&str>,
+) -> sqlx::Result<Result<(), ApiError>> {
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    if let Some(id) = domain_id
+        && !exists(&mut *tx, "domains", id).await?
+    {
+        return Ok(Err(not_found("domain")));
+    }
+    sqlx::query("DELETE FROM prompts WHERE name = ? AND domain_id IS ?")
+        .bind(name)
+        .bind(domain_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(text) = text {
+        sqlx::query("INSERT INTO prompts (name, domain_id, text, updated) VALUES (?, ?, ?, ?)")
+            .bind(name)
+            .bind(domain_id)
+            .bind(text)
+            .bind(now())
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(Ok(()))
 }
 
 /// Numbers of domains, collections and published notes.

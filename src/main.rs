@@ -8,6 +8,7 @@ mod db;
 mod exec;
 mod http;
 mod pipeline;
+mod prompts;
 mod publish;
 mod system;
 mod translate;

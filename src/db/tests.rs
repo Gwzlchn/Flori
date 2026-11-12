@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::*;
 use crate::{exec::tests::config, pipeline::parse_source};
 
@@ -15,18 +17,106 @@ async fn migrations_apply_and_step_names_match() {
             .await
             .unwrap();
     let tables: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
-    assert_eq!(tables, ["collections", "domains", "jobs", "steps"]);
+    assert_eq!(
+        tables,
+        ["collections", "domains", "jobs", "prompts", "steps"]
+    );
 
-    let ddl: (String,) = sqlx::query_as("SELECT sql FROM sqlite_master WHERE name = 'steps'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    async fn ddl(pool: &SqlitePool, table: &str) -> String {
+        let sql = "SELECT sql FROM sqlite_master WHERE name = ?";
+        let ddl: (String,) = sqlx::query_as(sql)
+            .bind(table)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        ddl.0
+    }
+    let steps = ddl(&pool, "steps").await;
     for name in StepName::ALL {
         assert!(
-            ddl.0.contains(&format!("'{name}'")),
+            steps.contains(&format!("'{name}'")),
             "steps.name CHECK misses {name}"
         );
     }
+    let prompts = ddl(&pool, "prompts").await;
+    for name in PromptName::ALL {
+        assert!(
+            prompts.contains(&format!("'{name}'")),
+            "prompts.name CHECK misses {name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn prompts_are_one_per_name_and_scope_and_go_with_their_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = pool(dir.path()).await;
+    let ml = create_domain(&db, "ml").await.unwrap().unwrap().id;
+    let arch = create_domain(&db, "计算机系统结构")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let set = |name, domain, text| set_prompt(&db, name, domain, text);
+    set(PromptName::Translate, None, Some("a"))
+        .await
+        .unwrap()
+        .unwrap();
+    set(PromptName::Translate, None, Some("b"))
+        .await
+        .unwrap()
+        .unwrap();
+    set(PromptName::Translate, Some(ml), Some("ml"))
+        .await
+        .unwrap()
+        .unwrap();
+    set(PromptName::Translate, Some(arch), Some("x"))
+        .await
+        .unwrap()
+        .unwrap();
+    set(PromptName::Translate, Some(arch), Some("arch"))
+        .await
+        .unwrap()
+        .unwrap();
+    set(PromptName::NoteVideo, Some(arch), Some("v"))
+        .await
+        .unwrap()
+        .unwrap();
+    let missing = set(PromptName::Translate, Some(999), Some("z"))
+        .await
+        .unwrap();
+    assert_eq!(missing.unwrap_err().code, ErrorCode::NotFound);
+
+    let stored = prompts(&db, Some(arch)).await.unwrap();
+    assert_eq!(
+        stored.overrides,
+        BTreeMap::from([(PromptName::Translate, "b".to_owned())])
+    );
+    assert_eq!(
+        stored.domain,
+        BTreeMap::from([
+            (PromptName::NoteVideo, "v".to_owned()),
+            (PromptName::Translate, "arch".to_owned()),
+        ])
+    );
+    assert!(prompts(&db, None).await.unwrap().domain.is_empty());
+
+    set(PromptName::Translate, None, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let stored = prompts(&db, Some(ml)).await.unwrap();
+    assert!(stored.overrides.is_empty());
+    assert_eq!(stored.domain[&PromptName::Translate], "ml");
+
+    // Requirements go with their domain; the domain had no collection or job to keep it.
+    delete_domain(&db, arch).await.unwrap().unwrap();
+    let left: Vec<(Option<i64>, String)> =
+        sqlx::query_as("SELECT domain_id, text FROM prompts ORDER BY text")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(left, [(Some(ml), "ml".to_owned())]);
 }
 
 #[test]

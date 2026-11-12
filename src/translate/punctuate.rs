@@ -10,8 +10,6 @@ use std::sync::LazyLock;
 
 use crate::pipeline::{self, Section};
 
-pub(super) const PROMPT: &str = include_str!("../../prompts/punctuate.md");
-
 /// A reply repeats every character of its chunk, while a Chinese translation is far shorter than
 /// its English source, so chunks are half the size to stay well inside the per-call timeout.
 pub(super) const CHUNK_CHARS: usize = 6_000;

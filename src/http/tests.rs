@@ -77,6 +77,10 @@ impl App {
         self.call("POST", uri, Some(body)).await
     }
 
+    async fn put_text(&self, uri: String, text: Value) -> (StatusCode, Value) {
+        self.call("PUT", &uri, Some(json!({"text": text}))).await
+    }
+
     async fn domain(&self, name: &str) -> i64 {
         let (status, body) = self.post("/api/domains", json!({"name": name})).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -350,6 +354,216 @@ async fn domains_and_collections_validate_names_and_refuse_deletes_in_use() {
     assert_eq!(
         names,
         [format!("0{}", "a".repeat(31)).as_str(), "ml", "unsorted"]
+    );
+}
+
+#[tokio::test]
+async fn prompts_are_overridden_and_restored() {
+    let app = app().await;
+    let (status, list) = app.get("/api/prompts").await;
+    assert_eq!(status, StatusCode::OK);
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "note-video",
+            "note-arxiv",
+            "note-images",
+            "translate",
+            "punctuate"
+        ]
+    );
+    let builtin = prompts::builtin(PromptName::Translate);
+    assert_eq!(
+        list[3],
+        json!({"name": "translate", "label": "翻译", "default_text": builtin, "text": builtin,
+               "customized": false})
+    );
+    assert_eq!(list[4]["label"], "加标点");
+
+    let put = |name: &str, text: Value| app.put_text(format!("/api/prompts/{name}"), text);
+    let (status, body) = put("translate", json!("\r\n只译成中文。\r\n- 保留术语。 \n\n")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["text"], "只译成中文。\n- 保留术语。");
+    assert_eq!(body["customized"], true);
+    assert_eq!(body["default_text"], builtin);
+    let (_, list) = app.get("/api/prompts").await;
+    assert_eq!(list[3], body);
+    assert_eq!(list[4]["customized"], false);
+    let longest = "长".repeat(prompts::TEXT_CHARS);
+    assert_eq!(put("note-video", json!(longest)).await.0, StatusCode::OK);
+
+    // The built-in text again, however its line ends are spelled, is no override.
+    let (status, body) = put("translate", json!(builtin.replace('\n', "\r\n") + "  ")).await;
+    assert_eq!(
+        (status, &body["customized"]),
+        (StatusCode::OK, &json!(false))
+    );
+    assert_eq!(body["text"], builtin);
+    let (status, _) = app.call("DELETE", "/api/prompts/note-video", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = app.call("DELETE", "/api/prompts/note-video", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, list) = app.get("/api/prompts").await;
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["customized"] == false)
+    );
+
+    for (name, text) in [
+        ("note", json!("x")),
+        ("NOTE-VIDEO", json!("x")),
+        ("translate", json!("")),
+        ("translate", json!(" \n\t")),
+        ("translate", json!("长".repeat(prompts::TEXT_CHARS + 1))),
+        ("translate", json!(null)),
+    ] {
+        let (status, body) = put(name, text.clone()).await;
+        assert_eq!(
+            (status, code(&body)),
+            (StatusCode::BAD_REQUEST, "invalid_request"),
+            "{name} {text}"
+        );
+    }
+    let (status, body) = app
+        .call(
+            "PUT",
+            "/api/prompts/translate",
+            Some(json!({"text": "x", "domain": 1})),
+        )
+        .await;
+    assert_eq!(
+        (status, code(&body)),
+        (StatusCode::BAD_REQUEST, "invalid_request")
+    );
+    let (status, body) = app.call("DELETE", "/api/prompts/notes", None).await;
+    assert_eq!(
+        (status, code(&body)),
+        (StatusCode::BAD_REQUEST, "invalid_request")
+    );
+    let (_, list) = app.get("/api/prompts").await;
+    assert!(
+        list.as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["customized"] == false)
+    );
+}
+
+#[tokio::test]
+async fn domain_requirements_are_set_cleared_and_go_with_the_domain() {
+    let app = app().await;
+    let arch = app.domain("计算机系统结构").await;
+    let ml = app.domain("ml").await;
+    let put = |domain: i64, name: &str, text: Value| {
+        app.put_text(format!("/api/domains/{domain}/prompts/{name}"), text)
+    };
+    let (status, list) = app.get(&format!("/api/domains/{arch}/prompts")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 5);
+    let builtin = prompts::builtin(PromptName::NoteVideo);
+    assert_eq!(
+        list[0],
+        json!({"name": "note-video", "label": "视频笔记", "text": "", "base": builtin})
+    );
+
+    let override_text = json!({"text": "改过的视频笔记提示词"});
+    let (status, _) = app
+        .call("PUT", "/api/prompts/note-video", Some(override_text))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = put(arch, "note-video", json!("\n- 讲清流水线冒险。\r\n")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"name": "note-video", "label": "视频笔记", "text": "- 讲清流水线冒险。",
+               "base": "改过的视频笔记提示词"})
+    );
+    let longest = "长".repeat(prompts::DOMAIN_CHARS);
+    assert_eq!(
+        put(arch, "translate", json!(longest)).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        put(ml, "translate", json!("ml 的要求")).await.0,
+        StatusCode::OK
+    );
+    let (_, list) = app.get(&format!("/api/domains/{arch}/prompts")).await;
+    let texts: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(texts, ["- 讲清流水线冒险。", "", "", longest.as_str(), ""]);
+
+    // Empty text removes the requirement.
+    let (status, body) = put(arch, "note-video", json!(" \n ")).await;
+    assert_eq!((status, &body["text"]), (StatusCode::OK, &json!("")));
+
+    for (domain, name, text, want) in [
+        (
+            arch,
+            "notes",
+            json!("x"),
+            (StatusCode::BAD_REQUEST, "invalid_request"),
+        ),
+        (
+            arch,
+            "translate",
+            json!("长".repeat(prompts::DOMAIN_CHARS + 1)),
+            (StatusCode::BAD_REQUEST, "invalid_request"),
+        ),
+        (
+            999,
+            "translate",
+            json!("x"),
+            (StatusCode::NOT_FOUND, "not_found"),
+        ),
+    ] {
+        let (status, body) = put(domain, name, text).await;
+        assert_eq!((status, code(&body)), want, "{domain} {name}");
+    }
+    for uri in ["/api/domains/999/prompts", "/api/domains/x/prompts"] {
+        let (status, body) = app.get(uri).await;
+        assert_eq!(
+            (status, code(&body)),
+            (StatusCode::NOT_FOUND, "not_found"),
+            "{uri}"
+        );
+    }
+    let (status, body) = app
+        .call(
+            "PUT",
+            "/api/domains/x/prompts/translate",
+            Some(json!({"text": "x"})),
+        )
+        .await;
+    assert_eq!((status, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
+
+    // Deleting the domain takes its requirements along and leaves the other domain's.
+    let (status, _) = app
+        .call("DELETE", &format!("/api/domains/{arch}"), None)
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let rows: Vec<(Option<i64>, String)> =
+        sqlx::query_as("SELECT domain_id, name FROM prompts ORDER BY domain_id")
+            .fetch_all(&app.state.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (None, "note-video".to_owned()),
+            (Some(ml), "translate".to_owned())
+        ]
     );
 }
 

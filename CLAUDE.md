@@ -4,7 +4,7 @@
 
 ## 产品
 
-单人自用的学习笔记生成器:把 B站、YouTube 视频和 arXiv HTML 论文变成 Obsidian 笔记。NAS 上一个 `flori` 容器提供网页(投递、按领域和集合列出笔记、预览、处理过程、手动订阅、关于与系统)并执行两条固定流水线,发布到 vault 目录;电脑和手机用 Remotely Save 经 WebDAV 同步。
+单人自用的学习笔记生成器:把 B站、YouTube 视频和 arXiv HTML 论文变成 Obsidian 笔记。NAS 上一个 `flori` 容器提供网页(投递、按领域和集合列出笔记、预览、处理过程、手动订阅、提示词、关于与系统)并执行两条固定流水线,发布到 vault 目录;电脑和手机用 Remotely Save 经 WebDAV 同步。
 
 定位、对象、不做清单及其重新考虑的条件、加功能的准入判据只在 [docs/scope.md](docs/scope.md)。扩大范围先问用户。
 
@@ -21,7 +21,7 @@
 - SQLite 是任务侧唯一的结构化真相,SQLx 运行时查询,迁移只向前;表与列的准入见 [docs/scope.md](docs/scope.md)。
 - vault 只追加:发布后服务端不再改或删已发布内容。
 - NAS 常驻容器只有 flori、flori-dav。新增常驻容器或跨容器协议先问用户。
-- 配置只走环境变量。密钥只在 `.local/secrets.env`,按名注入各服务;flori 容器拿不到 AK 和 WebDAV 口令。
+- 配置只走环境变量。提示词的内置文本随代码,网页上的改写与领域要求存 SQLite,步骤不读库(契约 1"提示词")。密钥只在 `.local/secrets.env`,按名注入各服务;flori 容器拿不到 AK 和 WebDAV 口令。
 
 ## 工作方式
 

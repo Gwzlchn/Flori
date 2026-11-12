@@ -1,9 +1,15 @@
-use std::{collections::BTreeMap, ffi::OsString, fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    fs,
+    path::PathBuf,
+};
 
 use super::*;
 use crate::{
     ai::tests::{Fixture, job_spec},
     pipeline::{AiTool, StepExit, escape_markdown},
+    prompts::{self, builtin},
 };
 
 fn fixture_text(name: &str) -> String {
@@ -1044,7 +1050,7 @@ async fn chinese_video_is_punctuated_in_video_frames_layout() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["model"], "model-translate");
     let prompt = calls[0]["prompt"].as_str().unwrap();
-    assert!(prompt.starts_with(punctuate::PROMPT));
+    assert!(prompt.starts_with(builtin(PromptName::Punctuate)));
     let (_, input) = prompt.rsplit_once(INPUT_MARKER).unwrap();
     let payload: Payload = serde_json::from_str(input.trim()).unwrap();
     let sent: Vec<&str> = payload.segments.iter().map(|s| s.text.as_str()).collect();
@@ -1101,14 +1107,79 @@ async fn cache_key_includes_the_prompt() {
     let job = pipeline::read_job(fx.job_dir()).unwrap();
     let part = [protect(&long_section(0), Pipeline::Video)];
     let (env, cache) = (with_cache(&fx), cache_dir(&fx));
-    ask_chunk(&env, &job, PROMPT, &cache, &part, "chunk 1/1")
+    let prompt = builtin(PromptName::Translate);
+    ask_chunk(&env, &job, prompt, &cache, &part, "chunk 1/1")
         .await
         .unwrap();
     assert_eq!(fx.calls().len(), 2);
-    ask_chunk(&env, &job, punctuate::PROMPT, &cache, &part, "chunk 1/1")
+    // What translate sent first: the built-in text is the composed prompt, byte for byte.
+    let prompt = builtin(PromptName::Punctuate);
+    ask_chunk(&env, &job, prompt, &cache, &part, "chunk 1/1")
         .await
         .unwrap();
     assert_eq!(fx.calls().len(), 2);
+}
+
+/// translate with FLORI_PROMPTS_DIR as the executor writes it for `stored`.
+async fn translate_with(fx: &Fixture, stored: &prompts::Stored) -> StepResult {
+    let dir = fx.job_dir().join("prompts");
+    prompts::write_dir(&dir, "计算机系统结构", stored).unwrap();
+    let mut env = with_cache(fx);
+    env.push(("FLORI_PROMPTS_DIR".into(), dir.into()));
+    run_with(fx.job_dir(), &fx.out_dir("04-translate"), &env).await
+}
+
+/// What the calls from the `from`th on sent before the last input marker, each text once.
+fn instructions_since(fx: &Fixture, from: usize) -> BTreeSet<String> {
+    fx.calls()[from..]
+        .iter()
+        .map(|call| {
+            let prompt = call["prompt"].as_str().unwrap();
+            prompt.rsplit_once(INPUT_MARKER).unwrap().0.to_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_domain_requirement_ends_the_instructions_and_edits_miss_the_cache() {
+    let section = "## 领域要求(计算机系统结构)\n\n术语保留英文。\n";
+    let cases = [
+        (PromptName::Translate, PromptName::Punctuate),
+        (PromptName::Punctuate, PromptName::Translate),
+    ];
+    for (name, other) in cases {
+        let fx = match name {
+            PromptName::Punctuate => video(&long_chinese(1), "zh"),
+            _ => arxiv(&fixture_text("paper.md")),
+        };
+        // The other prompt's requirement and override play no part.
+        let mut stored = prompts::Stored::default();
+        stored.domain.insert(other, "不该出现".into());
+        stored.overrides.insert(other, "也不该出现".into());
+        translate_with(&fx, &stored).await.unwrap();
+        let chunks = fx.calls().len();
+        assert!(chunks > 0, "{name}");
+        let sent = |text: String| BTreeSet::from([format!("{text}\n")]);
+        assert_eq!(instructions_since(&fx, 0), sent(builtin(name).into()));
+
+        // A requirement goes after the instructions and before the input; the cache misses.
+        stored.domain.insert(name, "\n术语保留英文。 \n".into());
+        translate_with(&fx, &stored).await.unwrap();
+        assert_eq!(fx.calls().len(), 2 * chunks, "{name}");
+        let want = format!("{}\n{section}", builtin(name));
+        assert_eq!(instructions_since(&fx, chunks), sent(want));
+
+        // So does an edited prompt.
+        stored.overrides.insert(name, "改过的提示词".into());
+        translate_with(&fx, &stored).await.unwrap();
+        assert_eq!(fx.calls().len(), 3 * chunks, "{name}");
+        let want = format!("改过的提示词\n\n{section}");
+        assert_eq!(instructions_since(&fx, 2 * chunks), sent(want));
+
+        // The same texts again are answered from the cache.
+        translate_with(&fx, &stored).await.unwrap();
+        assert_eq!(fx.calls().len(), 3 * chunks, "{name}");
+    }
 }
 
 #[tokio::test]
@@ -1190,7 +1261,8 @@ async fn a_segment_failing_twice_keeps_its_original_and_the_rest_is_translated()
     let job = pipeline::read_job(fx.job_dir()).unwrap();
     let segments = arxiv_segments(&paper);
     let chunks = chunk(&segments, CHUNK_CHARS);
-    let replies = ask_all(&with_cache(&fx), &job, PROMPT, &segments, &chunks)
+    let prompt = builtin(PromptName::Translate);
+    let replies = ask_all(&with_cache(&fx), &job, prompt, &segments, &chunks)
         .await
         .unwrap();
     assert_eq!(

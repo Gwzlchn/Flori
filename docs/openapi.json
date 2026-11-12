@@ -452,6 +452,119 @@
         }
       }
     },
+    "/api/domains/{id}/prompts": {
+      "get": {
+        "tags": [
+          "crate::http"
+        ],
+        "operationId": "list_domain_prompts",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DomainPrompt"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/domains/{id}/prompts/{name}": {
+      "put": {
+        "tags": [
+          "crate::http"
+        ],
+        "operationId": "set_domain_prompt",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PromptName"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPrompt"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainPrompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "tags": [
@@ -818,6 +931,111 @@
         }
       }
     },
+    "/api/prompts": {
+      "get": {
+        "tags": [
+          "crate::http"
+        ],
+        "operationId": "list_prompts",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PromptInfo"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/prompts/{name}": {
+      "put": {
+        "tags": [
+          "crate::http"
+        ],
+        "summary": "Text equal to the built-in one removes the override, so the prompt follows later changes of\nthe built-in text again.",
+        "operationId": "set_prompt",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PromptName"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPrompt"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "crate::http"
+        ],
+        "operationId": "reset_prompt",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PromptName"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/system": {
       "get": {
         "tags": [
@@ -985,6 +1203,32 @@
           "name": {
             "type": "string",
             "description": "1-32 characters in NFC without whitespace, control characters or any of\n`/\\:*?\"<>|#^[],;`, not starting with `.` or `-`; unique ignoring case. Also the vault\nfolder name and, for a domain, a tag. Immutable."
+          }
+        }
+      },
+      "DomainPrompt": {
+        "type": "object",
+        "description": "One domain's requirement for a prompt, sent after the prompt's instructions under the\nheading `## 领域要求(<domain>)` for the domain's jobs.",
+        "required": [
+          "name",
+          "label",
+          "text",
+          "base"
+        ],
+        "properties": {
+          "base": {
+            "type": "string",
+            "description": "The prompt it goes after: `PromptInfo.text`."
+          },
+          "label": {
+            "type": "string"
+          },
+          "name": {
+            "$ref": "#/components/schemas/PromptName"
+          },
+          "text": {
+            "type": "string",
+            "description": "Empty when the domain has none."
           }
         }
       },
@@ -1505,6 +1749,49 @@
           "arxiv"
         ]
       },
+      "PromptInfo": {
+        "type": "object",
+        "description": "A prompt AI steps send and the text a step that starts now uses for it.",
+        "required": [
+          "name",
+          "label",
+          "default_text",
+          "text",
+          "customized"
+        ],
+        "properties": {
+          "customized": {
+            "type": "boolean",
+            "description": "Whether an override is stored."
+          },
+          "default_text": {
+            "type": "string",
+            "description": "The built-in text from prompts/."
+          },
+          "label": {
+            "type": "string",
+            "description": "What pages call it, e.g. 视频笔记."
+          },
+          "name": {
+            "$ref": "#/components/schemas/PromptName"
+          },
+          "text": {
+            "type": "string",
+            "description": "The override when there is one, else the built-in text."
+          }
+        }
+      },
+      "PromptName": {
+        "type": "string",
+        "description": "The prompts AI steps send, each a file in prompts/ and in `jobs/<id>/prompts/`. note sends\nnote-video or note-arxiv, followed by note-images when images go along; translate sends\ntranslate, or punctuate for a Chinese video.",
+        "enum": [
+          "note-video",
+          "note-arxiv",
+          "note-images",
+          "translate",
+          "punctuate"
+        ]
+      },
       "Punctuation": {
         "type": "object",
         "description": "From translate's `meta.punctuated`, `meta.sections`, `meta.kept_original`, `meta.corrected`\nand `meta.reverted`. Jobs punctuated before corrections existed report 0 for the last two.",
@@ -1550,6 +1837,19 @@
               "string",
               "null"
             ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SetPrompt": {
+        "type": "object",
+        "description": "Plain text. An override has 1-20000 characters; text equal to the built-in one removes the\noverride. A domain requirement has at most 4000 characters; empty text removes it. CRLF\nbecomes LF, and blank lines before and whitespace after the text are dropped.",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
           }
         },
         "additionalProperties": false

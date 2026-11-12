@@ -41,17 +41,18 @@ use unicode_normalization::UnicodeNormalization;
 use crate::{
     Config,
     api::{
-        AiCall, ApiError, Collection, Domain, ErrorCode, FeedList, FeedPicked, FeedQuery,
-        FeedSubmit, FeedSubmitResult, Health, JobDetail, JobFile, JobRef, JobSummary, JobsQuery,
-        LogChunk, LogQuery, NewCollection, NewDomain, Punctuation, SetFeed, StepInfo, StepStatus,
-        SubmitJob,
+        AiCall, ApiError, Collection, Domain, DomainPrompt, ErrorCode, FeedList, FeedPicked,
+        FeedQuery, FeedSubmit, FeedSubmitResult, Health, JobDetail, JobFile, JobRef, JobSummary,
+        JobsQuery, LogChunk, LogQuery, NewCollection, NewDomain, PromptInfo, Punctuation, SetFeed,
+        SetPrompt, StepInfo, StepStatus, SubmitJob,
     },
     db::{self, conflict, job_dir, not_found},
     exec::{self, ExecHandle, Stop},
     pipeline::{
-        FeedKind, MetaValue, StepName, TranslateMode, feed_kind_arg, find_step, parse_feed,
-        parse_source, read_job, read_manifest, step_dir_name, video_source,
+        FeedKind, MetaValue, PromptName, StepName, TranslateMode, feed_kind_arg, find_step,
+        parse_feed, parse_source, read_job, read_manifest, step_dir_name, video_source,
     },
+    prompts,
 };
 
 const FEED_TIMEOUT: Duration = Duration::from_secs(60);
@@ -99,6 +100,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/domains", get(list_domains).post(create_domain))
         .route("/api/domains/{id}", axum::routing::delete(delete_domain))
+        .route("/api/domains/{id}/prompts", get(list_domain_prompts))
+        .route("/api/domains/{id}/prompts/{name}", put(set_domain_prompt))
+        .route("/api/prompts", get(list_prompts))
+        .route("/api/prompts/{name}", put(set_prompt).delete(reset_prompt))
         .route(
             "/api/collections",
             get(list_collections).post(create_collection),
@@ -353,17 +358,36 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequestParts<S> for Q<T> {
     }
 }
 
+/// One path parameter by name, percent-decoded.
+async fn path_param(parts: &mut Parts, name: &str) -> Option<String> {
+    let Path(mut params) = Path::<BTreeMap<String, String>>::from_request_parts(parts, &())
+        .await
+        .ok()?;
+    params.remove(name)
+}
+
 /// `{id}` path parameter; anything but an integer names nothing.
 pub struct Id(i64);
 
 impl<S: Send + Sync> FromRequestParts<S> for Id {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, ApiError> {
-        match Path::<i64>::from_request_parts(parts, state).await {
-            Ok(Path(id)) => Ok(Id(id)),
-            Err(_) => Err(not_found("resource")),
-        }
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
+        let id = path_param(parts, "id").await.and_then(|id| id.parse().ok());
+        id.map(Id).ok_or_else(|| not_found("resource"))
+    }
+}
+
+/// `{name}` path parameter of the prompt routes. A name that is no prompt is a bad request,
+/// as a bad name in a body is.
+pub struct PromptPath(PromptName);
+
+impl<S: Send + Sync> FromRequestParts<S> for PromptPath {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, ApiError> {
+        let name = path_param(parts, "name").await.unwrap_or_default();
+        name.parse().map(PromptPath).map_err(invalid)
     }
 }
 
@@ -428,6 +452,108 @@ pub async fn create_domain(
 pub async fn delete_domain(State(s): State<AppState>, Id(id): Id) -> Res<StatusCode> {
     db::delete_domain(&s.db, id).await??;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn prompt_info(name: PromptName, stored: &prompts::Stored) -> PromptInfo {
+    PromptInfo {
+        name,
+        label: prompts::label(name).to_owned(),
+        default_text: prompts::builtin(name).to_owned(),
+        text: stored.text(name).to_owned(),
+        customized: stored.overrides.contains_key(&name),
+    }
+}
+
+/// The text as stored, when it has at most `max` characters.
+fn prompt_text(text: &str, max: usize) -> Result<String, ApiError> {
+    let text = prompts::tidy(text);
+    if text.chars().count() > max {
+        return Err(invalid(format!("text is longer than {max} characters")));
+    }
+    Ok(text)
+}
+
+#[utoipa::path(get, path = "/api/prompts", responses((status = 200, body = [PromptInfo])))]
+pub async fn list_prompts(State(s): State<AppState>) -> Res<Json<Vec<PromptInfo>>> {
+    let stored = db::prompts(&s.db, None).await?;
+    let list = PromptName::ALL.map(|name| prompt_info(name, &stored));
+    Ok(Json(list.into()))
+}
+
+/// Text equal to the built-in one removes the override, so the prompt follows later changes of
+/// the built-in text again.
+#[utoipa::path(
+    put, path = "/api/prompts/{name}", params(("name" = PromptName, Path)), request_body = SetPrompt,
+    responses((status = 200, body = PromptInfo), (status = 400, body = ApiError))
+)]
+pub async fn set_prompt(
+    State(s): State<AppState>,
+    PromptPath(name): PromptPath,
+    Body(body): Body<SetPrompt>,
+) -> Res<Json<PromptInfo>> {
+    let text = prompt_text(&body.text, prompts::TEXT_CHARS)?;
+    if text.is_empty() {
+        return Err(invalid("text is empty; DELETE restores the built-in prompt").into());
+    }
+    let custom = text != prompts::tidy(prompts::builtin(name));
+    db::set_prompt(&s.db, name, None, custom.then_some(text.as_str())).await??;
+    let stored = db::prompts(&s.db, None).await?;
+    Ok(Json(prompt_info(name, &stored)))
+}
+
+#[utoipa::path(
+    delete, path = "/api/prompts/{name}", params(("name" = PromptName, Path)),
+    responses((status = 204), (status = 400, body = ApiError))
+)]
+pub async fn reset_prompt(
+    State(s): State<AppState>,
+    PromptPath(name): PromptPath,
+) -> Res<StatusCode> {
+    db::set_prompt(&s.db, name, None, None).await??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn domain_prompt(name: PromptName, stored: &prompts::Stored) -> DomainPrompt {
+    DomainPrompt {
+        name,
+        label: prompts::label(name).to_owned(),
+        text: stored.domain.get(&name).cloned().unwrap_or_default(),
+        base: stored.text(name).to_owned(),
+    }
+}
+
+#[utoipa::path(
+    get, path = "/api/domains/{id}/prompts", params(("id" = i64, Path)),
+    responses((status = 200, body = [DomainPrompt]), (status = 404, body = ApiError))
+)]
+pub async fn list_domain_prompts(
+    State(s): State<AppState>,
+    Id(id): Id,
+) -> Res<Json<Vec<DomainPrompt>>> {
+    db::get_domain(&s.db, id)
+        .await?
+        .ok_or_else(|| not_found("domain"))?;
+    let stored = db::prompts(&s.db, Some(id)).await?;
+    let list = PromptName::ALL.map(|name| domain_prompt(name, &stored));
+    Ok(Json(list.into()))
+}
+
+#[utoipa::path(
+    put, path = "/api/domains/{id}/prompts/{name}",
+    params(("id" = i64, Path), ("name" = PromptName, Path)), request_body = SetPrompt,
+    responses((status = 200, body = DomainPrompt), (status = 400, body = ApiError), (status = 404, body = ApiError))
+)]
+pub async fn set_domain_prompt(
+    State(s): State<AppState>,
+    Id(id): Id,
+    PromptPath(name): PromptPath,
+    Body(body): Body<SetPrompt>,
+) -> Res<Json<DomainPrompt>> {
+    let text = prompt_text(&body.text, prompts::DOMAIN_CHARS)?;
+    let text = (!text.is_empty()).then_some(text.as_str());
+    db::set_prompt(&s.db, name, Some(id), text).await??;
+    let stored = db::prompts(&s.db, Some(id)).await?;
+    Ok(Json(domain_prompt(name, &stored)))
 }
 
 #[utoipa::path(get, path = "/api/collections", responses((status = 200, body = [Collection])))]
