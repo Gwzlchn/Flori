@@ -101,11 +101,6 @@ impl ExecHandle {
         }
     }
 
-    /// The AI CLI's version, recorded in every new job.json.
-    pub fn cli_version(&self) -> &str {
-        &self.inner.tools.cli_version
-    }
-
     pub fn tools(&self) -> &Tools {
         &self.inner.tools
     }

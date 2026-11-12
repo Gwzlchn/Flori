@@ -585,7 +585,7 @@ pub async fn submit_feed(
         .await?
         .ok_or_else(|| not_found("collection"))?;
     let translate = body.translate.unwrap_or(TranslateMode::Auto);
-    let (domain_id, cli) = (collection.domain_id, s.exec.cli_version());
+    let (domain_id, cli) = (collection.domain_id, s.exec.tools().cli_version.as_str());
     let results = db::create_jobs(
         &s.db,
         &s.config,
@@ -629,7 +629,11 @@ pub async fn submit_job(
     let source = parse_source(&body.url)
         .ok_or_else(|| ApiError::new(ErrorCode::InvalidUrl, "not a supported link"))?;
     let translate = body.translate.unwrap_or(TranslateMode::Auto);
-    let (domain, collection, cli) = (body.domain_id, body.collection_id, s.exec.cli_version());
+    let (domain, collection, cli) = (
+        body.domain_id,
+        body.collection_id,
+        s.exec.tools().cli_version.as_str(),
+    );
     let results = db::create_jobs(
         &s.db,
         &s.config,
