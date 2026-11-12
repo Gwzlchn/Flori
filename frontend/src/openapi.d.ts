@@ -404,6 +404,12 @@ export interface components {
             platform: components["schemas"]["Platform"];
             /** @description Date the source was published, `YYYY-MM-DD`. */
             published?: string | null;
+            /**
+             * @description translate adds punctuation to a Chinese transcript instead of translating it, so pages
+             *     name that step 加标点. Set by the job detail, and by the job list where `current_step` is
+             *     translate, the one step name the list shows; false elsewhere.
+             */
+            punctuates: boolean;
             source_id: string;
             status: components["schemas"]["JobStatus"];
             title?: string | null;

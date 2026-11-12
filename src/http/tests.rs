@@ -1029,6 +1029,87 @@ async fn a_punctuated_chinese_video_says_so_on_its_translate_step() {
 }
 
 #[tokio::test]
+async fn punctuates_names_the_translate_step_of_a_chinese_video() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    let cfg = &app.state.config;
+    let manifest = |meta: Value| json!({"title": null, "files": {}, "assets": [], "meta": meta});
+    let spoken = |id, language: &str| {
+        let meta = json!({"language": language});
+        fake(
+            cfg,
+            id,
+            "video-transcribe.json",
+            &manifest(meta).to_string(),
+        );
+    };
+    let translated = |id, meta: Value| fake(cfg, id, "translate.json", &manifest(meta).to_string());
+    // 1 and 2 fail in translate, Chinese and English; 3 is a paper failing there.
+    spoken(1, "zh");
+    spoken(2, "en");
+    for id in 1..=3 {
+        fake(cfg, id, "translate", "20");
+    }
+    // 4 is Chinese but skipped as too long, 5 punctuated, 6 Chinese without translate.
+    spoken(4, "zh");
+    translated(
+        4,
+        json!({"language": "zh", "translated": false, "skipped_reason": "too_long"}),
+    );
+    translated(
+        5,
+        json!({"language": "zh", "translated": false, "punctuated": true}),
+    );
+    spoken(6, "zh");
+    let jobs = [
+        ("https://youtu.be/dQw4w9WgXc1", "auto"),
+        ("https://youtu.be/dQw4w9WgXc2", "auto"),
+        ("2401.12345", "auto"),
+        ("https://youtu.be/dQw4w9WgXc4", "auto"),
+        ("https://youtu.be/dQw4w9WgXc5", "auto"),
+        ("https://youtu.be/dQw4w9WgXc6", "off"),
+    ];
+    for (url, translate) in jobs {
+        let submit = json!({"url": url, "domain_id": ml, "translate": translate});
+        assert_eq!(app.post("/api/jobs", submit).await.0, StatusCode::CREATED);
+    }
+    for id in 1..=3 {
+        wait_status(&app.state.db, id, JobStatus::Failed).await;
+    }
+    for id in 4..=6 {
+        wait_status(&app.state.db, id, JobStatus::Succeeded).await;
+    }
+    let want = [true, false, false, false, true, false];
+    for (id, want) in (1..).zip(want) {
+        let (_, detail) = app.get(&format!("/api/jobs/{id}")).await;
+        assert_eq!(detail["job"]["punctuates"], want, "detail {id}");
+    }
+    // The list only looks where it names translate: the steps that failed there.
+    let (_, list) = app.get("/api/jobs").await;
+    let listed: Vec<(i64, bool)> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|job| {
+            (
+                job["id"].as_i64().unwrap(),
+                job["punctuates"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    let want = [
+        (6, false),
+        (5, false),
+        (4, false),
+        (3, false),
+        (2, false),
+        (1, true),
+    ];
+    assert_eq!(listed, want);
+    assert_eq!(list[5]["current_step"], "translate");
+}
+
+#[tokio::test]
 async fn a_failed_step_still_lists_its_ai_calls() {
     let app = app().await;
     let ml = app.domain("ml").await;

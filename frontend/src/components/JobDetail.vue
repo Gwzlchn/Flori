@@ -2,8 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import {
-  api, duration, failedAt, failure, fileText, fileUrl, isActive, jobStatusText, platformText, seconds, shortTime, stepStatusText,
-  stepText, type Schemas,
+  api, duration, failedAt, failure, fileLabel, fileText, fileUrl, isActive, jobStatusText, platformText, seconds, shortTime,
+  stepLabel, stepStatusText, type Schemas,
 } from "../client";
 import JobMeta from "./JobMeta.vue";
 import MarkdownView from "./MarkdownView.vue";
@@ -26,7 +26,7 @@ const htmlSource: Record<string, string> = { arxiv: "arXiv 官方 HTML", ar5iv: 
 const translationSource: Record<string, string> = { ai: "AI 翻译", subtitle: "中文人工字幕" };
 
 // A few manifest meta values with Chinese labels; abstract, authors, title and vault_path stay out.
-// skipped_reason and the punctuation counts have their own sentences below the step.
+// skipped_reason, the punctuation counts and untranslated_blocks have their own sentences below the step.
 function metaChips(meta: Schemas["StepInfo"]["meta"]): string[] {
   const text = (key: string) => { const value = meta[key]; return typeof value === "string" && value ? value : undefined; };
   const number = (key: string) => { const value = meta[key]; return typeof value === "number" ? value : undefined; };
@@ -51,6 +51,12 @@ function metaChips(meta: Schemas["StepInfo"]["meta"]): string[] {
   const chunks = number("chunks");
   if (chunks !== undefined) chips.push(`${chunks} 块`);
   return chips;
+}
+
+// Blocks whose reply failed validation twice; they keep the original text.
+function untranslated(step: Schemas["StepInfo"]): number {
+  const count = step.meta.untranslated_blocks;
+  return typeof count === "number" ? count : 0;
 }
 
 function punctuationText({ sections, kept_original: kept, corrected, reverted }: Schemas["Punctuation"]): string {
@@ -85,6 +91,7 @@ const job = computed(() => detail.value?.job);
 const domainName = computed(() => props.domains.find((item) => item.id === job.value?.domain_id)?.name);
 const collectionName = computed(() => props.collections.find((item) => item.id === job.value?.collection_id)?.name);
 const place = computed(() => [domainName.value, collectionName.value].filter(Boolean).join(" / "));
+const translateMeta = computed(() => detail.value?.steps.find((step) => step.name === "translate")?.meta);
 const docs = computed(() => (detail.value?.files ?? [])
   .filter((file) => file.path.endsWith(".md"))
   .sort((a, b) => rank(a.name) - rank(b.name)));
@@ -92,7 +99,7 @@ const docs = computed(() => (detail.value?.files ?? [])
 const tabs = computed(() => [
   { name: "note", label: fileText.note, href: `/jobs/${props.id}` },
   ...docs.value.filter((file) => file.name !== "note")
-    .map((file) => ({ name: file.name, label: fileText[file.name] ?? file.name, href: `/jobs/${props.id}/${file.name}` })),
+    .map((file) => ({ name: file.name, label: fileLabel(file.name, translateMeta.value), href: `/jobs/${props.id}/${file.name}` })),
   { name: META_TAB, label: "元信息", href: `/jobs/${props.id}/${META_TAB}` },
 ]);
 const active = computed(() => (tabs.value.some((item) => item.name === props.tab) ? props.tab : "note"));
@@ -273,7 +280,7 @@ onBeforeUnmount(() => {
         <p v-if="total > 0 || failedStep" class="meta">
           <template v-if="total > 0">各步共用时 {{ duration(total) }}</template>
           <template v-if="total > 0 && failedStep"> · </template>
-          <span v-if="failedStep" class="danger">{{ failedAt(failedStep.name) }}</span>
+          <span v-if="failedStep" class="danger">{{ failedAt(failedStep.name, job.punctuates) }}</span>
         </p>
         <p v-if="detail.vault_path" class="meta">已发布到 {{ detail.vault_path }}</p>
       </div>
@@ -317,7 +324,7 @@ onBeforeUnmount(() => {
           <ol class="steps">
             <li v-for="{ step, chips, log: stepLog, last, seconds: spent } in rows" :key="step.seq">
               <div class="row">
-                <b class="grow">{{ stepText[step.name] }}</b>
+                <b class="grow">{{ stepLabel(step.name, job.punctuates) }}</b>
                 <small v-if="spent !== undefined" class="meta">{{ duration(spent) }}</small>
                 <small v-if="step.attempts > 0" class="meta">尝试 {{ step.attempts }} 次</small>
                 <span v-if="step.exit_code === 30" class="pill state-failed">凭据失效</span>
@@ -326,12 +333,13 @@ onBeforeUnmount(() => {
               <p v-if="step.error" class="error">{{ step.error }}</p>
               <p v-if="step.skipped_reason" class="meta">{{ skipText[step.skipped_reason] ?? `已跳过:${step.skipped_reason}` }}</p>
               <p v-if="step.punctuation" class="meta">{{ punctuationText(step.punctuation) }}</p>
+              <p v-if="untranslated(step) > 0" class="meta">{{ untranslated(step) }} 段未译,保留原文</p>
               <div v-if="chips.length" class="chips">
                 <span v-for="chip in chips" :key="chip" class="chip">{{ chip }}</span>
               </div>
               <div v-if="step.files.length" class="step-files">
                 <a v-for="file in step.files" :key="file.path" :href="fileUrl(detail.preview_base, file.path)" target="_blank" rel="noopener">
-                  {{ fileText[file.name] ?? file.name }}
+                  {{ fileLabel(file.name, step.name === "translate" ? step.meta : undefined) }}
                 </a>
               </div>
               <p v-if="step.status === 'running' && last" class="meta tail">{{ last }}</p>

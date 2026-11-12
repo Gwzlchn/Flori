@@ -1308,6 +1308,7 @@
           "domain_id",
           "translate",
           "status",
+          "punctuates",
           "created",
           "updated"
         ],
@@ -1388,6 +1389,10 @@
               "null"
             ],
             "description": "Date the source was published, `YYYY-MM-DD`."
+          },
+          "punctuates": {
+            "type": "boolean",
+            "description": "translate adds punctuation to a Chinese transcript instead of translating it, so pages\nname that step 加标点. Set by the job detail, and by the job list where `current_step` is\ntranslate, the one step name the list shows; false elsewhere."
           },
           "source_id": {
             "type": "string"

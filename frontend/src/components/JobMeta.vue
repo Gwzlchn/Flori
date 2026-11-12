@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-import { bytes, duration, fileText, fileUrl, jobStatusText, platformText, shortTime, type Schemas } from "../client";
+import { bytes, duration, fileLabel, fileUrl, jobStatusText, platformText, shortTime, type Schemas } from "../client";
 
 const props = defineProps<{
   detail: Schemas["JobDetail"]; domain: string | undefined; collection: string | undefined; spent: number;
@@ -150,7 +150,7 @@ const cards = computed(() => [
       <summary class="meta">产物文件 {{ detail.files.length }} 个</summary>
       <ul class="files">
         <li v-for="file in detail.files" :key="file.name">
-          <a :href="fileUrl(detail.preview_base, file.path)" target="_blank" rel="noopener">{{ fileText[file.name] ?? file.name }}</a>
+          <a :href="fileUrl(detail.preview_base, file.path)" target="_blank" rel="noopener">{{ fileLabel(file.name, stepMeta("translate")) }}</a>
           <small class="meta">{{ file.path }}</small>
         </li>
       </ul>

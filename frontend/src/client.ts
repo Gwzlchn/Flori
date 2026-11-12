@@ -30,10 +30,22 @@ export const feedKindText: Record<Schemas["FeedKind"], string> = {
   yt_channel: "YouTube 频道", yt_playlist: "YouTube 播放列表",
 };
 
+// translate on a Chinese video adds punctuation instead of translating; job.punctuates says so.
+export function stepLabel(step: Schemas["StepName"], punctuates: boolean): string {
+  return step === "translate" && punctuates ? "加标点" : stepText[step];
+}
+
 // A Latin step name such as "AI 笔记" gets a space after the Chinese words before it.
-export function failedAt(step: Schemas["StepName"]): string {
-  const name = stepText[step];
+export function failedAt(step: Schemas["StepName"], punctuates: boolean): string {
+  const name = stepLabel(step, punctuates);
   return /^[A-Za-z0-9]/.test(name) ? `失败于 ${name}` : `失败于${name}`;
+}
+
+// The transcript translate writes for a video it translated holds Chinese beside the original;
+// `translate` is that step's meta. Other files go by their logical name.
+export function fileLabel(name: string, translate: Schemas["StepInfo"]["meta"] | undefined): string {
+  if (name !== "transcript" || translate?.translated !== true) return fileText[name] ?? name;
+  return translate.language === "en" ? "中英对照" : "双语对照";
 }
 
 export function isActive(status: Schemas["JobStatus"]): boolean {

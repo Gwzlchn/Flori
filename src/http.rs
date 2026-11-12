@@ -42,13 +42,14 @@ use crate::{
     api::{
         AiCall, ApiError, Collection, Domain, ErrorCode, FeedList, FeedPicked, FeedQuery,
         FeedSubmit, FeedSubmitResult, Health, JobDetail, JobFile, JobRef, JobSummary, JobsQuery,
-        LogChunk, LogQuery, NewCollection, NewDomain, Punctuation, SetFeed, StepStatus, SubmitJob,
+        LogChunk, LogQuery, NewCollection, NewDomain, Punctuation, SetFeed, StepInfo, StepStatus,
+        SubmitJob,
     },
     db::{self, conflict, job_dir, not_found},
     exec::{self, ExecHandle, Stop},
     pipeline::{
-        FeedKind, MetaValue, StepName, TranslateMode, feed_kind_arg, parse_feed, parse_source,
-        read_job, read_manifest, step_dir_name, video_source,
+        FeedKind, MetaValue, StepName, TranslateMode, feed_kind_arg, find_step, parse_feed,
+        parse_source, read_job, read_manifest, step_dir_name, video_source,
     },
 };
 
@@ -662,17 +663,40 @@ pub async fn list_jobs(
     State(s): State<AppState>,
     Q(query): Q<JobsQuery>,
 ) -> Res<Json<Vec<JobSummary>>> {
-    Ok(Json(
-        db::list_jobs(&s.db, query.limit.unwrap_or(200)).await?,
-    ))
+    let mut jobs = db::list_jobs(&s.db, query.limit.unwrap_or(200)).await?;
+    // A current translate has not succeeded, so only video-transcribe can tell.
+    for job in &mut jobs {
+        if job.current_step == Some(StepName::Translate) {
+            let dir = job_dir(&s.config.data_dir, job.id);
+            let transcribe = find_step(&dir, StepName::VideoTranscribe).ok().flatten();
+            let manifest = transcribe.and_then(|dir| read_manifest(&dir).ok());
+            job.punctuates = punctuates(None, manifest.as_ref().map(|m| &m.meta));
+        }
+    }
+    Ok(Json(jobs))
 }
+
+/// Whether translate punctuates a Chinese transcript instead of translating it, from the metas of
+/// translate and video-transcribe that succeeded. translate's `punctuated` decides once it ran;
+/// before that, video-transcribe's language zh stands in for translate's own detection over the
+/// same transcript, which nearly always agrees.
+fn punctuates(translate: Option<&Meta>, transcribe: Option<&Meta>) -> bool {
+    match translate {
+        Some(meta) => meta.get("punctuated") == Some(&MetaValue::Bool(true)),
+        None => {
+            transcribe.and_then(|meta| meta.get("language")) == Some(&MetaValue::Text("zh".into()))
+        }
+    }
+}
+
+type Meta = BTreeMap<String, MetaValue>;
 
 #[utoipa::path(
     get, path = "/api/jobs/{id}", params(("id" = i64, Path)),
     responses((status = 200, body = JobDetail), (status = 404, body = ApiError))
 )]
 pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetail>> {
-    let (job, vault_path) = db::get_job(&s.db, id)
+    let (mut job, vault_path) = db::get_job(&s.db, id)
         .await?
         .ok_or_else(|| not_found("job"))?;
     let mut steps = db::steps(&s.db, id).await?;
@@ -722,6 +746,13 @@ pub async fn get_job(State(s): State<AppState>, Id(id): Id) -> Res<Json<JobDetai
             note_file = text("note_file");
         }
         step.meta = manifest.meta;
+    }
+    if steps.iter().any(|step| step.name == StepName::Translate) {
+        let meta = |name| {
+            let done = |step: &&StepInfo| step.name == name && step.status == StepStatus::Succeeded;
+            steps.iter().find(done).map(|step| &step.meta)
+        };
+        job.punctuates = punctuates(meta(StepName::Translate), meta(StepName::VideoTranscribe));
     }
     let obsidian_uri = vault_path
         .as_deref()

@@ -1,7 +1,7 @@
 <script lang="ts">
 import { computed, ref } from "vue";
 
-import { duration, failedAt, jobStatusText, platformText, shortTime, stepText, type Schemas } from "../client";
+import { duration, failedAt, jobStatusText, platformText, shortTime, stepLabel, type Schemas } from "../client";
 
 type Job = Schemas["JobSummary"];
 
@@ -97,8 +97,8 @@ function facts(job: Job): string {
           </span>
           <small class="meta">
             #{{ job.id }} · {{ platformText[job.platform] }} · {{ place(job) }} · {{ shortTime(job.created) }}
-            <template v-if="job.status === 'running' && job.current_step"> · {{ stepText[job.current_step] }}</template>
-            <template v-if="job.status === 'failed' && job.current_step"> · {{ failedAt(job.current_step) }}</template>
+            <template v-if="job.status === 'running' && job.current_step"> · {{ stepLabel(job.current_step, job.punctuates) }}</template>
+            <template v-if="job.status === 'failed' && job.current_step"> · {{ failedAt(job.current_step, job.punctuates) }}</template>
           </small>
         </a>
       </li>

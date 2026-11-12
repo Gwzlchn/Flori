@@ -280,6 +280,11 @@ pub struct JobSummary {
     pub current_step: Option<StepName>,
     /// Exit code of `current_step`; 30 means credentials expired.
     pub current_exit_code: Option<i32>,
+    /// translate adds punctuation to a Chinese transcript instead of translating it, so pages
+    /// name that step 加标点. Set by the job detail, and by the job list where `current_step` is
+    /// translate, the one step name the list shows; false elsewhere.
+    #[sqlx(skip)]
+    pub punctuates: bool,
     pub created: String,
     pub updated: String,
 }
