@@ -3,13 +3,18 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { api, isActive, type Schemas } from "./client";
 import AboutPage from "./components/AboutPage.vue";
+import DomainPrompts from "./components/DomainPrompts.vue";
 import FeedPanel from "./components/FeedPanel.vue";
 import JobDetail from "./components/JobDetail.vue";
 import NoteShelf from "./components/NoteShelf.vue";
+import PromptsPage from "./components/PromptsPage.vue";
 import SubmitBar from "./components/SubmitBar.vue";
 import TaxonomyPanel from "./components/TaxonomyPanel.vue";
 
-type Route = { view: "home" | "taxonomy" | "about" | "missing" } | { view: "job"; id: number; tab: string } | { view: "feed"; id: number };
+type Route =
+  | { view: "home" | "taxonomy" | "prompts" | "about" | "missing" }
+  | { view: "job"; id: number; tab: string }
+  | { view: "feed" | "domain-prompts"; id: number };
 
 const path = ref(location.pathname);
 const ready = ref(false);
@@ -25,10 +30,16 @@ const route = computed((): Route => {
   if (job) return { view: "job", id: Number(job[1]), tab: job[2] ?? "" };
   const feed = /^\/collections\/(\d+)\/feed\/?$/.exec(path.value);
   if (feed) return { view: "feed", id: Number(feed[1]) };
+  const domainPrompts = /^\/domains\/(\d+)\/prompts\/?$/.exec(path.value);
+  if (domainPrompts) return { view: "domain-prompts", id: Number(domainPrompts[1]) };
   if (path.value === "/") return { view: "home" };
   if (path.value === "/about") return { view: "about" };
+  if (path.value === "/prompts") return { view: "prompts" };
   return { view: path.value === "/taxonomy" ? "taxonomy" : "missing" };
 });
+
+// Pages reached from 领域与订阅 keep that tab lit.
+const taxonomyViews: Route["view"][] = ["taxonomy", "feed", "prompts", "domain-prompts"];
 
 // Same-origin links navigate in place. /api links (files, video) and obsidian:// stay with the browser.
 function follow(event: MouseEvent): void {
@@ -86,7 +97,7 @@ onBeforeUnmount(() => {
       <a class="brand" href="/">Flori</a>
       <nav class="nav">
         <a href="/" :class="{ on: route.view === 'home' || route.view === 'job' }">笔记</a>
-        <a href="/taxonomy" :class="{ on: route.view === 'taxonomy' || route.view === 'feed' }">领域与订阅</a>
+        <a href="/taxonomy" :class="{ on: taxonomyViews.includes(route.view) }">领域与订阅</a>
         <a href="/about" :class="{ on: route.view === 'about' }">关于</a>
       </nav>
       <small v-if="version" class="meta">v{{ version }}</small>
@@ -99,6 +110,8 @@ onBeforeUnmount(() => {
       <JobDetail v-else-if="route.view === 'job'" :id="route.id" :key="route.id" :tab="route.tab" :domains :collections />
       <TaxonomyPanel v-else-if="route.view === 'taxonomy'" :domains :collections @changed="loadTaxonomy" />
       <FeedPanel v-else-if="route.view === 'feed'" :id="route.id" :key="route.id" :domains :collections @changed="loadTaxonomy" />
+      <PromptsPage v-else-if="route.view === 'prompts'" />
+      <DomainPrompts v-else-if="route.view === 'domain-prompts'" :id="route.id" :key="route.id" :domains />
       <AboutPage v-else-if="route.view === 'about'" />
       <p v-else class="empty">页面不存在。<a href="/">回到笔记列表</a></p>
     </main>

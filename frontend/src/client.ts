@@ -62,6 +62,12 @@ export function fileUrl(base: string, path: string): string {
   return base + path.split("/").map(encodeURIComponent).join("/");
 }
 
+// Rows of a textarea holding `text`: its lines and one more to type in, from `least` up to 30.
+// Long lines wrap, so this undercounts them; the box still scrolls and resizes.
+export function textRows(text: string, least = 6): number {
+  return Math.min(30, Math.max(least, text.split("\n").length + 1));
+}
+
 // Server times are already +08:00, so the wall-clock prefix is the local time.
 export function shortTime(rfc3339: string): string {
   return rfc3339.slice(0, 16).replace("T", " ");

@@ -55,8 +55,11 @@ async function remove(kind: "domains" | "collections", id: number, name: string)
 <template>
   <section class="card stack">
     <div>
-      <h2>领域与集合</h2>
-      <p class="meta">名字就是 Obsidian 里的文件夹名,领域名也是笔记的标签;可以用中文,建好后不能改名;领域下还有集合或任务、集合下还有任务时不能删除。</p>
+      <header class="row">
+        <h2 class="grow">领域与集合</h2>
+        <a class="btn compact" href="/prompts">提示词</a>
+      </header>
+      <p class="meta">名字就是 Obsidian 里的文件夹名,领域名也是笔记的标签;可以用中文,建好后不能改名;领域下还有集合或任务、集合下还有任务时不能删除。每个领域可以在"领域要求"里给提示词追加要求。</p>
     </div>
     <form class="row" @submit.prevent="addDomain">
       <input v-model="domainName" class="grow" type="text" autocapitalize="off" autocomplete="off" placeholder="新领域,如 计算机系统结构" aria-label="新领域名字">
@@ -67,6 +70,7 @@ async function remove(kind: "domains" | "collections", id: number, name: string)
     <article v-for="domain in domains" :key="domain.id" class="domain">
       <header class="row">
         <h3 class="grow">{{ domain.name }}</h3>
+        <a class="btn compact" :href="`/domains/${domain.id}/prompts`">领域要求</a>
         <button type="button" class="btn compact danger-outline" :disabled="busy" @click="remove('domains', domain.id, domain.name)">删除领域</button>
       </header>
       <ul class="collections">

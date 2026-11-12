@@ -265,7 +265,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
   - running 只由执行器写。retry 与 cancel 由 HTTP 层在一个事务里改状态,再调用 `ExecHandle::wake()` 或 `cancel(job_id)`。
   - 服务启动时把 running 的 job 改回 queued、running 的步改回 pending,并删除残留的 `.tmp` 目录。
 - 时间字段都是 RFC 3339,时区 +08:00。
-- 非 /api 路径返回静态文件,找不到时返回 index.html;前端手工解析 pathname,不用 vue-router。详情页的标签页是真实链接:`/jobs/<id>` 是 AI 笔记,`/jobs/<id>/<逻辑名>` 是该 .md 文件,`/jobs/<id>/meta` 是元信息;不认识的名字显示 AI 笔记,地址不变。`/about` 是只读的关于与系统页,关于部分是随前端发布的静态文字,系统部分读 GET /api/system。/api 下没有的端点(含 /api 与 /api/ 本身)返回 404 not_found,页面不会在 /api 的 CSP 下打开。
+- 非 /api 路径返回静态文件,找不到时返回 index.html;前端手工解析 pathname,不用 vue-router。详情页的标签页是真实链接:`/jobs/<id>` 是 AI 笔记,`/jobs/<id>/<逻辑名>` 是该 .md 文件,`/jobs/<id>/meta` 是元信息;不认识的名字显示 AI 笔记,地址不变。`/about` 是只读的关于与系统页,关于部分是随前端发布的静态文字,系统部分读 GET /api/system。`/prompts` 编辑提示词,`/domains/<id>/prompts` 编辑该领域的领域要求;提示词与领域要求只按纯文本显示。/api 下没有的端点(含 /api 与 /api/ 本身)返回 404 not_found,页面不会在 /api 的 CSP 下打开。
 - feed.py:`python3 -I $FLORI_STEPS_DIR/feed.py list <kind> <normalized_url> --limit N`,超时 60s。stdout `{"title":str,"items":[{"platform":"bilibili"|"youtube","source_id":str,"title":str,"published":"YYYY-MM-DD"|null,"duration_s":int|null}]}`;退出码沿用契约 1。
   - kind 封闭,规范 URL 由服务端解析投递链接后生成,feed.py 只接受下表形式(整串匹配),其它一律退出 20:
 

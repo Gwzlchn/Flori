@@ -19,7 +19,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: #f7f7f5; font-size: 14px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button, summary, a { -webkit-tap-highlight-color: transparent; }
 a { color: var(--brand-dark); }
 h1, h2, h3, p { margin-top: 0; }
@@ -44,10 +44,13 @@ p:last-child { margin-bottom: 0; }
 .empty { margin: 8px 0; }
 .error { margin: 6px 0 0; color: var(--danger); font-size: 13px; overflow-wrap: anywhere; }
 .ok { margin: 6px 0 0; color: #3f8f48; font-size: 13px; }
+.warn { margin: 6px 0 0; color: #a5631a; font-size: 13px; }
 .full { flex-basis: 100%; }
 
 input[type="text"], select { min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink); background: var(--surface); }
 input[type="text"]:focus, select:focus { border-color: #a8cef0; outline: 0; box-shadow: 0 0 0 2px rgb(35 131 226 / 12%); }
+textarea { display: block; width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink); background: var(--surface); line-height: 1.6; resize: vertical; }
+textarea:focus { border-color: #a8cef0; outline: 0; box-shadow: 0 0 0 2px rgb(35 131 226 / 12%); }
 input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var(--brand); }
 .btn { display: inline-flex; align-items: center; min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink); background: var(--surface); cursor: pointer; font-size: 13px; font-weight: 600; text-decoration: none; white-space: nowrap; box-shadow: var(--shadow); }
 .btn:hover:not(:disabled) { background: var(--line-soft); }
@@ -145,6 +148,9 @@ details[open] > .fold { margin-bottom: 10px; }
 .steps li:first-child, .files li:first-child { border-top: 0; }
 .files li { display: flex; gap: 8px; justify-content: space-between; }
 .files .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.prompt-base summary { color: var(--muted); cursor: pointer; font-size: 13px; }
+.prompt-base pre { max-height: 360px; margin: 6px 0 0; padding: 10px; overflow: auto; border-radius: 5px; background: var(--surface-soft); font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .domain { padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }
 .domain > header { margin-bottom: 4px; }
