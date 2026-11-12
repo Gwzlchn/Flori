@@ -213,13 +213,13 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
 | PUT /api/collections/{id}/feed | {url\|null};解析为 6 种 kind 之一并规范化后存 feed_url;解析不了 400 invalid_url;null 解绑 |
 | GET /api/collections/{id}/feed?limit=30 | 同步调用 feed.py(limit 1–100,超时 60s),每条附 job:{id,status}\|null;未绑定 400 invalid_request;已有刷新在跑或上次刷新开始不到 10s(失败或中途断开的刷新同样计时)409;上游失败 502 upstream,message 取 feed.py stderr 最后一行 |
 | POST /api/collections/{id}/feed/jobs | {items:[{platform,source_id}], translate?};每批 1–20 条,超出 400 invalid_request;服务端校验 ID 并自己拼 URL;一个事务内插入;返回 {created, skipped},每项带 job |
-| POST /api/jobs | {url, domain_id, collection_id?, translate?};识别不了 400 invalid_url;领域或集合不存在 404;重复 409 conflict 并带 job_id;成功 201 |
+| POST /api/jobs | {url, domain_id, collection_id?, translate?};识别不了 400 invalid_url;领域或集合不存在 404;重复 409 conflict 并带已有任务的整数 id;成功 201 |
 | GET /api/jobs?limit= | 按 id 倒序,默认 200 条;筛选在前端做。每项的 id 是整数主键,用于所有 /api/jobs/{id} 端点;job_key 是契约 2 的字符串 id(frontmatter 的 job_id),由 platform、source_id、created 现算,不建列,没有端点接受它。author(视频的 uploader,论文的 authors 用 ", " 连接)、published(YYYY-MM-DD)、duration_ms(视频)、description(publish 的 meta.description)在 publish 成功时由服务端从 video-fetch 或 arxiv-fetch 与 publish 的 manifest.meta 写进 jobs 的同名列,只供列表与筛选;此前、来源没给或早于这些列发布的任务为 null,不回填 |
 | GET /api/jobs/{id} | job、steps、files、assets、preview_base、vault_path、obsidian_uri、job_url、ai(job.json 的 ai,读不到时为 null);files 是各步 manifest.files 按 publish 规则合并的结果;每步带 meta(成功步骤的 manifest.meta 原样,其余为空对象)与 files(本步自己的 manifest.files,不受后续步骤覆盖,路径相对 job 目录),以及 manifest 的 skipped_reason,translate 给中文视频加了标点时另有 punctuation{sections, kept_original, corrected, reverted}(早于同音纠错的任务后两项为 0);每步另带 ai_calls[{name, attempt, index, files}],即 ai/ 里本步各次尝试的调用记录,按尝试与序号排序,files 是 job 内相对路径,按 prompt.md、call.json、out.json\|out.txt、err.txt 排列,失败的步骤也列出;记录里是不可信的转写与模型文字,前端只按纯文本显示,经 files 端点按需读取;obsidian_uri 由 publish 的 vault_path 去掉开头的 vault 名、拼上 note_file 得到 |
 | GET /api/jobs/{id}/logs?offset= | 返回 job.log 从 offset 起的完整行(每次最多约 256KiB;单行超过上限时按字符边界切开)与 next_offset;offset 超出文件末尾 400 invalid_request;前端每 1.5s 轮询 |
 | POST /api/jobs/{id}/retry、/cancel | retry 只对 failed 与 canceled,从失败或取消的那一步继续;cancel 对 queued 与 running,杀进程组;其它状态 409 |
 | GET /api/jobs/{id}/files/{*path} | canonicalize 后必须在 job 目录内,否则 404;支持 HTTP Range;所有响应只带一个 `Content-Security-Policy: sandbox allow-same-origin; frame-ancestors 'none'` 与 `X-Content-Type-Options: nosniff`:外部 HTML 不能运行脚本或提交表单,它引用的图片仍按同源加载 |
-| GET /api/system | 只读的运行状况,供"关于与系统"页。响应是手写的白名单结构体 SystemInfo,从不序列化整个配置;密钥与可能带口令的值只报有无。version、commit(构建时由 `just image` 经 FLORI_BUILD_COMMIT 注入的短提交号,其它构建为 unknown);ai{tool, model_note, model_translate, cli_version}(当前配置,即新任务会用的);bili_login(是否配置了 FLORI_BILI_SESSDATA,不代表仍有效)、proxy(是否配置了 FLORI_PROXY);ytdlp_version;whisper_model(模型目录的最后一段);data_dir、vault_name;disk_free_bytes、disk_total_bytes(data_dir 所在文件系统,statvfs 失败时为 null);domains、collections、notes(succeeded 的任务数);weekly_goal(3)与 weeks[{start, submitted, met}]:本周与此前三周,新的在前,start 是周一(+08:00),submitted 是该周创建的任务数(不论结果),met 即 submitted ≥ weekly_goal。cli_version 与 ytdlp_version 在服务启动时各取一次 `--version`,请求时不起子进程,取不到为 unknown,接口不因此失败 |
+| GET /api/system | 只读的运行状况,供"关于与系统"页。响应是手写的白名单结构体,从不序列化整个配置;密钥与可能带口令的值只报有无。commit 在构建时由 `just image` 注入,其它构建为 unknown;AI CLI 与 yt-dlp 的版本在服务启动时各取一次,请求时不起子进程,取不到为 unknown;磁盘两项在 statvfs 失败时为 null;weeks 是本周与此前三周,新的在前,周从周一起按 +08:00,按创建的任务计,不论结果 |
 | GET /api/health | {version};唯一不要求认证的端点 |
 
 - 认证:Basic Auth,用户名 FLORI_WEB_USER,口令 FLORI_WEB_PASSWORD,服务端常量时间比较,不存哈希。静态页面和 /api 都要认证。
@@ -239,7 +239,7 @@ $DATA/vault/<FLORI_VAULT_NAME>/<domain>/<collection | unsorted>/<YYYY-MM-DD>-<bi
   - /api 下的响应带 `Cache-Control: no-store`;响应自己没有 CSP 时带 `Content-Security-Policy: frame-ancestors 'none'`。
   - 每个响应只有一个 CSP 值:浏览器会同时执行多个 CSP 头,不会合并。
 - 401 与 403 不在错误码集合里,也不写进 OpenAPI。
-- 错误体 `{code, message, job_id?}`。code 是封闭集合:invalid_url、invalid_name、invalid_request(400),not_found(404),conflict(409),upstream(502)。job_id 只在重复投递的 conflict 里出现。
+- 错误体 `{code, message, job_id?}`。code 是封闭集合:invalid_url、invalid_name、invalid_request(400),not_found(404),conflict(409),upstream(502)。job_id 只在重复投递的 conflict 里出现,是整数主键,不是契约 2 的字符串 id。
 - 请求体不允许未知字段。
 - 去重:`jobs_source_once` 唯一索引 (domain_id, ifnull(collection_id, 0), platform, source_id)。arXiv 的 v1、v2 链接归为同一 source_id。同一链接可以分别投到不同领域或集合。
 - 状态:

@@ -320,7 +320,7 @@ pub fn source_slug(platform: Platform, source_id: &str) -> String {
 }
 
 /// The job's string id: `<slug>-<first 6 hex of sha256("<platform>:<source_id>:<created>")>`,
-/// e.g. `yt-dQw4w9WgXcQ-3f9a2c`. All three inputs are in job.json and never change, so the key
+/// e.g. `yt-dQw4w9WgXcQ-edaaa1`. All three inputs are in job.json and never change, so the key
 /// survives a wiped database, where the integer id starts over. `created` is hashed as written,
 /// not reparsed: another spelling of the same instant would give another key.
 pub fn job_key(platform: Platform, source_id: &str, created: &str) -> String {
