@@ -341,16 +341,24 @@ pub(super) struct Tally {
 }
 
 /// The sections with their replies merged in. Replies belong to the sections with text, in
-/// order, as they were sent.
-pub(super) fn apply(sections: &[Section], replies: Vec<String>) -> (Vec<Section>, Tally) {
+/// order, as they were sent; one that failed validation twice holds the line saying why.
+pub(super) fn apply(sections: &[Section], replies: Vec<super::Reply>) -> (Vec<Section>, Tally) {
     let (mut replies, mut tally) = (replies.into_iter(), Tally::default());
     let punctuated = sections
         .iter()
         .map(|section| {
             let mut section = section.clone();
             if section.has_text() {
-                let reply = replies.next().unwrap_or_default();
+                let reply = replies.next().unwrap_or_else(|| Ok(String::new()));
                 let at = pipeline::clock(section.start_ms);
+                let reply = match reply {
+                    Ok(reply) => reply,
+                    Err(why) => {
+                        tally.kept += 1;
+                        tally.log.push(format!("[{at}] kept as transcribed: {why}"));
+                        return section;
+                    }
+                };
                 match merge(&section.text, &reply) {
                     Some(merged) => {
                         tally.corrected += merged.corrected();

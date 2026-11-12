@@ -150,21 +150,23 @@ fn footnotes_are_translated_without_their_lead() {
     assert_eq!(note.text, "All code is at ⟦0⟧.");
     // A reply with a full-width colon and the URL moved to the end still renders the lead first.
     let reply = r#"{"segments":[{"id":"1","text":"：全部代码见下方链接 ⟦0⟧"}]}"#;
-    let translated = note.restore(&check(reply, std::slice::from_ref(&note)).unwrap()[0]);
+    let checked = check(reply, std::slice::from_ref(&note)).unwrap();
+    let translated = note.restore(checked[0].as_ref().unwrap());
     let only_note = [Block {
         lead: blocks[2].lead.clone(),
         text: blocks[2].text.clone(),
         keep: false,
     }];
     assert_eq!(
-        render_arxiv(&only_note, vec![translated]),
+        render_arxiv(&only_note, vec![Some(translated)]),
         "[^1]: ：全部代码见下方链接 https://example.org/gan\n"
     );
     // References in the body are placeholders, and dropping one fails validation.
     let body = [protect(&blocks[1].text, Pipeline::Arxiv)];
     assert_eq!(body[0].text, "Code is public⟦0⟧.");
     let dropped = r#"{"segments":[{"id":"1","text":"代码已公开。"}]}"#;
-    assert!(check(dropped, &body).unwrap_err().contains("⟦0⟧"));
+    let problem = check(dropped, &body).unwrap().remove(0).unwrap_err();
+    assert_eq!(problem, "id 1 缺少占位符 ⟦0⟧");
 }
 
 #[tokio::test]
@@ -415,7 +417,10 @@ fn consecutive_marker_lines_all_lead_the_block() {
             (false, "", "   - Inner text.\n3. Step three."),
         ]
     );
-    let translated = vec!["1. 第一步。".into(), "   - 内层文字。\n3. 第三步。".into()];
+    let translated = vec![
+        Some("1. 第一步。".into()),
+        Some("   - 内层文字。\n3. 第三步。".into()),
+    ];
     let out = render_arxiv(&blocks, translated);
     assert_eq!(
         out,
@@ -480,7 +485,7 @@ fn a_lone_marker_renders_directly_above_its_block() {
     let translated = blocks
         .iter()
         .filter(|b| !b.keep)
-        .map(|b| b.text.to_uppercase())
+        .map(|b| Some(b.text.to_uppercase()))
         .collect();
     let md = render_arxiv(&blocks, translated);
     let want = concat!(
@@ -651,7 +656,7 @@ fn speech_gets_no_placeholders() {
 fn round_trip(text: &str, pipeline: Pipeline) -> String {
     let part = [protect(text, pipeline)];
     let reply = to_payload(part.iter().map(|s| s.text.as_str()));
-    part[0].restore(&check(&reply, &part).unwrap()[0])
+    part[0].restore(check(&reply, &part).unwrap()[0].as_ref().unwrap())
 }
 
 #[test]
@@ -667,14 +672,15 @@ fn literal_placeholder_brackets_cannot_forge_a_placeholder() {
 }
 
 #[test]
-fn check_rejects_bad_replies_with_feedback() {
+fn a_reply_unusable_as_a_whole_is_rejected_with_feedback() {
     let part = [
         protect("Use `x` here.", Pipeline::Arxiv),
         protect("Plain.", Pipeline::Arxiv),
     ];
     let ok = r#"{"segments":[{"id":"1","text":"这里用 ⟦0⟧。"},{"id":"2","text":"简单。"}]}"#;
-    assert_eq!(check(ok, &part).unwrap(), ["这里用 ⟦0⟧。", "简单。"]);
-    assert!(check(&format!("```json\n{ok}\n```"), &part).is_ok());
+    let texts = [Ok("这里用 ⟦0⟧。".to_owned()), Ok("简单。".to_owned())];
+    assert_eq!(check(ok, &part).unwrap(), texts);
+    assert_eq!(check(&format!("```json\n{ok}\n```"), &part).unwrap(), texts);
     let cases = [
         ("not json", "JSON"),
         (r#"{"segments":[{"id":"1","text":"⟦0⟧"}]}"#, "应有 2 个"),
@@ -682,23 +688,63 @@ fn check_rejects_bad_replies_with_feedback() {
             r#"{"segments":[{"id":"2","text":"⟦0⟧"},{"id":"1","text":"a"}]}"#,
             "id 应为",
         ),
-        (
-            r#"{"segments":[{"id":"1","text":"没有占位符"},{"id":"2","text":"a"}]}"#,
-            "⟦0⟧",
-        ),
-        (
-            r#"{"segments":[{"id":"1","text":"⟦0⟧⟦0⟧"},{"id":"2","text":"a"}]}"#,
-            "⟦0⟧",
-        ),
-        (
-            r#"{"segments":[{"id":"1","text":"⟦0⟧"},{"id":"2","text":" "}]}"#,
-            "为空",
-        ),
     ];
     for (reply, needle) in cases {
         let problem = check(reply, &part).unwrap_err();
         assert!(problem.contains(needle), "{reply}: {problem}");
     }
+}
+
+/// The sentence of chunk 14 that failed job 30: the reply wrote the unit after both numbers.
+const MICROSECONDS: &str = "For one QP and 16 KiB messages, spraying increases goodput from \
+    92.2 to 323.5 Gb/s, a $3.51\\times$ improvement, while reducing mean network completion from \
+    1.534 to 0.642 $\\mu$s (58.2%). The 16 KiB workload remains at 323.5 Gb/s with two and four \
+    QPs, exceeding the corresponding fixed-path results by $2.81\\times$.";
+
+#[test]
+fn a_placeholder_may_repeat_but_none_may_be_missing_or_unknown() {
+    let seg = protect(MICROSECONDS, Pipeline::Arxiv);
+    assert_eq!(seg.spans, ["$3.51\\times$", "$\\mu$", "$2.81\\times$"]);
+    let part = std::slice::from_ref(&seg);
+    let reply = |text: &str| to_payload([text].into_iter());
+    let repeated = "对于一个 QP 和 16 KiB 消息,包喷洒将吞吐从 92.2 Gb/s 提高到 323.5 Gb/s,\
+        即 ⟦0⟧ 的提升,同时将平均网络完成时间从 1.534 ⟦1⟧s 降至 0.642 ⟦1⟧s(58.2%)。\
+        16 KiB 工作负载在两个和四个 QP 下仍保持 323.5 Gb/s,比相应的固定路径结果高出 ⟦2⟧。";
+    let checked = check(&reply(repeated), part).unwrap();
+    assert_eq!(checked, [Ok(repeated.to_owned())]);
+    // Each repeat restores to the same original.
+    assert!(
+        seg.restore(repeated)
+            .contains("从 1.534 $\\mu$s 降至 0.642 $\\mu$s"),
+        "{}",
+        seg.restore(repeated)
+    );
+    let problems = [
+        ("从 1.534 降至 0.642 ⟦1⟧s,提升 ⟦0⟧。", "id 1 缺少占位符 ⟦2⟧"),
+        (
+            "提升 ⟦0⟧ ⟦1⟧ ⟦2⟧ ⟦3⟧ ⟦12⟧。",
+            "id 1 含有输入里没有的占位符 ⟦3⟧ ⟦12⟧",
+        ),
+        ("只有中文。", "id 1 缺少占位符 ⟦0⟧ ⟦1⟧ ⟦2⟧"),
+        (" ", "id 1 的 text 为空"),
+    ];
+    for (text, want) in problems {
+        let checked = check(&reply(text), part).unwrap();
+        assert_eq!(checked, [Err(want.to_owned())], "{text}");
+    }
+    // A segment with a problem leaves the others of its chunk usable.
+    let part = [
+        protect("Use `x` here.", Pipeline::Arxiv),
+        protect("Plain.", Pipeline::Arxiv),
+    ];
+    let reply = r#"{"segments":[{"id":"1","text":"没有占位符"},{"id":"2","text":"简单。"}]}"#;
+    assert_eq!(
+        check(reply, &part).unwrap(),
+        [
+            Err("id 1 缺少占位符 ⟦0⟧".to_owned()),
+            Ok("简单。".to_owned())
+        ]
+    );
 }
 
 fn arxiv(original: &str) -> Fixture {
@@ -1100,6 +1146,99 @@ async fn invalid_reply_is_asked_again_once() {
     );
     assert_eq!(fx.calls().len(), 2);
     assert_eq!(fs::read_dir(cache_dir(&fx)).unwrap().count(), 0);
+}
+
+/// About 280 letters of English, enough for detection.
+const FILLER: &str = "The router assigns each token to two experts and adds their outputs. \
+    The router assigns each token to two experts and adds their outputs. \
+    The router assigns each token to two experts and adds their outputs. \
+    The router assigns each token to two experts and adds their outputs.";
+
+#[tokio::test]
+async fn a_segment_failing_twice_keeps_its_original_and_the_rest_is_translated() {
+    let paper = format!(
+        "# Method\n\nWe set `alpha` to $0.5$ FAKE_UNPLACED. {FILLER}\n\nThen `beta` follows. {FILLER}\n"
+    );
+    let fx = arxiv(&paper);
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    // The fake drops the placeholders of the marked block twice and appends " (zh)" to the rest.
+    let want = format!(
+        "# Method (zh)\n\nWe set `alpha` to $0.5$ FAKE_UNPLACED. {FILLER}\n\n\
+         Then `beta` follows. {FILLER} (zh)\n"
+    );
+    assert_eq!(
+        fs::read_to_string(out.join("translation.md")).unwrap(),
+        want
+    );
+    let meta = meta(&out);
+    assert_eq!(meta["translated"], MetaValue::Bool(true));
+    assert_eq!(meta["untranslated_blocks"], MetaValue::Int(1));
+    let calls = fx.calls();
+    assert_eq!(calls.len(), 2);
+    let reask = calls[1]["prompt"].as_str().unwrap();
+    assert!(
+        reask.contains(&format!(
+            "{FEEDBACK_MARKER}\n上一次输出没有通过校验:id 2 缺少占位符 ⟦0⟧ ⟦1⟧。"
+        )),
+        "{reask}"
+    );
+    // Only a reply valid in every segment is cached: a retry asks again.
+    assert_eq!(fs::read_dir(cache_dir(&fx)).unwrap().count(), 0);
+
+    // The job.log line of the kept block names the chunk, the id and the reason.
+    let job = pipeline::read_job(fx.job_dir()).unwrap();
+    let segments = arxiv_segments(&paper);
+    let chunks = chunk(&segments, CHUNK_CHARS);
+    let replies = ask_all(&with_cache(&fx), &job, PROMPT, &segments, &chunks)
+        .await
+        .unwrap();
+    assert_eq!(
+        replies[1],
+        Err("chunk 1/1: id 2 缺少占位符 ⟦0⟧ ⟦1⟧".to_owned())
+    );
+    assert_eq!(
+        replies[2],
+        Ok(format!("Then `beta` follows. {FILLER} (zh)"))
+    );
+}
+
+#[tokio::test]
+async fn a_video_section_failing_twice_shows_its_original_alone() {
+    // Speech has no placeholders but for a literal ⟦, which the marked section carries.
+    let marked = format!("Bracket ⟦ here FAKE_UNPLACED. {FILLER}");
+    let sections = serde_json::json!([
+        {"start_ms": 0, "frames": [], "text": marked},
+        {"start_ms": 30000, "frames": [], "text": FILLER},
+    ]);
+    let fx = video(&sections, "en");
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let want = format!(
+        "## 00:00\n\n{}\n\n## 00:30\n\n{FILLER} (zh)\n\n> [!quote]- 原文\n> {FILLER}\n",
+        escape_markdown(&marked)
+    );
+    assert_eq!(fs::read_to_string(out.join("transcript.md")).unwrap(), want);
+    assert_eq!(meta(&out)["untranslated_blocks"], MetaValue::Int(1));
+    assert_eq!(fx.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn a_chinese_section_failing_twice_is_kept_as_transcribed() {
+    let marked = format!("这里有括号 ⟦ FAKE_UNPLACED {}", long_section(0));
+    let sections = serde_json::json!([{"start_ms": 0, "frames": [], "text": marked}]);
+    let fx = video(&sections, "zh");
+    let (out, result) = translate(&fx).await;
+    result.unwrap();
+    let transcript = fs::read_to_string(out.join("transcript.md")).unwrap();
+    assert_eq!(
+        transcript,
+        format!("## 00:00\n\n{}\n", escape_markdown(&marked))
+    );
+    let meta = meta(&out);
+    assert_eq!(meta["kept_original"], MetaValue::Int(1));
+    assert!(!meta.contains_key("untranslated_blocks"));
+    assert_eq!(fx.calls().len(), 2);
 }
 
 #[tokio::test]

@@ -1,12 +1,13 @@
 //! Chinese detection, chunking with placeholders, per-chunk cache, validation with one re-ask,
 //! and the two output layouts (arXiv translation.md, bilingual video transcript.md). A Chinese
 //! video gets the punctuation pass in punctuate.rs instead, over the same chunks and replies.
+//! A segment whose reply still fails after the re-ask keeps its original text.
 //! Rules: contract 1 "translate" in docs/contracts.md.
 
 mod punctuate;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     ops::Range,
     path::{Path, PathBuf},
@@ -151,8 +152,13 @@ pub(crate) async fn run_with(job_dir: &Path, out_dir: &Path, env: &Env) -> StepR
         meta.insert("reverted".into(), MetaValue::Int(tally.reverted as i64));
     } else {
         let (translated, source) = match subtitle_zh {
-            Some(texts) => (texts, "subtitle"),
-            None => (ask_all(env, &job, PROMPT, &segments, &chunks).await?, "ai"),
+            Some(texts) => (texts.into_iter().map(Some).collect(), "subtitle"),
+            None => {
+                let replies = ask_all(env, &job, PROMPT, &segments, &chunks).await?;
+                let kept = replies.iter().filter(|reply| reply.is_err()).count();
+                meta.insert("untranslated_blocks".into(), MetaValue::Int(kept as i64));
+                (log_kept(replies), "ai")
+            }
         };
         let (name, body) = match job.pipeline {
             Pipeline::Arxiv => ("translation", render_arxiv(&blocks, translated)),
@@ -209,15 +215,19 @@ fn chinese_subtitle(
     Ok(Some(with_text.map(|(_, text)| text).collect()))
 }
 
-/// Restored replies to `prompt` for every segment, chunk by chunk: translations, or the
-/// punctuated transcript.
+/// A segment's restored reply, or the job.log line saying why it keeps its original text: the
+/// chunk, the id in it and what the reply after the re-ask got wrong.
+type Reply = Result<String, String>;
+
+/// Replies to `prompt` for every segment, chunk by chunk: translations, or the punctuated
+/// transcript.
 async fn ask_all(
     env: &Env,
     job: &JobSpec,
     prompt: &str,
     segments: &[Segment],
     chunks: &[Range<usize>],
-) -> Result<Vec<String>, StepFailure> {
+) -> Result<Vec<Reply>, StepFailure> {
     let cache = env
         .iter()
         .find(|(k, _)| k == "FLORI_CACHE_DIR")
@@ -234,9 +244,19 @@ async fn ask_all(
                 failure.message = format!("{label}: {}", failure.message);
                 failure
             })?;
-        replies.extend(part.iter().zip(texts).map(|(seg, text)| seg.restore(&text)));
+        replies.extend(part.iter().zip(texts).map(|(seg, text)| {
+            text.map(|text| seg.restore(&text))
+                .map_err(|problem| format!("{label}: {problem}"))
+        }));
     }
     Ok(replies)
+}
+
+/// The translations, None where a segment keeps its original; each of those gets its line in
+/// job.log.
+fn log_kept(replies: Vec<Reply>) -> Vec<Option<String>> {
+    let log = |line| eprintln!("{line}, original kept");
+    replies.into_iter().map(|r| r.map_err(log).ok()).collect()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -250,7 +270,10 @@ struct Item {
     text: String,
 }
 
-/// Reply texts of one chunk, still holding placeholders. Valid replies are cached under
+/// Reply texts of one chunk, still holding placeholders, or per segment what is wrong with it.
+/// A reply with any problem is asked again once with feedback. When the second reply is unusable
+/// as a whole the step fails; otherwise its valid segments are used and the others keep their
+/// original. Only replies valid in every segment are cached, under
 /// sha256(prompt, model, payload), so a retry only calls the AI for chunks not yet cached; a
 /// cached chunk leaves a line in job.log instead of a call record.
 async fn ask_chunk(
@@ -260,7 +283,7 @@ async fn ask_chunk(
     cache: &Path,
     part: &[Segment],
     label: &str,
-) -> Result<Vec<String>, StepFailure> {
+) -> Result<Vec<Result<String, String>>, StepFailure> {
     let payload = to_payload(part.iter().map(|seg| seg.text.as_str()));
     let model = &job.ai.model_translate;
     let mut hash = Sha256::new();
@@ -270,10 +293,10 @@ async fn ask_chunk(
     }
     let key: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
     let path = cache.join(format!("{key}.json"));
-    if let Some(texts) = fs::read_to_string(&path)
+    let cached = fs::read_to_string(&path)
         .ok()
-        .and_then(|t| check(&t, part).ok())
-    {
+        .and_then(|t| check(&t, part).ok());
+    if let Some(texts) = cached.filter(|texts| texts.iter().all(Result::is_ok)) {
         eprintln!("{label}: cached reply {}, no AI call", &key[..12]);
         return Ok(texts);
     }
@@ -288,8 +311,15 @@ async fn ask_chunk(
     )
     .await?;
     let texts = match check(&reply, part) {
-        Ok(texts) => texts,
-        Err(problem) => {
+        Ok(texts) if texts.iter().all(Result::is_ok) => texts,
+        first => {
+            let problem = match first {
+                Err(problem) => problem,
+                Ok(texts) => {
+                    let problems: Vec<String> = texts.into_iter().filter_map(Result::err).collect();
+                    problems.join("; ")
+                }
+            };
             let feedback = format!(
                 "{FEEDBACK_MARKER}\n上一次输出没有通过校验:{problem}。请修正后重新输出完整 JSON。\n"
             );
@@ -299,9 +329,11 @@ async fn ask_chunk(
                 .map_err(|p| StepFailure::retry(format!("reply failed validation twice: {p}")))?
         }
     };
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, to_payload(texts.iter().map(String::as_str)))?;
-    fs::rename(&tmp, &path)?;
+    if texts.iter().all(Result::is_ok) {
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, to_payload(texts.iter().flatten().map(String::as_str)))?;
+        fs::rename(&tmp, &path)?;
+    }
     Ok(texts)
 }
 
@@ -316,8 +348,9 @@ fn to_payload<'a>(texts: impl Iterator<Item = &'a str>) -> String {
     serde_json::to_string(&Payload { segments }).expect("strings always serialize")
 }
 
-/// Same ids in the same order, no empty text, and every placeholder exactly once.
-fn check(reply: &str, part: &[Segment]) -> Result<Vec<String>, String> {
+/// A reply usable as a whole is JSON with the chunk's ids in the same order. Then per segment its
+/// text, or what is wrong with it: [`check_text`].
+fn check(reply: &str, part: &[Segment]) -> Result<Vec<Result<String, String>>, String> {
     let mut body = reply.trim();
     if body.starts_with("```") {
         body = body.split_once('\n').map_or("", |(_, rest)| rest);
@@ -334,27 +367,40 @@ fn check(reply: &str, part: &[Segment]) -> Result<Vec<String>, String> {
         if item.id != id {
             return Err(format!("第 {id} 个 segment 的 id 应为 \"{id}\""));
         }
-        if item.text.trim().is_empty() {
-            return Err(format!("id {id} 的 text 为空"));
-        }
-        let mut found: Vec<usize> = pieces(&item.text)
-            .into_iter()
-            .filter_map(|p| match p {
-                Piece::Mark(n) => Some(n),
-                Piece::Text(_) => None,
-            })
-            .collect();
-        found.sort_unstable();
-        if found != (0..seg.spans.len()).collect::<Vec<_>>() {
-            let want: Vec<String> = (0..seg.spans.len()).map(|n| format!("⟦{n}⟧")).collect();
-            return Err(format!(
-                "id {id} 必须恰好各含一次占位符 [{}]",
-                want.join(" ")
-            ));
-        }
-        texts.push(item.text);
+        texts.push(check_text(item.text, seg).map_err(|problem| format!("id {id} {problem}")));
     }
     Ok(texts)
+}
+
+/// Text that is not empty, holds every placeholder of its segment and no other. A placeholder
+/// may come back more than once and restores to the same span each time, as a unit written
+/// after both numbers of "from 1.534 to 0.642 $\mu$s".
+fn check_text(text: String, seg: &Segment) -> Result<String, String> {
+    if text.trim().is_empty() {
+        return Err("的 text 为空".into());
+    }
+    let found: BTreeSet<usize> = pieces(&text)
+        .into_iter()
+        .filter_map(|p| match p {
+            Piece::Mark(n) => Some(n),
+            Piece::Text(_) => None,
+        })
+        .collect();
+    let marks = |ns: Vec<usize>| {
+        let marks: Vec<String> = ns.into_iter().map(|n| format!("⟦{n}⟧")).collect();
+        marks.join(" ")
+    };
+    let unknown: Vec<usize> = found.range(seg.spans.len()..).copied().collect();
+    if !unknown.is_empty() {
+        return Err(format!("含有输入里没有的占位符 {}", marks(unknown)));
+    }
+    let missing: Vec<usize> = (0..seg.spans.len())
+        .filter(|n| !found.contains(n))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("缺少占位符 {}", marks(missing)));
+    }
+    Ok(text)
 }
 
 /// Translatable text with inline formulas, code, links, images and citations swapped for ⟦n⟧.
@@ -728,16 +774,18 @@ fn chunk(segments: &[Segment], limit: usize) -> Vec<Range<usize>> {
     chunks
 }
 
-fn render_arxiv(blocks: &[Block], translated: Vec<String>) -> String {
+/// Translated blocks in place of the others; None keeps a block's original text.
+fn render_arxiv(blocks: &[Block], translated: Vec<Option<String>>) -> String {
     let mut translated = translated.into_iter();
     let parts: Vec<String> = blocks
         .iter()
         .map(|b| {
             let text = if b.keep {
-                b.text.clone()
+                None
             } else {
-                translated.next().unwrap_or_default()
+                translated.next().flatten()
             };
+            let text = text.unwrap_or_else(|| b.text.clone());
             b.lead.clone() + &text
         })
         .collect();
@@ -746,8 +794,9 @@ fn render_arxiv(blocks: &[Block], translated: Vec<String>) -> String {
 
 /// Per section: time heading, key frames, Chinese, then the original folded in a callout. Both
 /// texts are escaped like video-frames' transcript.md, so speech never turns into markup.
-fn render_video(sections: &[Section], translated: Vec<String>) -> String {
-    let mut translated = translated.into_iter();
+/// A section without Chinese, None or empty, shows its original alone.
+fn render_video(sections: &[Section], translated: Vec<Option<String>>) -> String {
+    let mut translated = translated.into_iter().map(Option::unwrap_or_default);
     let mut out = String::new();
     for section in sections {
         out.push_str(&format!("## {}\n\n", pipeline::clock(section.start_ms)));

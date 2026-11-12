@@ -540,19 +540,22 @@ fn sections_take_their_merged_replies_and_are_counted() {
         section(60_000, &[], "一度扶赢3个亿 菜单"),
         section(90_000, &[], "最终离场"),
         section(120_000, &[], "后来"),
+        section(150_000, &[], "再后来"),
     ];
     // Replies only exist for the sections with text, in order.
     let replies = vec![
-        "福建老哥，坐庄".to_owned(),
-        "一度浮盈3个亿，拆单。".to_owned(),
-        "最终，离场。".to_owned(),
-        "另一段话。".to_owned(),
+        Ok("福建老哥，坐庄".to_owned()),
+        Ok("一度浮盈3个亿，拆单。".to_owned()),
+        Ok("最终，离场。".to_owned()),
+        Ok("另一段话。".to_owned()),
+        // Failed validation twice: it comes with the reason instead of a reply.
+        Err("chunk 1/1: id 5 的 text 为空".to_owned()),
     ];
     let (punctuated, tally) = apply(&sections, replies);
     assert_eq!(
         tally,
         Tally {
-            kept: 1,
+            kept: 2,
             corrected: 2,
             reverted: 1,
             log: vec![
@@ -561,6 +564,7 @@ fn sections_take_their_merged_replies_and_are_counted() {
                 // Only the units that differ: 单 is the same on both sides.
                 r#"[01:00] reverted "菜" -> "拆""#.into(),
                 "[02:00] kept as transcribed: the reply is no copy of it".into(),
+                "[02:30] kept as transcribed: chunk 1/1: id 5 的 text 为空".into(),
             ],
         }
     );
@@ -572,6 +576,7 @@ fn sections_take_their_merged_replies_and_are_counted() {
             section(60_000, &[], "一度浮盈3个亿，菜单。"),
             section(90_000, &[], "最终，离场。"),
             section(120_000, &[], "后来"),
+            section(150_000, &[], "再后来"),
         ]
     );
 }
