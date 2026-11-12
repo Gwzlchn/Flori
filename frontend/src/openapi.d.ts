@@ -349,6 +349,12 @@ export interface components {
         /** @enum {string} */
         JobStatus: "queued" | "running" | "succeeded" | "failed" | "canceled";
         JobSummary: {
+            /**
+             * @description Uploader of a video, or a paper's authors joined with ", ". This and the next three are
+             *     set when publish succeeds; null before that, when the source did not say, and on jobs
+             *     published before these fields existed.
+             */
+            author?: string | null;
             /** Format: int64 */
             collection_id?: number | null;
             created: string;
@@ -358,8 +364,15 @@ export interface components {
              */
             current_exit_code?: number | null;
             current_step?: null | components["schemas"]["StepName"];
+            /** @description The note's one-line summary, as in its frontmatter. */
+            description?: string | null;
             /** Format: int64 */
             domain_id: number;
+            /**
+             * Format: int64
+             * @description Video length.
+             */
+            duration_ms?: number | null;
             /**
              * Format: int64
              * @description Integer primary key: the `{id}` of every job endpoint and the name of `jobs/<id>/`.
@@ -373,6 +386,8 @@ export interface components {
             job_key: string;
             pipeline: components["schemas"]["Pipeline"];
             platform: components["schemas"]["Platform"];
+            /** @description Date the source was published, `YYYY-MM-DD`. */
+            published?: string | null;
             source_id: string;
             status: components["schemas"]["JobStatus"];
             title?: string | null;

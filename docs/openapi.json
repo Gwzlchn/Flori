@@ -1292,6 +1292,13 @@
           "updated"
         ],
         "properties": {
+          "author": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Uploader of a video, or a paper's authors joined with \", \". This and the next three are\nset when publish succeeds; null before that, when the source did not say, and on jobs\npublished before these fields existed."
+          },
           "collection_id": {
             "type": [
               "integer",
@@ -1321,9 +1328,24 @@
               }
             ]
           },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The note's one-line summary, as in its frontmatter."
+          },
           "domain_id": {
             "type": "integer",
             "format": "int64"
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Video length."
           },
           "id": {
             "type": "integer",
@@ -1339,6 +1361,13 @@
           },
           "platform": {
             "$ref": "#/components/schemas/Platform"
+          },
+          "published": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Date the source was published, `YYYY-MM-DD`."
           },
           "source_id": {
             "type": "string"

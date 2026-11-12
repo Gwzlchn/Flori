@@ -268,9 +268,22 @@ async fn step_success_and_job_output_commit_together() {
             .await
             .unwrap()
     );
+    let (job, _) = get_job(&db, id).await.unwrap().unwrap();
+    assert_eq!(
+        (job.author, job.published, job.duration_ms, job.description),
+        (None, None, None, None),
+        "nothing before publish"
+    );
     start_attempt(&db, id, 4).await.unwrap();
+    let note = Published {
+        vault_path: "flori/ml/x/".into(),
+        author: Some("A. Author, B. Author".into()),
+        published: Some("2024-01-08".into()),
+        duration_ms: None,
+        description: Some("一句话。".into()),
+    };
     assert!(
-        step_succeeded(&db, id, 4, Some("Later"), Some("flori/ml/x/"))
+        step_succeeded(&db, id, 4, Some("Later"), Some(&note))
             .await
             .unwrap()
     );
@@ -278,6 +291,10 @@ async fn step_success_and_job_output_commit_together() {
     assert_eq!(
         (job.title.as_deref(), vault_path.as_deref()),
         (Some("Paper"), Some("flori/ml/x/"))
+    );
+    assert_eq!(
+        (job.author, job.published, job.duration_ms, job.description),
+        (note.author, note.published, None, note.description)
     );
     assert!(
         !step_succeeded(&db, id, 4, None, None).await.unwrap(),

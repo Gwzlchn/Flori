@@ -753,6 +753,49 @@ async fn detail_merges_manifests_and_builds_the_obsidian_link() {
 }
 
 #[tokio::test]
+async fn the_list_carries_what_the_note_list_shows_once_published() {
+    let app = app().await;
+    let ml = app.domain("ml").await;
+    let cfg = &app.state.config;
+    let fetched = json!({"title": "Talk", "files": {}, "assets": [], "meta": {
+        "uploader": " 3Blue1Brown ", "published": "2024-04-01", "duration_ms": 1_612_000,
+        "tags": ["math"],
+    }});
+    let published = json!({"title": null, "files": {}, "assets": [], "meta": {
+        "vault_path": "flori/ml/unsorted/2026-11-08-yt-dQw4w9WgXcQ", "note_file": "Talk.md",
+        "description": "注意力如何工作。",
+    }});
+    fake(cfg, 1, "video-fetch.json", &fetched.to_string());
+    fake(cfg, 1, "publish.json", &published.to_string());
+    fake(cfg, 1, "publish", "hang");
+    let submit = json!({"url": "https://youtu.be/dQw4w9WgXcQ", "domain_id": ml});
+    let (_, job) = app.post("/api/jobs", submit).await;
+    assert_eq!(job["author"], Value::Null);
+    let hanging = || app.job_dir(1).join("fake/publish.pid").exists();
+    wait_for("publish to start", hanging).await;
+    // Fetch is done, but the row only learns about the note when publish succeeds.
+    let (_, list) = app.get("/api/jobs").await;
+    assert_eq!(
+        (&list[0]["author"], &list[0]["published"]),
+        (&Value::Null, &Value::Null)
+    );
+    app.post("/api/jobs/1/cancel", json!(null)).await;
+    fake(cfg, 1, "publish", "0");
+    app.post("/api/jobs/1/retry", json!(null)).await;
+    wait_status(&app.state.db, 1, JobStatus::Succeeded).await;
+    let (_, list) = app.get("/api/jobs").await;
+    let want = json!({
+        "author": "3Blue1Brown", "published": "2024-04-01", "duration_ms": 1_612_000,
+        "description": "注意力如何工作。",
+    });
+    for (key, value) in want.as_object().unwrap() {
+        assert_eq!(&list[0][key], value, "{key}");
+    }
+    let (_, detail) = app.get("/api/jobs/1").await;
+    assert_eq!(detail["job"]["description"], "注意力如何工作。");
+}
+
+#[tokio::test]
 async fn a_punctuated_chinese_video_says_so_on_its_translate_step() {
     let app = app().await;
     let ml = app.domain("ml").await;

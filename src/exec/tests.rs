@@ -766,3 +766,41 @@ async fn database_write_failures_do_not_spin() {
         JobStatus::Queued
     );
 }
+
+#[test]
+fn a_published_paper_lists_its_authors_and_a_bare_manifest_lists_nothing() {
+    use crate::ai::tests::{Fixture, job_spec};
+    let fx = Fixture::new(Pipeline::Arxiv, AiTool::Claude);
+    let job = job_spec(Pipeline::Arxiv, AiTool::Claude);
+    let mut publish = Manifest::default();
+    assert_eq!(published(&job, fx.job_dir(), &publish), None, "no path");
+    let path = MetaValue::Text("flori/ml/unsorted/x".into());
+    publish.meta.insert("vault_path".into(), path);
+    // The fetch step left nothing readable: the note still gets its path.
+    let bare = published(&job, fx.job_dir(), &publish).unwrap();
+    let want = Published {
+        vault_path: "flori/ml/unsorted/x".into(),
+        ..Published::default()
+    };
+    assert_eq!(bare, want);
+    let authors = vec!["A. Author".to_owned(), "B. Author".to_owned()];
+    let meta = [
+        ("authors", MetaValue::List(authors)),
+        ("published", MetaValue::Text("2024-01-08".into())),
+        // Not a paper's field, and not a positive length either.
+        ("duration_ms", MetaValue::Int(0)),
+        ("uploader", MetaValue::Text("someone".into())),
+    ];
+    fx.step(1, StepName::ArxivFetch, Some("T"), &[], &[], &meta);
+    let text = MetaValue::Text("  ".into());
+    publish.meta.insert("description".into(), text);
+    let listed = published(&job, fx.job_dir(), &publish).unwrap();
+    let want = Published {
+        vault_path: "flori/ml/unsorted/x".into(),
+        author: Some("A. Author, B. Author".into()),
+        published: Some("2024-01-08".into()),
+        duration_ms: None,
+        description: None,
+    };
+    assert_eq!(listed, want);
+}

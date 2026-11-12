@@ -265,6 +265,16 @@ pub struct JobSummary {
     pub translate: TranslateMode,
     pub status: JobStatus,
     pub title: Option<String>,
+    /// Uploader of a video, or a paper's authors joined with ", ". This and the next three are
+    /// set when publish succeeds; null before that, when the source did not say, and on jobs
+    /// published before these fields existed.
+    pub author: Option<String>,
+    /// Date the source was published, `YYYY-MM-DD`.
+    pub published: Option<String>,
+    /// Video length.
+    pub duration_ms: Option<i64>,
+    /// The note's one-line summary, as in its frontmatter.
+    pub description: Option<String>,
     /// Step running now, or the step that failed or was canceled.
     pub current_step: Option<StepName>,
     /// Exit code of `current_step`; 30 means credentials expired.

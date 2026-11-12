@@ -203,7 +203,8 @@ pub async fn set_feed(
 /// The current step is the first one running, failed or canceled; `current_exit_code` is its
 /// exit code (30 = credentials expired).
 const JOB: &str = "SELECT jobs.id, pipeline, platform, source_id, url, domain_id, collection_id, \
-    translate, jobs.status, title, created, updated, vault_path, \
+    translate, jobs.status, title, author, published, duration_ms, description, created, updated, \
+    vault_path, \
     cur.name AS current_step, cur.exit_code AS current_exit_code FROM jobs \
     LEFT JOIN steps cur ON cur.job_id = jobs.id AND cur.seq = (SELECT min(seq) FROM steps \
     WHERE job_id = jobs.id AND status IN ('running', 'failed', 'canceled'))";
@@ -531,7 +532,18 @@ pub async fn fail_job(db: &SqlitePool, id: i64, error: &str) -> sqlx::Result<()>
     end_job(db, id, JobStatus::Failed).await
 }
 
-/// running -> succeeded, together with the job's first title and publish's `vault_path`, in one
+/// What a succeeded publish step leaves on its job: where the note is, and the columns the note
+/// list shows without opening any manifest.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Published {
+    pub vault_path: String,
+    pub author: Option<String>,
+    pub published: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub description: Option<String>,
+}
+
+/// running -> succeeded, together with the job's first title and what publish left, in one
 /// transaction so a crash cannot keep a finished step without its output. False when the HTTP
 /// layer already moved the step.
 pub async fn step_succeeded(
@@ -539,7 +551,7 @@ pub async fn step_succeeded(
     job_id: i64,
     seq: u32,
     title: Option<&str>,
-    vault_path: Option<&str>,
+    published: Option<&Published>,
 ) -> sqlx::Result<bool> {
     let now = now();
     let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
@@ -555,16 +567,26 @@ pub async fn step_succeeded(
     if done.rows_affected() == 0 {
         return Ok(false);
     }
-    sqlx::query(
-        "UPDATE jobs SET title = ifnull(title, ?), vault_path = ifnull(?, vault_path), \
-         updated = ? WHERE id = ?",
-    )
-    .bind(title)
-    .bind(vault_path)
-    .bind(&now)
-    .bind(job_id)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("UPDATE jobs SET title = ifnull(title, ?), updated = ? WHERE id = ?")
+        .bind(title)
+        .bind(&now)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(note) = published {
+        sqlx::query(
+            "UPDATE jobs SET vault_path = ?, author = ?, published = ?, duration_ms = ?, \
+             description = ? WHERE id = ?",
+        )
+        .bind(&note.vault_path)
+        .bind(&note.author)
+        .bind(&note.published)
+        .bind(note.duration_ms)
+        .bind(&note.description)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     Ok(true)
 }

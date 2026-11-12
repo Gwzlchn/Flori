@@ -2,7 +2,7 @@
 //! timeouts, line-by-line job.log, env whitelist, cancel, and recovery on start.
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -24,10 +24,10 @@ use tokio::{
 use crate::{
     Config,
     api::{JobStatus, StepStatus},
-    db,
+    db::{self, Published},
     pipeline::{
-        AiTool, JobSpec, MetaValue, Platform, Resource, StepName, StepProgram, StepSpec, read_job,
-        read_manifest, step_dir_name,
+        self, AiTool, JobSpec, Manifest, MetaValue, Pipeline, Platform, Resource, StepName,
+        StepProgram, StepSpec, read_job, read_manifest, step_dir_name,
     },
 };
 
@@ -410,14 +410,12 @@ async fn run_step(
             Stop::Exited(Some(0)) => match read_manifest(&tmp) {
                 Ok(manifest) => {
                     fs::rename(&tmp, &dir)?;
-                    let vault_path = match manifest.meta.get("vault_path") {
-                        Some(MetaValue::Text(path)) if spec.name == StepName::Publish => {
-                            Some(path.as_str())
-                        }
+                    let published = match spec.name {
+                        StepName::Publish => published(job, job_dir, &manifest),
                         _ => None,
                     };
                     let title = manifest.title.as_deref();
-                    db::step_succeeded(&inner.db, job_id, seq, title, vault_path).await?;
+                    db::step_succeeded(&inner.db, job_id, seq, title, published.as_ref()).await?;
                     return Ok(End::Succeeded);
                 }
                 // Contract 1: exit 0 without a usable manifest counts as exit 20.
@@ -449,6 +447,48 @@ async fn run_step(
         }
     }
     Ok(End::Failed)
+}
+
+/// What the job row keeps of a published note: publish's own meta and the source facts of the
+/// fetch step. None when publish did not report a vault path. A fetch manifest that cannot be
+/// read only leaves its columns empty; the note is in the vault either way.
+fn published(job: &JobSpec, job_dir: &Path, publish: &Manifest) -> Option<Published> {
+    fn text(meta: &BTreeMap<String, MetaValue>, key: &str) -> Option<String> {
+        match meta.get(key) {
+            Some(MetaValue::Text(value)) if !value.trim().is_empty() => {
+                Some(value.trim().to_owned())
+            }
+            _ => None,
+        }
+    }
+    let fetch = match job.pipeline {
+        Pipeline::Video => StepName::VideoFetch,
+        Pipeline::Arxiv => StepName::ArxivFetch,
+    };
+    let source = pipeline::find_step(job_dir, fetch)
+        .ok()
+        .flatten()
+        .and_then(|dir| read_manifest(&dir).ok())
+        .map(|manifest| manifest.meta)
+        .unwrap_or_default();
+    let author = match source.get("authors") {
+        Some(MetaValue::List(names)) if !names.is_empty() => Some(names.join(", ")),
+        _ => text(&source, "uploader"),
+    };
+    let duration_ms = match source.get("duration_ms") {
+        Some(MetaValue::Int(ms)) if *ms > 0 => Some(*ms),
+        _ => None,
+    };
+    let Some(MetaValue::Text(vault_path)) = publish.meta.get("vault_path") else {
+        return None;
+    };
+    Some(Published {
+        vault_path: vault_path.clone(),
+        author,
+        published: text(&source, "published"),
+        duration_ms,
+        description: text(&publish.meta, "description"),
+    })
 }
 
 fn remove_dir(path: &Path) -> io::Result<()> {
