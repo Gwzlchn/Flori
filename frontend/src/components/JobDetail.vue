@@ -192,6 +192,16 @@ async function act(action: "retry" | "cancel"): Promise<void> {
   watchJob();
 }
 
+// A timestamp clicked far down the note: bring the player back into view so the moment is seen,
+// not only heard. Seeking before the metadata has loaded is kept by the browser as the start time.
+function seek(at: number): void {
+  const element = player.value;
+  if (!element) return;
+  element.currentTime = at;
+  void element.play().catch(() => undefined);
+  element.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
 async function load(path: string): Promise<void> {
   if (texts.value.has(path) || !detail.value) return;
   const response = await fetch(fileUrl(detail.value.preview_base, path));
@@ -290,7 +300,7 @@ onBeforeUnmount(() => {
           <p v-if="!current" class="empty">笔记生成后在这里预览。</p>
           <p v-else-if="!texts.has(current.path)" class="empty">加载中…</p>
           <p v-else-if="texts.get(current.path) === null" class="error">文件加载失败。</p>
-          <MarkdownView v-else :source="texts.get(current.path) ?? ''" :base="detail.preview_base" :assets="detail.assets" />
+          <MarkdownView v-else :source="texts.get(current.path) ?? ''" :base="detail.preview_base" :assets="detail.assets" :seekable="Boolean(video)" @seek="seek" />
         </section>
         <section class="card">
           <details @toggle="openLog">

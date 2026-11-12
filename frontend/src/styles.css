@@ -113,7 +113,7 @@ input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var
 
 .head { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
 .detail { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 14px; align-items: start; }
-.video { display: block; width: 100%; max-height: 70vh; padding: 0; background: #111; }
+.video { display: block; width: 100%; max-height: 70vh; padding: 0; background: #111; scroll-margin-top: 66px; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); }
 .tabs a { padding: 8px 12px; border-bottom: 2px solid transparent; color: var(--muted); font-weight: 600; text-decoration: none; white-space: nowrap; }
 .tabs a:hover { color: var(--ink); }
@@ -168,6 +168,8 @@ details[open] > .fold { margin-bottom: 10px; }
 .markdown pre code { padding: 0; background: transparent; }
 .markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 .markdown th, .markdown td { padding: 5px 9px; border: 1px solid var(--line); }
+.stamp { padding: 0 4px; border: 0; border-radius: 4px; color: var(--brand-dark); background: var(--brand-soft); cursor: pointer; font-family: var(--mono); font-size: .88em; font-weight: inherit; line-height: inherit; }
+.stamp:hover { color: #fff; background: var(--brand); }
 .frontmatter { margin-bottom: 12px; color: var(--muted); font-size: 12px; }
 .frontmatter summary { cursor: pointer; }
 .frontmatter pre { margin: 6px 0 0; padding: 8px; overflow-x: auto; border-radius: 5px; background: var(--surface-soft); font-family: var(--mono); }
